@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+
+{% block title %}Residencies | Tresorapide{% endblock %}
+
+{% block content %}
+    <section class="card">
+        <div class="section-heading">
+            <div>
+                <h1>Residency history</h1>
+                <p class="text-muted">Track who lived where, and when, for audit-stable reimbursement snapshots.</p>
+            </div>
+            <div class="quick-links">
+                <a class="button-link" href="{% url 'members:index' %}">Back to member dashboard</a>
+                <a class="button-link" href="{% url 'members:residency-create' %}">New residency</a>
+            </div>
+        </div>
+    </section>
+
+    <section class="card">
+        <form method="get" class="filter-bar">
+            <label class="filter-field">
+                <span>Search</span>
+                <input type="text" name="q" value="{{ query }}" placeholder="Member or apartment">
+            </label>
+            <label class="filter-field">
+                <span>Scope</span>
+                <select name="scope">
+                    <option value="">All residencies</option>
+                    <option value="current"{% if scope == "current" %} selected{% endif %}>Current only</option>
+                    <option value="ended"{% if scope == "ended" %} selected{% endif %}>Ended only</option>
+                </select>
+            </label>
+            <div class="filter-actions">
+                <button type="submit" class="button-link">Apply filter</button>
+                <a class="button-link" href="{% url 'members:residency-list' %}">Reset</a>
+            </div>
+        </form>
+
+        {% if residencies %}
+            <div class="table-responsive">
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>Member</th>
+                            <th>Apartment</th>
+                            <th>Start date</th>
+                            <th>End date</th>
+                            <th>Status</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for residency in residencies %}
+                            <tr>
+                                <td>{{ residency.member.display_name }}</td>
+                                <td>{{ residency.apartment.display_name }}</td>
+                                <td>{{ residency.start_date|date:"M j, Y" }}</td>
+                                <td>{% if residency.end_date %}{{ residency.end_date|date:"M j, Y" }}{% else %}—{% endif %}</td>
+                                <td>
+                                    {% if residency.is_current %}
+                                        <span class="badge badge-approved">Current</span>
+                                    {% else %}
+                                        <span class="badge badge-archived">Ended</span>
+                                    {% endif %}
+                                </td>
+                                <td><a href="{% url 'members:residency-edit' residency.pk %}">Edit</a></td>
+                            </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        {% else %}
+            <p class="empty-state">No residencies match the current filters.</p>
+        {% endif %}
+    </section>
+{% endblock %}

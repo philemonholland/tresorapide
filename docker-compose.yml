@@ -1,0 +1,61 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-tresorapide}
+      POSTGRES_USER: ${POSTGRES_USER:-tresorapide}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-tresorapide}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-tresorapide} -d ${POSTGRES_DB:-tresorapide}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "${POSTGRES_PUBLISHED_PORT:-127.0.0.1:5432}:5432"
+
+  web:
+    build:
+      context: .
+    restart: unless-stopped
+    init: true
+    environment:
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-django-insecure-local-dev-key-change-me}
+      DJANGO_DEBUG: ${DJANGO_DEBUG:-False}
+      DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1,web}
+      DJANGO_CSRF_TRUSTED_ORIGINS: ${DJANGO_CSRF_TRUSTED_ORIGINS:-http://localhost:8000,http://127.0.0.1:8000}
+      DJANGO_TIME_ZONE: ${DJANGO_TIME_ZONE:-America/Toronto}
+      DJANGO_SERVE_MEDIA: ${DJANGO_SERVE_MEDIA:-True}
+      DJANGO_SERVE_STATIC: ${DJANGO_SERVE_STATIC:-True}
+      DJANGO_STATIC_ROOT: ${DJANGO_STATIC_ROOT:-/data/static}
+      DJANGO_MEDIA_ROOT: ${DJANGO_MEDIA_ROOT:-/data/media}
+      DATABASE_ENGINE: ${DATABASE_ENGINE:-django.db.backends.postgresql}
+      POSTGRES_DB: ${POSTGRES_DB:-tresorapide}
+      POSTGRES_USER: ${POSTGRES_USER:-tresorapide}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-tresorapide}
+      POSTGRES_HOST: ${POSTGRES_HOST:-db}
+      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+      POSTGRES_CONN_MAX_AGE: ${POSTGRES_CONN_MAX_AGE:-60}
+      POSTGRES_CONNECT_TIMEOUT: ${POSTGRES_CONNECT_TIMEOUT:-5}
+      DB_WAIT_TIMEOUT: ${DB_WAIT_TIMEOUT:-60}
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/ready/', timeout=5)"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 25s
+    ports:
+      - "${APP_PUBLISHED_PORT:-8000}:8000"
+    volumes:
+      - static_data:/data/static
+      - media_data:/data/media
+
+volumes:
+  postgres_data:
+  static_data:
+  media_data:

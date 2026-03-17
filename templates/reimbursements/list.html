@@ -1,0 +1,153 @@
+{% extends "base.html" %}
+
+{% block title %}{{ page_title }} | Tresorapide{% endblock %}
+
+{% block content %}
+    <section class="card">
+        <div class="section-heading">
+            <div>
+                <h1>{{ page_title }}</h1>
+                <p class="text-muted">{{ page_intro }}</p>
+            </div>
+            <div class="quick-links">
+                {% if can_manage %}
+                    <a class="button-link" href="{% url 'reimbursements:create' %}">New reimbursement</a>
+                {% endif %}
+                <a class="button-link" href="{{ archive_url }}">Archive &amp; void history</a>
+                <a class="button-link" href="{% url 'budget:list' %}">Budget summary</a>
+            </div>
+        </div>
+        <p>{{ transparency_note }}</p>
+        <div class="stat-grid compact-grid">
+            <article class="stat-card subtle-card">
+                <h3>{{ summary.reimbursement_count }}</h3>
+                <p>Visible records</p>
+            </article>
+            <article class="stat-card subtle-card">
+                <h3>{{ summary.archived_count }}</h3>
+                <p>Archived records</p>
+            </article>
+            <article class="stat-card subtle-card">
+                <h3>{{ summary.void_count }}</h3>
+                <p>Voided records</p>
+            </article>
+        </div>
+    </section>
+
+    <section class="card">
+        <form method="get" class="filter-bar">
+            <label class="filter-field">
+                <span>Search</span>
+                <input type="text" name="q" value="{{ current_query }}" placeholder="Reference, title, member, budget">
+            </label>
+            <label class="filter-field">
+                <span>Budget year</span>
+                <select name="year">
+                    <option value="">All years</option>
+                    {% for budget_year in budget_years %}
+                        <option value="{{ budget_year.pk }}"{% if current_year == budget_year.pk|stringformat:"s" %} selected{% endif %}>
+                            {{ budget_year.label }}
+                        </option>
+                    {% endfor %}
+                </select>
+            </label>
+            <label class="filter-field">
+                <span>Budget category</span>
+                <select name="category">
+                    <option value="">All categories</option>
+                    {% for category in budget_categories %}
+                        <option value="{{ category.pk }}"{% if current_category == category.pk|stringformat:"s" %} selected{% endif %}>
+                            {{ category.budget_year.label }} / {{ category.code }} - {{ category.name }}
+                        </option>
+                    {% endfor %}
+                </select>
+            </label>
+            <label class="filter-field">
+                <span>Status</span>
+                <select name="status">
+                    <option value="">All visible statuses</option>
+                    {% for status_value, status_label in status_choices %}
+                        <option value="{{ status_value }}"{% if current_status == status_value %} selected{% endif %}>
+                            {{ status_label }}
+                        </option>
+                    {% endfor %}
+                </select>
+            </label>
+            <div class="filter-actions">
+                <button type="submit" class="button-link">Apply filter</button>
+                <a class="button-link" href="{% url 'reimbursements:list' %}">Reset</a>
+            </div>
+        </form>
+
+        {% if reimbursements %}
+            <div class="table-responsive">
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>Reference</th>
+                            <th>Member</th>
+                            <th>Title</th>
+                            <th>Budget</th>
+                            <th>Status</th>
+                            <th>Expense date</th>
+                            <th>Requested</th>
+                            <th>Approved</th>
+                            <th>Receipts</th>
+                            <th>Archive notes</th>
+                            {% if can_manage %}
+                                <th>Actions</th>
+                            {% endif %}
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for reimbursement in reimbursements %}
+                            <tr>
+                                <td><a href="{% url 'reimbursements:detail' reimbursement.pk %}">{{ reimbursement.reference_code }}</a></td>
+                                <td>{{ reimbursement.member_name_snapshot }}</td>
+                                <td>{{ reimbursement.title }}</td>
+                                <td>{{ reimbursement.budget_year_label_snapshot }} / {{ reimbursement.budget_category_code_snapshot }}</td>
+                                <td><span class="badge badge-{{ reimbursement.status }}">{{ reimbursement.get_status_display }}</span></td>
+                                <td>{{ reimbursement.expense_date|date:"M j, Y" }}</td>
+                                <td>${{ reimbursement.amount_requested|floatformat:2 }}</td>
+                                <td>
+                                    {% if reimbursement.amount_approved is not None %}
+                                        ${{ reimbursement.amount_approved|floatformat:2 }}
+                                    {% else %}
+                                        —
+                                    {% endif %}
+                                </td>
+                                <td>{{ reimbursement.active_receipt_count }} active / {{ reimbursement.archived_receipt_count }} archived</td>
+                                <td>
+                                    {% if reimbursement.archived_at %}
+                                        Archived {{ reimbursement.archived_at|date:"M j, Y" }}
+                                    {% elif reimbursement.status == "void" %}
+                                        {{ reimbursement.void_reason|default:"Voided" }}
+                                    {% else %}
+                                        —
+                                    {% endif %}
+                                </td>
+                                {% if can_manage %}
+                                    <td>
+                                        <a href="{% url 'reimbursements:detail' reimbursement.pk %}">
+                                            {% if reimbursement.status == "submitted" %}Review{% else %}Open{% endif %}
+                                        </a>
+                                        {% if reimbursement.status == "draft" or reimbursement.status == "submitted" %}
+                                            <div class="text-muted">
+                                                <a href="{% url 'reimbursements:edit' reimbursement.pk %}">Edit</a>
+                                            </div>
+                                        {% endif %}
+                                        <div class="text-muted">
+                                            <a href="{% url 'reimbursements:pdf-download' reimbursement.pk %}">PDF</a>
+                                        </div>
+                                    </td>
+                                {% endif %}
+                            </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        {% else %}
+            <p class="empty-state">No reimbursements match the current visibility and filter settings.</p>
+        {% endif %}
+    </section>
+{% endblock %}

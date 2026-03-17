@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+
+{% block title %}Members | Tresorapide{% endblock %}
+
+{% block content %}
+    <section class="card">
+        <div class="section-heading">
+            <div>
+                <h1>Members</h1>
+                <p class="text-muted">Search and maintain co-op member records.</p>
+            </div>
+            <div class="quick-links">
+                <a class="button-link" href="{% url 'members:index' %}">Back to member dashboard</a>
+                <a class="button-link" href="{% url 'members:member-create' %}">New member</a>
+            </div>
+        </div>
+    </section>
+
+    <section class="card">
+        <form method="get" class="filter-bar">
+            <label class="filter-field">
+                <span>Search</span>
+                <input type="text" name="q" value="{{ query }}" placeholder="Name, email, or phone">
+            </label>
+            <label class="filter-field">
+                <span>Status</span>
+                <select name="activity">
+                    <option value="">All members</option>
+                    <option value="active"{% if activity == "active" %} selected{% endif %}>Active only</option>
+                    <option value="inactive"{% if activity == "inactive" %} selected{% endif %}>Inactive only</option>
+                </select>
+            </label>
+            <div class="filter-actions">
+                <button type="submit" class="button-link">Apply filter</button>
+                <a class="button-link" href="{% url 'members:member-list' %}">Reset</a>
+            </div>
+        </form>
+
+        {% if members %}
+            <div class="table-responsive">
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>Name</th>
+                            <th>Email</th>
+                            <th>Phone</th>
+                            <th>Status</th>
+                            <th>Residencies</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for member in members %}
+                            <tr>
+                                <td>{{ member.display_name }}</td>
+                                <td>{{ member.email|default:"—" }}</td>
+                                <td>{{ member.phone_number|default:"—" }}</td>
+                                <td>
+                                    {% if member.is_active %}
+                                        <span class="badge badge-approved">Active</span>
+                                    {% else %}
+                                        <span class="badge badge-archived">Inactive</span>
+                                    {% endif %}
+                                </td>
+                                <td>{{ member.current_residency_count }} current / {{ member.residency_count }} total</td>
+                                <td>
+                                    <a href="{% url 'members:member-edit' member.pk %}">Edit</a>
+                                    <div class="text-muted">
+                                        <a href="{% url 'members:residency-create' %}?member={{ member.pk }}">Add residency</a>
+                                    </div>
+                                </td>
+                            </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        {% else %}
+            <p class="empty-state">No members match the current filters.</p>
+        {% endif %}
+    </section>
+{% endblock %}

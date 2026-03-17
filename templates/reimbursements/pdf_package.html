@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>{{ reimbursement.reference_code }} package</title>
+    <style>
+        body {
+            font-family: Helvetica, Arial, sans-serif;
+            font-size: 11px;
+            color: #1f2a35;
+        }
+        h1, h2, h3 {
+            color: #123c66;
+            margin-bottom: 6px;
+        }
+        h1 {
+            font-size: 20px;
+            margin-top: 0;
+        }
+        h2 {
+            font-size: 14px;
+            margin-top: 18px;
+        }
+        p {
+            margin: 0 0 8px;
+            line-height: 1.4;
+        }
+        .meta-table, .receipt-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-bottom: 10px;
+        }
+        .meta-table td, .receipt-table td, .receipt-table th {
+            border: 1px solid #c7d3df;
+            padding: 6px;
+            vertical-align: top;
+        }
+        .receipt-table th {
+            background: #eef4fb;
+            text-align: left;
+        }
+        .label {
+            width: 28%;
+            font-weight: bold;
+            background: #f6f9fc;
+        }
+        .small-note {
+            color: #5f7081;
+            font-size: 9px;
+        }
+        .status {
+            font-weight: bold;
+            text-transform: uppercase;
+        }
+        .section {
+            margin-bottom: 14px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Reimbursement package</h1>
+    <p class="small-note">
+        Deterministically generated from archived reimbursement snapshots and current receipt archive metadata.
+    </p>
+
+    <table class="meta-table">
+        <tr>
+            <td class="label">Reference</td>
+            <td>{{ reimbursement.reference_code }}</td>
+            <td class="label">Status</td>
+            <td class="status">{{ reimbursement.get_status_display }}</td>
+        </tr>
+        <tr>
+            <td class="label">Title</td>
+            <td>{{ reimbursement.title }}</td>
+            <td class="label">Expense date</td>
+            <td>{{ reimbursement.expense_date|date:"Y-m-d" }}</td>
+        </tr>
+        <tr>
+            <td class="label">Requested amount</td>
+            <td>${{ reimbursement.amount_requested|floatformat:2 }}</td>
+            <td class="label">Approved amount</td>
+            <td>
+                {% if reimbursement.amount_approved is not None %}
+                    ${{ reimbursement.amount_approved|floatformat:2 }}
+                {% else %}
+                    Not approved
+                {% endif %}
+            </td>
+        </tr>
+    </table>
+
+    <h2>Purchaser and residency snapshot</h2>
+    <table class="meta-table">
+        <tr>
+            <td class="label">Purchaser</td>
+            <td>{{ member_name }}</td>
+            <td class="label">Email</td>
+            <td>{{ member_email|default:"Not recorded" }}</td>
+        </tr>
+        <tr>
+            <td class="label">Apartment snapshot</td>
+            <td>{{ apartment_display|default:"Not recorded" }}</td>
+            <td class="label">Residency snapshot</td>
+            <td>{{ residency_period }}</td>
+        </tr>
+    </table>
+
+    <h2>Budget coding snapshot</h2>
+    <table class="meta-table">
+        <tr>
+            <td class="label">Budget year</td>
+            <td>{{ budget_label }}</td>
+            <td class="label">Budget category</td>
+            <td>{{ budget_category_label }}</td>
+        </tr>
+    </table>
+
+    <h2>Validation record</h2>
+    <table class="meta-table">
+        <tr>
+            <td class="label">Receipt approver snapshot</td>
+            <td>{{ receipt_signer_name|default:"Not recorded" }}</td>
+            <td class="label">Approved at</td>
+            <td>{% if reimbursement.approved_at %}{{ reimbursement.approved_at|date:"Y-m-d H:i" }}{% else %}Not approved{% endif %}</td>
+        </tr>
+        <tr>
+            <td class="label">Signed receipt received</td>
+            <td>{% if reimbursement.signed_receipt_received_at %}Yes - {{ reimbursement.signed_receipt_received_at|date:"Y-m-d H:i" }}{% else %}No{% endif %}</td>
+            <td class="label">Signature verified</td>
+            <td>{% if reimbursement.signature_verified_at %}Yes - {{ reimbursement.signature_verified_at|date:"Y-m-d H:i" }}{% else %}No{% endif %}</td>
+        </tr>
+        <tr>
+            <td class="label">Voided at</td>
+            <td>{% if reimbursement.voided_at %}{{ reimbursement.voided_at|date:"Y-m-d H:i" }}{% else %}Not voided{% endif %}</td>
+            <td class="label">Void reason</td>
+            <td>{{ reimbursement.void_reason|default:"Not applicable" }}</td>
+        </tr>
+    </table>
+
+    <h2>Description and notes</h2>
+    <div class="section">
+        <p><strong>Description:</strong> {{ reimbursement.description|default:"No description provided." }}</p>
+        <p><strong>Notes:</strong> {{ reimbursement.notes|default:"No internal notes recorded." }}</p>
+    </div>
+
+    <h2>Receipt inventory</h2>
+    {% if active_receipts %}
+        <h3>Active receipts</h3>
+        <table class="receipt-table">
+            <thead>
+                <tr>
+                    <th>Filename</th>
+                    <th>Uploaded</th>
+                    <th>Type</th>
+                    <th>Size</th>
+                    <th>Checksum</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for receipt in active_receipts %}
+                    <tr>
+                        <td>{{ receipt.original_filename|default:"Unknown file" }}</td>
+                        <td>{{ receipt.created_at|date:"Y-m-d H:i" }}</td>
+                        <td>{{ receipt.content_type|default:"Unknown" }}</td>
+                        <td>{{ receipt.file_size_bytes|default:"Unknown" }}</td>
+                        <td>{{ receipt.sha256_checksum|default:"Unavailable" }}</td>
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    {% else %}
+        <p>No active receipts were attached when this package was generated.</p>
+    {% endif %}
+
+    {% if archived_receipts %}
+        <h3>Archived receipts</h3>
+        <table class="receipt-table">
+            <thead>
+                <tr>
+                    <th>Filename</th>
+                    <th>Archived</th>
+                    <th>Archive reason</th>
+                    <th>Checksum</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for receipt in archived_receipts %}
+                    <tr>
+                        <td>{{ receipt.original_filename|default:"Unknown file" }}</td>
+                        <td>{{ receipt.archived_at|date:"Y-m-d H:i" }}</td>
+                        <td>{{ receipt.archive_reason|default:"No reason recorded" }}</td>
+                        <td>{{ receipt.sha256_checksum|default:"Unavailable" }}</td>
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    {% endif %}
+</body>
+</html>

@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+
+{% block title %}{% if object %}Edit residency{% else %}New residency{% endif %} | Tresorapide{% endblock %}
+
+{% block content %}
+    <section class="card auth-card">
+        <div class="section-heading">
+            <div>
+                <h1>{% if object %}Edit residency{% else %}New residency{% endif %}</h1>
+                <p class="text-muted">Residency windows must stay chronological and non-overlapping for each member.</p>
+            </div>
+            <a class="button-link" href="{% url 'members:residency-list' %}">Back to residency history</a>
+        </div>
+        <form method="post" class="stack">
+            {% csrf_token %}
+            {{ form.non_field_errors }}
+            {% for field in form %}
+                <div class="form-row">
+                    <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+                    {{ field }}
+                    {% if field.help_text %}
+                        <small>{{ field.help_text }}</small>
+                    {% endif %}
+                    {{ field.errors }}
+                </div>
+            {% endfor %}
+            <button type="submit">{% if object %}Save residency{% else %}Create residency{% endif %}</button>
+        </form>
+    </section>
+{% endblock %}

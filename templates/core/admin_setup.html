@@ -1,0 +1,101 @@
+{% extends "base.html" %}
+
+{% block title %}Setup hub | Tresorapide{% endblock %}
+
+{% block content %}
+    <section class="card">
+        <div class="section-heading">
+            <div>
+                <h1>Admin setup hub</h1>
+                <p class="text-muted">
+                    Read-only setup guidance with direct links into Django admin where user and data
+                    management belongs.
+                </p>
+            </div>
+            <span class="badge badge-role">Admin</span>
+        </div>
+        {% if can_access_django_admin %}
+            <p>You can open the linked Django admin pages directly from this screen.</p>
+        {% else %}
+            <p>
+                Your app role allows access to this setup hub, but full Django admin management still
+                requires staff or superuser access.
+            </p>
+        {% endif %}
+    </section>
+
+    <section class="stat-grid">
+        {% for role_count in role_counts %}
+            <article class="card stat-card">
+                <h2>{{ role_count.count }}</h2>
+                <p>Active {{ role_count.label|lower }} account{{ role_count.count|pluralize }}</p>
+            </article>
+        {% endfor %}
+    </section>
+
+    <section class="card">
+        <div class="section-heading">
+            <h2>Management links</h2>
+            <a href="/admin/">Open Django admin</a>
+        </div>
+        <div class="stat-grid compact-grid">
+            {% for link in management_links %}
+                <article class="stat-card subtle-card">
+                    <h3><a href="{{ link.url }}">{{ link.label }}</a></h3>
+                    <p>{{ link.description }}</p>
+                </article>
+            {% endfor %}
+        </div>
+    </section>
+
+    <section class="card">
+        <h2>Setup checklist</h2>
+        <div class="stat-grid compact-grid">
+            {% for check in setup_checks %}
+                <article class="stat-card subtle-card">
+                    <h3>{{ check.count }}</h3>
+                    <p><strong>{{ check.label }}</strong></p>
+                    <p class="text-muted">{{ check.hint }}</p>
+                </article>
+            {% endfor %}
+        </div>
+    </section>
+
+    <section class="card">
+        <h2>Latest users</h2>
+        {% if latest_users %}
+            <div class="table-responsive">
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>Username</th>
+                            <th>Role</th>
+                            <th>Email</th>
+                            <th>Status</th>
+                            <th>Joined</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for user in latest_users %}
+                            <tr>
+                                <td>{{ user.username }}</td>
+                                <td>{{ user.get_role_display }}</td>
+                                <td>{{ user.email|default:"—" }}</td>
+                                <td>
+                                    {% if user.is_active %}
+                                        <span class="badge badge-approved">Active</span>
+                                    {% else %}
+                                        <span class="badge badge-archived">Inactive</span>
+                                    {% endif %}
+                                </td>
+                                <td>{{ user.date_joined|date:"M j, Y H:i" }}</td>
+                            </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        {% else %}
+            <p class="empty-state">No users have been created yet.</p>
+        {% endif %}
+    </section>
+{% endblock %}

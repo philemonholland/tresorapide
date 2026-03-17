@@ -1,0 +1,128 @@
+{% extends "base.html" %}
+
+{% block title %}{{ budget_year.label }} budget | Tresorapide{% endblock %}
+
+{% block content %}
+    <section class="card">
+        <div class="section-heading">
+            <div>
+                <h1>{{ budget_year.label }}</h1>
+                <p class="text-muted">
+                    {{ budget_year.start_date|date:"M j, Y" }} - {{ budget_year.end_date|date:"M j, Y" }}
+                </p>
+            </div>
+            <div class="quick-links">
+                <a class="button-link" href="{% url 'budget:list' %}">All budgets</a>
+                {% if can_manage %}
+                    <a class="button-link" href="{% url 'budget:year-edit' budget_year.pk %}">Edit year</a>
+                    <a class="button-link" href="{% url 'budget:category-create' budget_year.pk %}">New category</a>
+                {% endif %}
+            </div>
+        </div>
+        <p>{{ transparency_note }}</p>
+        <div class="stat-grid compact-grid">
+            <article class="stat-card subtle-card">
+                <h3>${{ budget_year.planned_total|floatformat:2 }}</h3>
+                <p>Planned total</p>
+            </article>
+            <article class="stat-card subtle-card">
+                <h3>${{ budget_year.approved_reimbursement_total|floatformat:2 }}</h3>
+                <p>Approved total</p>
+            </article>
+            <article class="stat-card subtle-card">
+                <h3>${{ budget_year.paid_reimbursement_total|floatformat:2 }}</h3>
+                <p>Paid total</p>
+            </article>
+            <article class="stat-card subtle-card">
+                <h3>${{ budget_year.remaining_total|floatformat:2 }}</h3>
+                <p>Remaining planned amount</p>
+            </article>
+        </div>
+    </section>
+
+    <section class="card">
+        <h2>Categories</h2>
+        {% if categories %}
+            <div class="table-responsive">
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>Category</th>
+                            <th>Planned</th>
+                            <th>Approved</th>
+                            <th>Paid</th>
+                            <th>Remaining</th>
+                            <th>Visible records</th>
+                            <th>Archive / void</th>
+                            {% if can_manage %}
+                                <th>Actions</th>
+                            {% endif %}
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for category in categories %}
+                            <tr>
+                                <td>
+                                    <a href="{% url 'budget:category-detail' category.pk %}">
+                                        {{ category.code }} - {{ category.name }}
+                                    </a>
+                                </td>
+                                <td>${{ category.planned_amount|floatformat:2 }}</td>
+                                <td>${{ category.approved_reimbursement_total|floatformat:2 }}</td>
+                                <td>${{ category.paid_reimbursement_total|floatformat:2 }}</td>
+                                <td>${{ category.remaining_amount|floatformat:2 }}</td>
+                                <td>{{ category.visible_reimbursement_count }}</td>
+                                <td>{{ category.archived_reimbursement_count }} archived / {{ category.void_reimbursement_count }} void</td>
+                                {% if can_manage %}
+                                    <td><a href="{% url 'budget:category-edit' category.pk %}">Edit</a></td>
+                                {% endif %}
+                            </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        {% else %}
+            <p class="empty-state">No categories are configured for this year yet.</p>
+        {% endif %}
+    </section>
+
+    <section class="card">
+        <h2>Recent visible reimbursements</h2>
+        {% if recent_reimbursements %}
+            <div class="table-responsive">
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>Reference</th>
+                            <th>Category</th>
+                            <th>Status</th>
+                            <th>Expense date</th>
+                            <th>Requested</th>
+                            <th>Approved</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for reimbursement in recent_reimbursements %}
+                            <tr>
+                                <td><a href="{% url 'reimbursements:detail' reimbursement.pk %}">{{ reimbursement.reference_code }}</a></td>
+                                <td>{{ reimbursement.budget_category_code_snapshot }}</td>
+                                <td><span class="badge badge-{{ reimbursement.status }}">{{ reimbursement.get_status_display }}</span></td>
+                                <td>{{ reimbursement.expense_date|date:"M j, Y" }}</td>
+                                <td>${{ reimbursement.amount_requested|floatformat:2 }}</td>
+                                <td>
+                                    {% if reimbursement.amount_approved is not None %}
+                                        ${{ reimbursement.amount_approved|floatformat:2 }}
+                                    {% else %}
+                                        —
+                                    {% endif %}
+                                </td>
+                            </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        {% else %}
+            <p class="empty-state">No visible reimbursements exist for this budget year yet.</p>
+        {% endif %}
+    </section>
+{% endblock %}

@@ -1,0 +1,239 @@
+{% extends "base.html" %}
+
+{% block title %}{% if show_dashboard %}Dashboard | Tresorapide{% else %}Home | Tresorapide{% endif %}{% endblock %}
+
+{% block content %}
+    {% if show_dashboard %}
+        <section class="card">
+            <div class="section-heading">
+                <div>
+                    <h1>Dashboard</h1>
+                    <p class="text-muted">
+                        Read-only transparency across budgets, reimbursement history, and audit visibility
+                        appropriate to your role.
+                    </p>
+                </div>
+                <span class="badge badge-role">{{ request.user.get_role_display }}</span>
+            </div>
+            <p>{{ transparency_note }}</p>
+            <div class="quick-links">
+                <a class="button-link" href="{% url 'budget:list' %}">Budget summary</a>
+                <a class="button-link" href="{% url 'reimbursements:list' %}">Reimbursement history</a>
+                <a class="button-link" href="{% url 'reimbursements:archive' %}">Archive &amp; void history</a>
+                {% if request.user.can_manage_financials %}
+                    <a class="button-link" href="{% url 'audits:list' %}">Audit log</a>
+                {% endif %}
+                {% if request.user.is_app_admin %}
+                    <a class="button-link" href="{% url 'admin-setup' %}">Setup hub</a>
+                {% endif %}
+            </div>
+        </section>
+
+        <section class="stat-grid">
+            <article class="card stat-card">
+                <h2>{{ budget_year_count }}</h2>
+                <p>Budget year{{ budget_year_count|pluralize }}</p>
+            </article>
+            <article class="card stat-card">
+                <h2>{{ transparency_summary.reimbursement_count }}</h2>
+                <p>Visible reimbursement record{{ transparency_summary.reimbursement_count|pluralize }}</p>
+            </article>
+            <article class="card stat-card">
+                <h2>${{ transparency_summary.approved_total|floatformat:2 }}</h2>
+                <p>Approved total</p>
+            </article>
+            <article class="card stat-card">
+                <h2>${{ transparency_summary.paid_total|floatformat:2 }}</h2>
+                <p>Paid total</p>
+            </article>
+        </section>
+
+        <section class="card">
+            <div class="section-heading">
+                <h2>Budget summary</h2>
+                <a href="{% url 'budget:list' %}">Open full budget view</a>
+            </div>
+            {% if budget_years %}
+                <div class="table-responsive">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Year</th>
+                                <th>Status</th>
+                                <th>Categories</th>
+                                <th>Planned</th>
+                                <th>Approved</th>
+                                <th>Paid</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for budget_year in budget_years %}
+                                <tr>
+                                    <td>
+                                        <a href="{% url 'budget:year-detail' budget_year.pk %}">{{ budget_year.label }}</a>
+                                        <div class="text-muted">
+                                            {{ budget_year.start_date|date:"M j, Y" }} - {{ budget_year.end_date|date:"M j, Y" }}
+                                        </div>
+                                    </td>
+                                    <td>
+                                        {% if budget_year.is_closed %}
+                                            <span class="badge badge-archived">Closed</span>
+                                        {% else %}
+                                            <span class="badge badge-approved">Open</span>
+                                        {% endif %}
+                                    </td>
+                                    <td>{{ budget_year.category_count }}</td>
+                                    <td>${{ budget_year.planned_total|floatformat:2 }}</td>
+                                    <td>${{ budget_year.approved_reimbursement_total|floatformat:2 }}</td>
+                                    <td>${{ budget_year.paid_reimbursement_total|floatformat:2 }}</td>
+                                </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            {% else %}
+                <p class="empty-state">No budget years are configured yet.</p>
+            {% endif %}
+        </section>
+
+        <section class="card">
+            <div class="section-heading">
+                <h2>Recent reimbursement activity</h2>
+                <a href="{% url 'reimbursements:list' %}">Browse all visible records</a>
+            </div>
+            {% if recent_reimbursements %}
+                <div class="table-responsive">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Reference</th>
+                                <th>Member</th>
+                                <th>Budget</th>
+                                <th>Status</th>
+                                <th>Expense date</th>
+                                <th>Requested</th>
+                                <th>Approved</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for reimbursement in recent_reimbursements %}
+                                <tr>
+                                    <td>
+                                        <a href="{% url 'reimbursements:detail' reimbursement.pk %}">
+                                            {{ reimbursement.reference_code }}
+                                        </a>
+                                    </td>
+                                    <td>{{ reimbursement.member_name_snapshot }}</td>
+                                    <td>{{ reimbursement.budget_year_label_snapshot }} / {{ reimbursement.budget_category_code_snapshot }}</td>
+                                    <td><span class="badge badge-{{ reimbursement.status }}">{{ reimbursement.get_status_display }}</span></td>
+                                    <td>{{ reimbursement.expense_date|date:"M j, Y" }}</td>
+                                    <td>${{ reimbursement.amount_requested|floatformat:2 }}</td>
+                                    <td>
+                                        {% if reimbursement.amount_approved is not None %}
+                                            ${{ reimbursement.amount_approved|floatformat:2 }}
+                                        {% else %}
+                                            —
+                                        {% endif %}
+                                    </td>
+                                </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            {% else %}
+                <p class="empty-state">No visible reimbursements are available yet.</p>
+            {% endif %}
+        </section>
+
+        {% if recent_audit_entries %}
+            <section class="card">
+                <div class="section-heading">
+                    <h2>Recent audit activity</h2>
+                    <a href="{% url 'audits:list' %}">Open audit log</a>
+                </div>
+                <div class="table-responsive">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>When</th>
+                                <th>Action</th>
+                                <th>Summary</th>
+                                <th>Actor</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for audit_entry in recent_audit_entries %}
+                                <tr>
+                                    <td>{{ audit_entry.created_at|date:"M j, Y H:i" }}</td>
+                                    <td>{{ audit_entry.action }}</td>
+                                    <td>
+                                        <a href="{% url 'audits:detail' audit_entry.pk %}">{{ audit_entry.summary }}</a>
+                                    </td>
+                                    <td>{{ audit_entry.actor|default:"System" }}</td>
+                                </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+        {% endif %}
+
+        {% if admin_summary %}
+            <section class="card">
+                <div class="section-heading">
+                    <h2>Admin setup snapshot</h2>
+                    <a href="{{ admin_summary.setup_url }}">Open setup hub</a>
+                </div>
+                <div class="stat-grid compact-grid">
+                    <article class="stat-card subtle-card">
+                        <h3>{{ admin_summary.user_count }}</h3>
+                        <p>Total user accounts</p>
+                    </article>
+                    <article class="stat-card subtle-card">
+                        <h3>{{ admin_summary.active_user_count }}</h3>
+                        <p>Active accounts</p>
+                    </article>
+                    <article class="stat-card subtle-card">
+                        <h3>{{ admin_summary.staff_user_count }}</h3>
+                        <p>Staff-enabled accounts</p>
+                    </article>
+                    <article class="stat-card subtle-card">
+                        <h3>{{ admin_summary.member_count }}</h3>
+                        <p>Members configured</p>
+                    </article>
+                    <article class="stat-card subtle-card">
+                        <h3>{{ admin_summary.apartment_count }}</h3>
+                        <p>Apartments configured</p>
+                    </article>
+                    <article class="stat-card subtle-card">
+                        <h3>{{ admin_summary.receipt_count }}</h3>
+                        <p>Receipt files in archive</p>
+                    </article>
+                </div>
+            </section>
+        {% endif %}
+    {% else %}
+        <section class="card">
+            <h1>Tresorapide foundation is ready</h1>
+            <p>
+                This local-network-oriented Django application is bootstrapped for a housing co-op treasurer,
+                with clear app boundaries for accounts, members, budget, reimbursements, and audits.
+            </p>
+            <p>Please sign in to access the role-aware dashboard and transparency views.</p>
+            <p>
+                <a class="button-link" href="{% url 'accounts:login' %}">Log in</a>
+            </p>
+        </section>
+
+        <section class="card">
+            <h2>Foundation highlights</h2>
+            <ul>
+                <li>Custom user model with app-level viewer, treasurer, and admin roles</li>
+                <li>Environment-driven settings with PostgreSQL support</li>
+                <li>Docker Compose stack for Django + PostgreSQL</li>
+                <li>Plain Django templates and forms for coherent server-rendered pages</li>
+                <li>Read-only transparency and audit browsing surfaces after sign-in</li>
+            </ul>
+        </section>
+    {% endif %}
+{% endblock %}

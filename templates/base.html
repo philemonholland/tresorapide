@@ -1,0 +1,71 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{% block title %}Tresorapide{% endblock %}</title>
+    <link rel="stylesheet" href="{% static 'css/site.css' %}">
+</head>
+<body>
+    {% url 'budget:list' as budget_url %}
+    {% url 'reimbursements:list' as reimbursements_url %}
+    {% url 'audits:list' as audits_url %}
+    {% url 'admin-setup' as admin_setup_url %}
+    {% url 'members:index' as members_url %}
+    <header class="site-header">
+        <div class="container header-layout">
+            <div>
+                <a class="brand" href="{% url 'home' %}">Tresorapide</a>
+                <p class="tagline">Housing co-op treasurer workspace</p>
+            </div>
+            <div class="header-actions">
+                <nav class="site-nav">
+                    <a href="{% url 'home' %}">{% if request.user.is_authenticated %}Dashboard{% else %}Home{% endif %}</a>
+                    {% if request.user.can_view_financials and budget_url %}
+                        <a href="{{ budget_url }}">Budgets</a>
+                    {% endif %}
+                    {% if request.user.can_view_financials and reimbursements_url %}
+                        <a href="{{ reimbursements_url }}">Reimbursements</a>
+                    {% endif %}
+                    {% if request.user.can_manage_financials and audits_url %}
+                        <a href="{{ audits_url }}">Audit log</a>
+                    {% endif %}
+                    {% if request.user.is_app_admin and admin_setup_url %}
+                        <a href="{{ admin_setup_url }}">Setup</a>
+                    {% endif %}
+                    {% if members_url and request.user.is_app_admin %}
+                        <a href="{{ members_url }}">Members</a>
+                    {% endif %}
+                    {% if request.user.is_staff or request.user.is_superuser %}
+                        <a href="/admin/">Django admin</a>
+                    {% endif %}
+                </nav>
+                <div class="user-nav">
+                    {% if request.user.is_authenticated %}
+                        <span class="nav-text">
+                            Signed in as {{ request.user.get_username }} ({{ request.user.get_role_display|default:"User" }})
+                        </span>
+                        <form action="{% url 'accounts:logout' %}" method="post">
+                            {% csrf_token %}
+                            <button type="submit">Log out</button>
+                        </form>
+                    {% else %}
+                        <a href="{% url 'accounts:login' %}">Log in</a>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </header>
+    <main class="container">
+        {% if messages %}
+            <ul class="messages">
+                {% for message in messages %}
+                    <li class="message {{ message.tags }}">{{ message }}</li>
+                {% endfor %}
+            </ul>
+        {% endif %}
+        {% block content %}{% endblock %}
+    </main>
+</body>
+</html>
