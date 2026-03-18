@@ -5,3 +5,5 @@ python-dotenv==1.0.1
 pytest==8.3.5
 pytest-django==4.10.0
 xhtml2pdf==0.2.17
+pytesseract==0.3.13
+Pillow==11.1.0

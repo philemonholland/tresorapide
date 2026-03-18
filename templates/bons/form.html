@@ -1,15 +1,17 @@
 {% extends "base.html" %}
 
-{% block title %}{% if is_create %}Nouveau bon de commande{% else %}Modifier BC {{ object.number }}{% endif %} | Tresorapide{% endblock %}
+{% block title %}{% if is_create %}Nouveau bon de commande{% elif is_complete_step %}Compléter BC {{ object.number }}{% else %}Modifier BC {{ object.number }}{% endif %} | Tresorapide{% endblock %}
 
 {% block content %}
     <section class="card">
         <div class="section-heading">
             <div>
-                <h1>{% if is_create %}Nouveau bon de commande{% else %}Modifier BC {{ object.number }}{% endif %}</h1>
+                <h1>{% if is_create %}Nouveau bon de commande{% elif is_complete_step %}Compléter BC {{ object.number }}{% else %}Modifier BC {{ object.number }}{% endif %}</h1>
                 <p class="text-muted">
                     {% if is_create %}
                         Le numéro sera attribué automatiquement.
+                    {% elif is_complete_step %}
+                        Étape 3 sur 3 — Complétez les détails du bon. Les montants ont été pré-remplis par l'OCR.
                     {% else %}
                         Numéro : {{ object.number }}
                     {% endif %}
@@ -52,7 +54,7 @@
                     {% endif %}
                 {% endfor %}
             </div>
-            <button type="submit" class="btn btn-primary">{% if is_create %}Créer le bon{% else %}Enregistrer les modifications{% endif %}</button>
+            <button type="submit" class="btn btn-primary">{% if is_create %}Créer le bon{% elif is_complete_step %}Soumettre pour validation{% else %}Enregistrer les modifications{% endif %}</button>
         </form>
     </section>
 {% endblock %}
