@@ -1,30 +1,21 @@
 {% extends "base.html" %}
 
-{% block title %}{% if object %}Edit apartment{% else %}New apartment{% endif %} | Tresorapide{% endblock %}
+{% block title %}{% if object %}Modifier l'appartement{% else %}Nouvel appartement{% endif %} | Tresorapide{% endblock %}
 
 {% block content %}
-    <section class="card auth-card">
+    <section class="card">
         <div class="section-heading">
             <div>
-                <h1>{% if object %}Edit apartment{% else %}New apartment{% endif %}</h1>
-                <p class="text-muted">Keep apartment labels stable for historical reimbursement snapshots.</p>
+                <h1>{% if object %}Modifier l'appartement{% else %}Nouvel appartement{% endif %}</h1>
+                <p class="text-muted">Identifiant et adresse de l'appartement.</p>
             </div>
-            <a class="button-link" href="{% url 'members:apartment-list' %}">Back to apartments</a>
+            <a class="button-link" href="{% url 'members:apartment-list' %}">Retour aux appartements</a>
         </div>
         <form method="post" class="stack">
             {% csrf_token %}
             {{ form.non_field_errors }}
-            {% for field in form %}
-                <div class="form-row">
-                    <label for="{{ field.id_for_label }}">{{ field.label }}</label>
-                    {{ field }}
-                    {% if field.help_text %}
-                        <small>{{ field.help_text }}</small>
-                    {% endif %}
-                    {{ field.errors }}
-                </div>
-            {% endfor %}
-            <button type="submit">{% if object %}Save apartment{% else %}Create apartment{% endif %}</button>
+            {% include "includes/form_field.html" %}
+            <button type="submit" class="btn btn-primary">{% if object %}Enregistrer{% else %}Créer l'appartement{% endif %}</button>
         </form>
     </section>
 {% endblock %}

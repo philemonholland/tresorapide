@@ -1,15 +1,21 @@
 {% extends "base.html" %}
 
-{% block title %}{% if object %}Modifier l'année budgétaire{% else %}Créer une année budgétaire{% endif %} | Tresorapide{% endblock %}
+{% block title %}{% if is_create %}Nouveau bon de commande{% else %}Modifier BC {{ object.number }}{% endif %} | Tresorapide{% endblock %}
 
 {% block content %}
     <section class="card">
         <div class="section-heading">
             <div>
-                <h1>{% if object %}Modifier l'année budgétaire{% else %}Créer une année budgétaire{% endif %}</h1>
-                <p class="text-muted">Configurer l'année budgétaire et ses paramètres.</p>
+                <h1>{% if is_create %}Nouveau bon de commande{% else %}Modifier BC {{ object.number }}{% endif %}</h1>
+                <p class="text-muted">
+                    {% if is_create %}
+                        Le numéro sera attribué automatiquement.
+                    {% else %}
+                        Numéro : {{ object.number }}
+                    {% endif %}
+                </p>
             </div>
-            <a class="button-link" href="{% url 'budget:year-list' %}">Retour aux budgets</a>
+            <a class="button-link" href="{% url 'bons:list' %}">Retour à la liste</a>
         </div>
         <form method="post" class="stack">
             {% csrf_token %}
@@ -29,10 +35,10 @@
                     </div>
                 {% endif %}
             {% endfor %}
-            <button type="button" class="collapsible-toggle" aria-expanded="false" aria-controls="detail-fields">
+            <button type="button" class="collapsible-toggle" aria-expanded="false" aria-controls="bon-detail-fields">
                 <span class="chevron">▶</span> Plus de détails
             </button>
-            <div id="detail-fields" class="collapsible-content">
+            <div id="bon-detail-fields" class="collapsible-content">
                 {% for field in form %}
                     {% if field.name in form.DETAIL_FIELDS %}
                         <div class="form-group {% if field.errors %}has-error{% endif %}">
@@ -46,7 +52,7 @@
                     {% endif %}
                 {% endfor %}
             </div>
-            <button type="submit" class="btn btn-primary">{% if object %}Enregistrer{% else %}Créer{% endif %}</button>
+            <button type="submit" class="btn btn-primary">{% if is_create %}Créer le bon{% else %}Enregistrer les modifications{% endif %}</button>
         </form>
     </section>
 {% endblock %}

@@ -1,30 +1,54 @@
 {% extends "base.html" %}
 
-{% block title %}{% if object %}Edit member{% else %}New member{% endif %} | Tresorapide{% endblock %}
+{% block title %}{% if object %}Modifier le membre{% else %}Nouveau membre{% endif %} | Tresorapide{% endblock %}
 
 {% block content %}
-    <section class="card auth-card">
+    <section class="card">
         <div class="section-heading">
             <div>
-                <h1>{% if object %}Edit member{% else %}New member{% endif %}</h1>
-                <p class="text-muted">Maintain contact information and active status for reimbursement workflows.</p>
+                <h1>{% if object %}Modifier le membre{% else %}Nouveau membre{% endif %}</h1>
+                <p class="text-muted">{% if object %}Modifier les informations du membre.{% else %}Remplir le prénom, nom et appartement pour créer un membre.{% endif %}</p>
             </div>
-            <a class="button-link" href="{% url 'members:member-list' %}">Back to members</a>
+            <a class="button-link" href="{% url 'members:member-list' %}">Retour aux membres</a>
         </div>
         <form method="post" class="stack">
             {% csrf_token %}
             {{ form.non_field_errors }}
             {% for field in form %}
-                <div class="form-row">
-                    <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+                {% if field.is_hidden %}
                     {{ field }}
-                    {% if field.help_text %}
-                        <small>{{ field.help_text }}</small>
-                    {% endif %}
-                    {{ field.errors }}
-                </div>
+                {% elif field.name in form.DETAIL_FIELDS %}
+                {% else %}
+                    <div class="form-group {% if field.errors %}has-error{% endif %}">
+                        <label for="{{ field.id_for_label }}">
+                            {{ field.label }}{% if field.field.required %} <span class="required">*</span>{% endif %}
+                        </label>
+                        {{ field }}
+                        {% if field.help_text %}<p class="help-text">{{ field.help_text }}</p>{% endif %}
+                        {% for error in field.errors %}<p class="error-text">{{ error }}</p>{% endfor %}
+                    </div>
+                {% endif %}
             {% endfor %}
-            <button type="submit">{% if object %}Save member{% else %}Create member{% endif %}</button>
+            {% if form.DETAIL_FIELDS %}
+            <button type="button" class="collapsible-toggle" aria-expanded="false" aria-controls="member-detail-fields">
+                <span class="chevron">▶</span> Plus de détails
+            </button>
+            <div id="member-detail-fields" class="collapsible-content">
+                {% for field in form %}
+                    {% if field.name in form.DETAIL_FIELDS %}
+                        <div class="form-group {% if field.errors %}has-error{% endif %}">
+                            <label for="{{ field.id_for_label }}">
+                                {{ field.label }}{% if field.field.required %} <span class="required">*</span>{% endif %}
+                            </label>
+                            {{ field }}
+                            {% if field.help_text %}<p class="help-text">{{ field.help_text }}</p>{% endif %}
+                            {% for error in field.errors %}<p class="error-text">{{ error }}</p>{% endfor %}
+                        </div>
+                    {% endif %}
+                {% endfor %}
+            </div>
+            {% endif %}
+            <button type="submit" class="btn btn-primary">{% if object %}Enregistrer{% else %}Créer le membre{% endif %}</button>
         </form>
     </section>
 {% endblock %}

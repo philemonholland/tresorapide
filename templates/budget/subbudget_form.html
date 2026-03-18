@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+
+{% block title %}{% if object %}Modifier le sous-budget{% else %}Créer un sous-budget{% endif %} | Tresorapide{% endblock %}
+
+{% block content %}
+    <section class="card">
+        <div class="section-heading">
+            <div>
+                <h1>{% if object %}Modifier le sous-budget{% else %}Créer un sous-budget{% endif %}</h1>
+                <p class="text-muted">{{ budget_year.label }} — {{ budget_year.house.code }}</p>
+            </div>
+            <a class="button-link" href="{% url 'budget:year-detail' budget_year.pk %}">Retour à l'année</a>
+        </div>
+        <form method="post" class="stack">
+            {% csrf_token %}
+            {{ form.non_field_errors }}
+            {% include "includes/form_field.html" %}
+            <button type="submit" class="btn btn-primary">{% if object %}Enregistrer{% else %}Créer{% endif %}</button>
+        </form>
+    </section>
+{% endblock %}

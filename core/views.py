@@ -1,12 +1,10 @@
 """Views for dashboard, setup, and API foundation pages."""
 from __future__ import annotations
 
-from decimal import Decimal
 from typing import Any
 
-from django.db import connections
-from django.db.models import Count, DecimalField, Q, Sum, Value
-from django.db.models.functions import Coalesce
+from django.db import connections, models
+from django.db.models import Count, Q
 from django.db.utils import DatabaseError
 from django.http import HttpResponse
 from django.urls import reverse
@@ -19,17 +17,6 @@ from rest_framework.views import APIView
 
 from accounts.access import AdminRequiredMixin, user_has_minimum_role
 from accounts.models import User
-from audits.models import AuditLogEntry
-from budget.models import BudgetYear
-from members.models import Apartment, Member
-from reimbursements.models import ReceiptFile, Reimbursement, ReimbursementStatus
-from reimbursements.queries import (
-    transparency_visibility_note,
-    visible_reimbursements_for_user,
-)
-
-MONEY_FIELD = DecimalField(max_digits=14, decimal_places=2)
-ZERO_MONEY = Value(Decimal("0.00"), output_field=MONEY_FIELD)
 
 
 class HomeView(TemplateView):
@@ -38,77 +25,57 @@ class HomeView(TemplateView):
     template_name = "core/home.html"
 
     def get_context_data(self, **kwargs: object) -> dict[str, object]:
-        """Add read-only dashboard context for authenticated users."""
-
         context = super().get_context_data(**kwargs)
         user = self.request.user
+        context["needs_initial_superuser"] = User.objects.count() == 0
+        context["first_superuser_command"] = (
+            'docker compose --env-file ".env" exec web python manage.py createsuperuser'
+        )
         context["show_dashboard"] = user_has_minimum_role(user, User.Role.VIEWER)
         if not context["show_dashboard"]:
             return context
 
-        visible_reimbursements = visible_reimbursements_for_user(user, with_receipt_counts=False)
-        budget_years = (
-            BudgetYear.objects.annotate(
-                category_count=Count("categories", distinct=True),
-                planned_total=Coalesce(
-                    Sum("categories__planned_amount"),
-                    ZERO_MONEY,
-                    output_field=MONEY_FIELD,
-                ),
-            )
-            .order_by("-start_date", "-id")
-        )
-        transparency_summary = visible_reimbursements.aggregate(
-            reimbursement_count=Count("id"),
-            archived_count=Count("id", filter=Q(archived_at__isnull=False)),
-            void_count=Count("id", filter=Q(status=ReimbursementStatus.VOID)),
-            approved_total=Coalesce(
-                Sum(
-                    "amount_approved",
-                    filter=Q(
-                        status__in=(
-                            ReimbursementStatus.APPROVED,
-                            ReimbursementStatus.PAID,
-                        )
-                    ),
-                ),
-                ZERO_MONEY,
-                output_field=MONEY_FIELD,
-            ),
-            paid_total=Coalesce(
-                Sum(
-                    "amount_approved",
-                    filter=Q(status=ReimbursementStatus.PAID),
-                ),
-                ZERO_MONEY,
-                output_field=MONEY_FIELD,
-            ),
-        )
-        context.update(
-            {
-                "budget_years": budget_years[:5],
-                "budget_year_count": budget_years.count(),
-                "transparency_summary": transparency_summary,
-                "recent_reimbursements": visible_reimbursements.order_by(
-                    "-expense_date",
-                    "-created_at",
-                    "-id",
-                )[:6],
-                "transparency_note": transparency_visibility_note(user),
-            }
-        )
+        from bons.models import BonDeCommande
+        from budget.models import BudgetYear, Expense
+        from members.models import Apartment, Member
 
-        if user_has_minimum_role(user, User.Role.TREASURER):
-            context["recent_audit_entries"] = AuditLogEntry.objects.select_related("actor")[:6]
+        house = getattr(user, "house", None)
 
+        budget_qs = BudgetYear.objects.select_related("house").order_by("-year")
+        bon_qs = BonDeCommande.objects.select_related("house", "sub_budget").order_by("-purchase_date")
+        expense_qs = Expense.objects.all()
+
+        if house and not user.is_gestionnaire:
+            budget_qs = budget_qs.filter(house=house)
+            bon_qs = bon_qs.filter(house=house)
+            expense_qs = expense_qs.filter(budget_year__house=house)
+
+        # Current (most recent open) budget year for the hero card
+        current_by = budget_qs.filter(is_closed=False).first()
+        context["current_budget_year"] = current_by
+
+        # Simple stats
+        total_budget = current_by.annual_budget_total if current_by else 0
+        total_spent = (
+            expense_qs.filter(budget_year=current_by).aggregate(
+                total=models.Sum("amount")
+            )["total"]
+            or 0
+        ) if current_by else 0
+        context["total_budget"] = total_budget
+        context["total_remaining"] = total_budget - total_spent
+        context["bon_count"] = bon_qs.filter(
+            budget_year=current_by
+        ).count() if current_by else bon_qs.count()
+        context["member_count"] = Member.objects.filter(is_active=True).count()
+
+        # Admin / Gestionnaire summary — shown below treasurer view
         if user_has_minimum_role(user, User.Role.ADMIN):
             context["admin_summary"] = {
                 "user_count": User.objects.count(),
                 "active_user_count": User.objects.filter(is_active=True).count(),
-                "staff_user_count": User.objects.filter(is_staff=True).count(),
                 "member_count": Member.objects.count(),
                 "apartment_count": Apartment.objects.count(),
-                "receipt_count": ReceiptFile.objects.count(),
                 "setup_url": reverse("admin-setup"),
             }
 
@@ -121,9 +88,12 @@ class AdminSetupView(AdminRequiredMixin, TemplateView):
     template_name = "core/admin_setup.html"
 
     def get_context_data(self, **kwargs: object) -> dict[str, object]:
-        """Provide setup summaries and admin links."""
-
         context = super().get_context_data(**kwargs)
+
+        from audits.models import AuditLogEntry
+        from budget.models import BudgetYear
+        from members.models import Member
+
         context["role_counts"] = [
             {
                 "label": label,
@@ -133,62 +103,62 @@ class AdminSetupView(AdminRequiredMixin, TemplateView):
         ]
         context["setup_checks"] = [
             {
-                "label": "Active app admins",
+                "label": "Administrateurs actifs",
                 "count": User.objects.filter(role=User.Role.ADMIN, is_active=True).count(),
-                "hint": "App admins can open the setup hub and review financial history.",
+                "hint": "Les administrateurs peuvent accéder au hub de configuration et consulter l'historique financier.",
             },
             {
-                "label": "Staff/superusers",
+                "label": "Staff / superutilisateurs",
                 "count": User.objects.filter(Q(is_staff=True) | Q(is_superuser=True)).count(),
-                "hint": "Staff access is needed for full Django admin management screens.",
+                "hint": "L'accès staff est nécessaire pour les écrans de gestion Django admin.",
             },
             {
-                "label": "Members configured",
+                "label": "Membres configurés",
                 "count": Member.objects.count(),
-                "hint": "Members and apartments support reimbursement history snapshots.",
+                "hint": "Les membres et appartements supportent l'historique des bons de commande.",
             },
             {
-                "label": "Budget years configured",
+                "label": "Années budgétaires configurées",
                 "count": BudgetYear.objects.count(),
-                "hint": "Budget years drive planned-versus-used reporting.",
+                "hint": "Les années budgétaires permettent le suivi prévu vs réalisé.",
             },
             {
-                "label": "Audit entries recorded",
+                "label": "Entrées d'audit enregistrées",
                 "count": AuditLogEntry.objects.count(),
-                "hint": "Audit history should grow as treasurer actions are performed.",
+                "hint": "L'historique d'audit devrait croître au fur et à mesure des actions du trésorier.",
             },
         ]
         context["latest_users"] = User.objects.order_by("-date_joined", "-id")[:12]
         context["management_links"] = [
             {
-                "label": "User accounts",
+                "label": "Comptes utilisateurs",
                 "url": reverse("admin:accounts_user_changelist"),
-                "description": "Create accounts, set roles, and manage staff access.",
+                "description": "Créer des comptes, attribuer des rôles et gérer l'accès staff.",
             },
             {
-                "label": "Members and apartments",
+                "label": "Membres et appartements",
                 "url": reverse("admin:members_member_changelist"),
-                "description": "Maintain co-op membership and residency records.",
+                "description": "Gérer les fiches de membres et résidences de la coopérative.",
             },
             {
-                "label": "Budget setup",
+                "label": "Configuration budgétaire",
                 "url": reverse("admin:budget_budgetyear_changelist"),
-                "description": "Configure yearly budgets and category planned amounts.",
+                "description": "Configurer les budgets annuels et les montants prévus des sous-budgets.",
             },
             {
-                "label": "Reimbursement archive",
-                "url": reverse("admin:reimbursements_reimbursement_changelist"),
-                "description": "Review reimbursement records, archived receipts, and snapshots.",
+                "label": "Bons de commande",
+                "url": reverse("admin:bons_bondecommande_changelist"),
+                "description": "Consulter les bons de commande, reçus et instantanés.",
             },
             {
-                "label": "Audit log",
+                "label": "Journal d'audit",
                 "url": reverse("admin:audits_auditlogentry_changelist"),
-                "description": "Open append-only audit history in Django admin.",
+                "description": "Ouvrir l'historique d'audit en ajout seulement dans Django admin.",
             },
             {
-                "label": "Django admin index",
+                "label": "Index Django admin",
                 "url": reverse("admin:index"),
-                "description": "Jump to the full Django admin surface.",
+                "description": "Accéder à l'interface complète de Django admin.",
             },
         ]
         context["can_access_django_admin"] = (
@@ -204,7 +174,6 @@ class HealthcheckView(APIView):
     permission_classes = [AllowAny]
 
     def get(self, request: Request) -> Response:
-        """Return a deterministic health response."""
         return Response({"status": "ok", "service": "tresorapide"})
 
 
@@ -215,7 +184,6 @@ class ReadinessView(APIView):
     permission_classes = [AllowAny]
 
     def get(self, request: Request) -> Response:
-        """Return a readiness response that includes database reachability."""
         try:
             with connections["default"].cursor() as cursor:
                 cursor.execute("SELECT 1")

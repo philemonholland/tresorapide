@@ -148,6 +148,19 @@ body {
     box-shadow: inset 0 0 0 1px #d4e1ee;
 }
 
+.setup-callout {
+    background: #fff6df;
+    border: 1px solid #f0c977;
+    border-radius: 0.65rem;
+    padding: 1rem 1.1rem;
+    margin: 1rem 0;
+}
+
+.setup-callout h2 {
+    margin-top: 0;
+    color: #7a5200;
+}
+
 .badge {
     display: inline-flex;
     align-items: center;
@@ -311,5 +324,372 @@ body {
     .user-nav button,
     .button-link {
         justify-content: center;
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/*  Budget Excel layout                                               */
+/* ------------------------------------------------------------------ */
+
+.container-wide {
+    width: min(1440px, calc(100% - 2rem));
+}
+
+.budget-excel-layout {
+    display: grid;
+    grid-template-columns: 1fr 420px;
+    gap: 1.25rem;
+    align-items: start;
+}
+
+.budget-left {
+    overflow-x: auto;
+}
+
+.budget-right {
+    display: flex;
+    flex-direction: column;
+    gap: 1.25rem;
+}
+
+/* Ledger table — compact rows */
+.ledger-table th,
+.ledger-table td {
+    padding: 0.45rem 0.5rem;
+    font-size: 0.88rem;
+    white-space: normal;
+}
+
+.text-right {
+    text-align: right !important;
+}
+
+.text-center {
+    text-align: center !important;
+}
+
+.nowrap {
+    white-space: nowrap;
+}
+
+.text-negative {
+    color: #b91c1c;
+    font-weight: 600;
+}
+
+/* Summary panel */
+.summary-panel h2 {
+    margin-top: 0;
+}
+
+.summary-table {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+.summary-table td {
+    padding: 0.4rem 0.35rem;
+    font-size: 0.88rem;
+    border-bottom: 1px solid #edf1f6;
+}
+
+.summary-table td:first-child {
+    color: #4a6077;
+}
+
+.summary-table td:last-child {
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.summary-divider td {
+    border-top: 2px solid #d4e1ee;
+}
+
+.summary-highlight td {
+    background: #f0f6ff;
+    font-weight: 700;
+}
+
+.summary-highlight td:first-child {
+    color: #123c66;
+}
+
+/* Sub-budget table */
+.subbudget-table th,
+.subbudget-table td {
+    padding: 0.45rem 0.5rem;
+    font-size: 0.88rem;
+}
+
+.row-contingency {
+    background: #fef9ee;
+}
+
+.row-total td {
+    border-top: 2px solid #123c66;
+    background: #f4f7fb;
+}
+
+@media (max-width: 1100px) {
+    .budget-excel-layout {
+        grid-template-columns: 1fr;
+    }
+}
+
+/* ── Form improvements ── */
+.form-group {
+    display: grid;
+    gap: 0.3rem;
+    margin-bottom: 1rem;
+}
+
+.form-group label {
+    font-weight: 600;
+    font-size: 0.95rem;
+    color: #1d2733;
+}
+
+.form-group input,
+.form-group select,
+.form-group textarea {
+    border: 1px solid #c6d2df;
+    border-radius: 0.35rem;
+    padding: 0.65rem 0.75rem;
+    font: inherit;
+    width: 100%;
+    box-sizing: border-box;
+    transition: border-color 0.15s;
+}
+
+.form-group input:focus,
+.form-group select:focus,
+.form-group textarea:focus {
+    outline: none;
+    border-color: #123c66;
+    box-shadow: 0 0 0 2px rgba(18, 60, 102, 0.15);
+}
+
+.form-group.has-error input,
+.form-group.has-error select,
+.form-group.has-error textarea {
+    border-color: #c0392b;
+}
+
+.required {
+    color: #c0392b;
+    font-weight: 700;
+}
+
+.help-text {
+    font-size: 0.85rem;
+    color: #5f7081;
+    margin: 0.15rem 0 0;
+}
+
+.error-text {
+    font-size: 0.85rem;
+    color: #c0392b;
+    margin: 0.15rem 0 0;
+}
+
+/* ── Collapsible sections ── */
+.collapsible-toggle {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    background: #f4f7fb;
+    border: 1px solid #d4e1ee;
+    border-radius: 0.35rem;
+    padding: 0.65rem 1rem;
+    cursor: pointer;
+    font: inherit;
+    font-weight: 600;
+    color: #123c66;
+    width: 100%;
+    margin: 0.5rem 0;
+}
+
+.collapsible-toggle:hover {
+    background: #e8eef6;
+}
+
+.collapsible-toggle .chevron {
+    transition: transform 0.2s;
+    font-size: 0.8rem;
+}
+
+.collapsible-toggle[aria-expanded="true"] .chevron {
+    transform: rotate(90deg);
+}
+
+.collapsible-content {
+    display: none;
+    padding: 0.5rem 0;
+}
+
+.collapsible-content.is-open {
+    display: block;
+}
+
+/* ── Prominent action buttons ── */
+.btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.4rem;
+    border: none;
+    border-radius: 0.4rem;
+    padding: 0.75rem 1.5rem;
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+    text-decoration: none;
+    transition: background 0.15s, box-shadow 0.15s;
+}
+
+.btn-primary {
+    background: #123c66;
+    color: #fff;
+    font-size: 1.05rem;
+}
+
+.btn-primary:hover {
+    background: #0d2d4f;
+    box-shadow: 0 2px 8px rgba(18, 60, 102, 0.2);
+}
+
+.btn-secondary {
+    background: #fff;
+    color: #123c66;
+    border: 1px solid #123c66;
+}
+
+.btn-secondary:hover {
+    background: #eff5fb;
+}
+
+.btn-success {
+    background: #1b6b2a;
+    color: #fff;
+}
+
+.btn-success:hover {
+    background: #145a22;
+}
+
+.btn-lg {
+    padding: 1rem 2rem;
+    font-size: 1.1rem;
+}
+
+/* ── Dashboard cards ── */
+.hero-card {
+    background: linear-gradient(135deg, #123c66 0%, #1a5a96 100%);
+    color: #fff;
+    border-radius: 0.75rem;
+    padding: 2rem;
+    margin-bottom: 1.25rem;
+    text-decoration: none;
+    display: block;
+    transition: box-shadow 0.2s;
+}
+
+.hero-card:hover {
+    box-shadow: 0 8px 24px rgba(18, 60, 102, 0.25);
+}
+
+.hero-card h2 {
+    margin: 0 0 0.5rem;
+    font-size: 1.5rem;
+}
+
+.hero-card p {
+    margin: 0;
+    opacity: 0.9;
+}
+
+.action-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 1rem;
+    margin-bottom: 1.25rem;
+}
+
+.action-card {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    gap: 0.5rem;
+    padding: 1.25rem 1rem;
+    background: #fff;
+    border: 2px solid #d4e1ee;
+    border-radius: 0.75rem;
+    text-decoration: none;
+    color: #123c66;
+    font-weight: 600;
+    transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.action-card:hover {
+    border-color: #123c66;
+    box-shadow: 0 4px 12px rgba(18, 60, 102, 0.1);
+}
+
+.action-card .action-icon {
+    font-size: 2rem;
+}
+
+.mini-stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 0.75rem;
+    margin-bottom: 1.25rem;
+}
+
+.mini-stat {
+    text-align: center;
+    background: #fff;
+    border-radius: 0.5rem;
+    padding: 1rem;
+    box-shadow: 0 2px 8px rgba(18, 60, 102, 0.06);
+}
+
+.mini-stat .stat-value {
+    font-size: 1.5rem;
+    font-weight: 700;
+    color: #123c66;
+    display: block;
+}
+
+.mini-stat .stat-label {
+    font-size: 0.85rem;
+    color: #5f7081;
+}
+
+/* ── Better mobile responsiveness ── */
+@media (max-width: 640px) {
+    .hero-card {
+        padding: 1.25rem;
+    }
+
+    .hero-card h2 {
+        font-size: 1.2rem;
+    }
+
+    .action-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .form-group input,
+    .form-group select,
+    .form-group textarea {
+        font-size: 16px; /* prevent zoom on iOS */
+    }
+
+    .btn-lg {
+        width: 100%;
     }
 }

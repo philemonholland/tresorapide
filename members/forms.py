@@ -1,74 +1,97 @@
-"""Server-rendered forms for treasurer member management workflows."""
-
-from __future__ import annotations
-
+"""Member, apartment, and residency forms."""
 from django import forms
 
-from members.models import Apartment, Member, Residency
-
-
-DATE_INPUT = forms.DateInput(attrs={"type": "date"})
+from .models import Apartment, Member, Residency
 
 
 class MemberForm(forms.ModelForm):
-    """Edit member identity and contact information."""
+    apartment_code = forms.CharField(
+        max_length=10,
+        label="Numéro d'appartement",
+        required=True,
+        help_text="ex : 101, 202",
+        widget=forms.TextInput(attrs={"placeholder": "ex : 101"}),
+    )
 
     class Meta:
         model = Member
         fields = [
-            "first_name",
-            "last_name",
-            "preferred_name",
-            "email",
-            "phone_number",
-            "is_active",
-            "notes",
+            "first_name", "last_name", "preferred_name",
+            "email", "phone_number", "is_active", "notes",
         ]
-        widgets = {
-            "notes": forms.Textarea(attrs={"rows": 4}),
+        labels = {
+            "first_name": "Prénom",
+            "last_name": "Nom de famille",
+            "preferred_name": "Nom préféré",
+            "email": "Courriel",
+            "phone_number": "Téléphone",
+            "is_active": "Actif",
+            "notes": "Notes",
         }
+        widgets = {
+            "first_name": forms.TextInput(attrs={"placeholder": "Prénom du membre"}),
+            "last_name": forms.TextInput(attrs={"placeholder": "Nom de famille"}),
+            "preferred_name": forms.TextInput(attrs={"placeholder": "Optionnel"}),
+            "email": forms.EmailInput(attrs={"placeholder": "Optionnel"}),
+            "phone_number": forms.TextInput(attrs={"placeholder": "Optionnel"}),
+            "notes": forms.Textarea(attrs={"rows": 3, "placeholder": "Remarques optionnelles"}),
+        }
+
+    # Essential fields shown prominently; rest in collapsible
+    ESSENTIAL_FIELDS = ("first_name", "last_name", "apartment_code")
+    DETAIL_FIELDS = ("preferred_name", "email", "phone_number", "is_active", "notes")
+
+    def __init__(self, *args, is_update=False, **kwargs):
+        super().__init__(*args, **kwargs)
+        if is_update:
+            del self.fields["apartment_code"]
 
 
 class ApartmentForm(forms.ModelForm):
-    """Edit apartment identifiers and occupancy notes."""
-
     class Meta:
         model = Apartment
-        fields = [
-            "code",
-            "street_address",
-            "is_active",
-            "notes",
-        ]
-        widgets = {
-            "notes": forms.Textarea(attrs={"rows": 4}),
+        fields = ["house", "code", "street_address", "is_active", "notes"]
+        labels = {
+            "house": "Maison",
+            "code": "Code",
+            "street_address": "Adresse",
+            "is_active": "Actif",
+            "notes": "Notes",
         }
+        widgets = {
+            "code": forms.TextInput(attrs={"placeholder": "ex: 101, 202"}),
+        }
+
+    def __init__(self, *args, user=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        if user and not user.is_gestionnaire and user.house:
+            self.fields["house"].initial = user.house
+            self.fields["house"].widget = self.fields["house"].hidden_widget()
 
 
 class ResidencyForm(forms.ModelForm):
-    """Edit residency history windows with model-level overlap validation."""
-
     class Meta:
         model = Residency
         fields = [
-            "member",
-            "apartment",
-            "start_date",
-            "end_date",
-            "notes",
+            "member", "apartment", "start_date", "end_date",
+            "is_primary_contact", "notes",
         ]
+        labels = {
+            "member": "Membre",
+            "apartment": "Appartement",
+            "start_date": "Date de début",
+            "end_date": "Date de fin",
+            "is_primary_contact": "Contact principal",
+            "notes": "Notes",
+        }
         widgets = {
-            "start_date": DATE_INPUT,
-            "end_date": DATE_INPUT,
-            "notes": forms.Textarea(attrs={"rows": 4}),
+            "start_date": forms.DateInput(attrs={"type": "date"}),
+            "end_date": forms.DateInput(attrs={"type": "date"}),
         }
 
-    def __init__(self, *args: object, **kwargs: object) -> None:
-        """Order reference data for predictable treasurer selection."""
+    def __init__(self, *args, user=None, **kwargs):
         super().__init__(*args, **kwargs)
-        self.fields["member"].queryset = Member.objects.order_by(
-            "last_name",
-            "first_name",
-            "id",
-        )
-        self.fields["apartment"].queryset = Apartment.objects.order_by("code", "id")
+        if user and not user.is_gestionnaire and user.house:
+            self.fields["apartment"].queryset = Apartment.objects.filter(
+                house=user.house, is_active=True,
+            ).select_related("house")

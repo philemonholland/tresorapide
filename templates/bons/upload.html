@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+
+{% block title %}Nouveau bon de commande — Téléverser vos reçus | Tresorapide{% endblock %}
+
+{% block content %}
+    <section class="card">
+        <div class="section-heading">
+            <div>
+                <h1>Nouveau bon de commande</h1>
+                <p class="text-muted">
+                    Étape 1 sur 3 — Commencez par téléverser vos reçus. L'OCR extraira automatiquement les informations.
+                </p>
+            </div>
+            <a class="button-link" href="{% url 'bons:list' %}">Retour à la liste</a>
+        </div>
+
+        {% if not ocr_available %}
+            <div class="message warning" style="margin-bottom: 1rem;">
+                ⚠️ L'OCR n'est pas disponible. Vous pourrez saisir les informations manuellement à l'étape suivante.
+            </div>
+        {% endif %}
+
+        <form method="post" enctype="multipart/form-data" class="stack">
+            {% csrf_token %}
+            {{ form.non_field_errors }}
+
+            <div class="form-group {% if form.budget_year.errors %}has-error{% endif %}">
+                <label for="{{ form.budget_year.id_for_label }}">
+                    {{ form.budget_year.label }}{% if form.budget_year.field.required %} <span class="required">*</span>{% endif %}
+                </label>
+                {{ form.budget_year }}
+                {% if form.budget_year.help_text %}<p class="help-text">{{ form.budget_year.help_text }}</p>{% endif %}
+                {% for error in form.budget_year.errors %}<p class="error-text">{{ error }}</p>{% endfor %}
+            </div>
+
+            <div class="form-group {% if form.files.errors %}has-error{% endif %}">
+                <label for="{{ form.files.id_for_label }}">
+                    {{ form.files.label }}{% if form.files.field.required %} <span class="required">*</span>{% endif %}
+                </label>
+                {{ form.files }}
+                {% if form.files.help_text %}<p class="help-text">{{ form.files.help_text }}</p>{% endif %}
+                {% for error in form.files.errors %}<p class="error-text">{{ error }}</p>{% endfor %}
+            </div>
+
+            <button type="submit" class="btn btn-primary">Téléverser et analyser</button>
+        </form>
+
+        <hr style="margin-top: 2rem;">
+        <p class="text-muted" style="margin-top: 1rem;">
+            Vous préférez tout saisir manuellement ?
+            <a href="{% url 'bons:create-manual' %}">Créer un bon sans reçu</a>
+        </p>
+    </section>
+{% endblock %}

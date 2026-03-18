@@ -13,18 +13,18 @@ class UserAdmin(DjangoUserAdmin):
 
     fieldsets = DjangoUserAdmin.fieldsets + (
         (
-            "Application access",
+            "Accès application",
             {
-                "fields": ("role",),
+                "fields": ("role", "house", "member"),
             },
         ),
     )
     add_fieldsets = DjangoUserAdmin.add_fieldsets + (
         (
-            "Application access",
+            "Accès application",
             {
                 "classes": ("wide",),
-                "fields": ("role",),
+                "fields": ("role", "house", "member"),
             },
         ),
     )

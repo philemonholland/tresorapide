@@ -1,63 +1,51 @@
 {% load static %}
 <!DOCTYPE html>
-<html lang="en">
+<html lang="fr">
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{% block title %}Tresorapide{% endblock %}</title>
     <link rel="stylesheet" href="{% static 'css/site.css' %}">
+    {% block extra_head %}{% endblock %}
 </head>
 <body>
-    {% url 'budget:list' as budget_url %}
-    {% url 'reimbursements:list' as reimbursements_url %}
-    {% url 'audits:list' as audits_url %}
-    {% url 'admin-setup' as admin_setup_url %}
-    {% url 'members:index' as members_url %}
     <header class="site-header">
         <div class="container header-layout">
             <div>
                 <a class="brand" href="{% url 'home' %}">Tresorapide</a>
-                <p class="tagline">Housing co-op treasurer workspace</p>
+                <p class="tagline">Espace trésorier — coopérative d'habitation</p>
             </div>
             <div class="header-actions">
                 <nav class="site-nav">
-                    <a href="{% url 'home' %}">{% if request.user.is_authenticated %}Dashboard{% else %}Home{% endif %}</a>
-                    {% if request.user.can_view_financials and budget_url %}
-                        <a href="{{ budget_url }}">Budgets</a>
+                    <a href="{% url 'home' %}">{% if request.user.is_authenticated %}Tableau de bord{% else %}Accueil{% endif %}</a>
+                    {% if request.user.is_authenticated and request.user.can_view_financials %}
+                        <a href="{% url 'budget:year-list' %}">Budget</a>
+                        <a href="{% url 'bons:list' %}">Bons de commande</a>
                     {% endif %}
-                    {% if request.user.can_view_financials and reimbursements_url %}
-                        <a href="{{ reimbursements_url }}">Reimbursements</a>
+                    {% if request.user.is_authenticated and request.user.can_manage_financials %}
+                        <a href="{% url 'members:member-list' %}">Membres</a>
                     {% endif %}
-                    {% if request.user.can_manage_financials and audits_url %}
-                        <a href="{{ audits_url }}">Audit log</a>
-                    {% endif %}
-                    {% if request.user.is_app_admin and admin_setup_url %}
-                        <a href="{{ admin_setup_url }}">Setup</a>
-                    {% endif %}
-                    {% if members_url and request.user.is_app_admin %}
-                        <a href="{{ members_url }}">Members</a>
-                    {% endif %}
-                    {% if request.user.is_staff or request.user.is_superuser %}
-                        <a href="/admin/">Django admin</a>
+                    {% if request.user.is_app_admin or request.user.is_staff or request.user.is_superuser %}
+                        <a href="{% url 'admin-setup' %}">Admin</a>
                     {% endif %}
                 </nav>
                 <div class="user-nav">
                     {% if request.user.is_authenticated %}
                         <span class="nav-text">
-                            Signed in as {{ request.user.get_username }} ({{ request.user.get_role_display|default:"User" }})
+                            {{ request.user.get_username }} ({{ request.user.get_role_display|default:"Utilisateur" }})
                         </span>
                         <form action="{% url 'accounts:logout' %}" method="post">
                             {% csrf_token %}
-                            <button type="submit">Log out</button>
+                            <button type="submit">Déconnexion</button>
                         </form>
                     {% else %}
-                        <a href="{% url 'accounts:login' %}">Log in</a>
+                        <a href="{% url 'accounts:login' %}">Connexion</a>
                     {% endif %}
                 </div>
             </div>
         </div>
     </header>
-    <main class="container">
+    <main class="{% block main_class %}container{% endblock %}">
         {% if messages %}
             <ul class="messages">
                 {% for message in messages %}
@@ -67,5 +55,17 @@
         {% endif %}
         {% block content %}{% endblock %}
     </main>
+    <script>
+    document.addEventListener("DOMContentLoaded", function () {
+        document.querySelectorAll(".collapsible-toggle").forEach(function (btn) {
+            btn.addEventListener("click", function () {
+                var target = document.getElementById(btn.getAttribute("aria-controls"));
+                var expanded = btn.getAttribute("aria-expanded") === "true";
+                btn.setAttribute("aria-expanded", !expanded);
+                target.classList.toggle("is-open", !expanded);
+            });
+        });
+    });
+    </script>
 </body>
 </html>

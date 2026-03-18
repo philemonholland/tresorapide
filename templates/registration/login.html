@@ -1,25 +1,27 @@
 {% extends "base.html" %}
 
-{% block title %}Log in | Tresorapide{% endblock %}
+{% block title %}Connexion | Tresorapide{% endblock %}
 
 {% block content %}
     <section class="card auth-card">
-        <h1>Log in</h1>
-        <p>Use your co-op account to access treasurer workflows.</p>
+        <h1>Connexion</h1>
+        <p>Utilisez votre compte coopératif pour accéder aux flux de travail du trésorier.</p>
+        {% if needs_initial_superuser %}
+            <div class="setup-callout">
+                <h2>Aucun utilisateur n'existe encore</h2>
+                <p>Créez le premier superutilisateur Django avant de vous connecter.</p>
+                <p>
+                    Sous Windows, double-cliquez sur <code>Create First Superuser.cmd</code> dans le dossier du projet.
+                </p>
+                <p>Ou exécutez :</p>
+                <pre class="preformatted">{{ first_superuser_command }}</pre>
+            </div>
+        {% endif %}
         <form method="post" class="stack">
             {% csrf_token %}
             {{ form.non_field_errors }}
-            {% for field in form %}
-                <div class="form-row">
-                    <label for="{{ field.id_for_label }}">{{ field.label }}</label>
-                    {{ field }}
-                    {% if field.help_text %}
-                        <small>{{ field.help_text }}</small>
-                    {% endif %}
-                    {{ field.errors }}
-                </div>
-            {% endfor %}
-            <button type="submit">Log in</button>
+            {% include "includes/form_field.html" %}
+            <button type="submit" class="btn btn-primary">Connexion</button>
             <input type="hidden" name="next" value="{{ next }}">
         </form>
     </section>
