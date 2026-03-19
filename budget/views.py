@@ -111,7 +111,32 @@ class BudgetYearCreateView(TreasurerRequiredMixin, CreateView):
             form.instance.house = self.request.user.house
         check_house_permission(self.request.user, form.instance.house)
         response = super().form_valid(form)
-        if form.cleaned_data.get("seed_default_categories"):
+
+        house = self.object.house
+        seed = form.cleaned_data.get("seed_default_categories")
+
+        # Try to carry over sub-budgets from the most recent previous year
+        previous_year = BudgetYear.objects.filter(
+            house=house, year__lt=self.object.year
+        ).order_by("-year").first()
+
+        if previous_year:
+            prev_subs = SubBudget.objects.filter(
+                budget_year=previous_year, is_active=True, is_contingency=False
+            ).order_by("sort_order", "trace_code")
+            for sb in prev_subs:
+                SubBudget.objects.get_or_create(
+                    budget_year=self.object,
+                    trace_code=sb.trace_code,
+                    defaults={
+                        "name": sb.name,
+                        "repeat_type": sb.repeat_type,
+                        "planned_amount": sb.planned_amount,
+                        "sort_order": sb.sort_order,
+                    },
+                )
+        elif seed:
+            # No previous year — use seed defaults
             for code, name, repeat, order in SEED_CATEGORIES:
                 SubBudget.objects.get_or_create(
                     budget_year=self.object,

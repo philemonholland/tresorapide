@@ -129,6 +129,6 @@ class BudgetCalculationService:
         ).aggregate(total=Sum("planned_amount"))["total"] or Decimal("0")
 
         return {
-            "unbudgeted_available": budget_total - planned_non_contingency - imprevues,
+            "unbudgeted_available": budget_total - planned_non_contingency,
             "unbudgeted_available_minus_15": budget_minus_imprevues - planned_non_contingency,
         }

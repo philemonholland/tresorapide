@@ -133,6 +133,10 @@ class BonDeCommande(TimeStampedModel, NonDestructiveModel):
     voided_at = models.DateTimeField(blank=True, null=True)
     void_reason = models.TextField(blank=True)
     historical_member_unmatched = models.BooleanField(default=False)
+    is_scan_session = models.BooleanField(
+        default=False,
+        help_text="True for temporary upload containers (hidden from normal views)"
+    )
     notes = models.TextField(blank=True)
 
     class Meta:
@@ -177,6 +181,13 @@ class BonDeCommande(TimeStampedModel, NonDestructiveModel):
 
     def __str__(self):
         return f"BC {self.number} · {self.purchaser_name_snapshot or '?'} · ${self.total}"
+
+    @property
+    def receipt_files_confirmed_count(self):
+        """Count of receipts with confirmed extracted fields."""
+        return self.receipt_files.filter(
+            ocr_status__in=["CORRECTED"],
+        ).count()
 
 
 class ReceiptFile(ArchivableModel, NonDestructiveModel):

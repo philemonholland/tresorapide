@@ -16,11 +16,18 @@
                 <a class="button-link" href="{% url 'bons:list' %}">Retour à la liste</a>
                 <a class="button-link" href="{% url 'bons:export-pdf' bon.pk %}">📄 PDF</a>
                 <a class="button-link" href="{% url 'bons:export-xlsx' bon.pk %}">📊 Excel</a>
-                {% if can_manage and bon.status == "DRAFT" %}
+                {% if can_manage and bon.status != "VALIDATED" and bon.status != "REIMBURSED" and bon.status != "VOID" %}
                     <a class="button-link" href="{% url 'bons:edit' bon.pk %}">Modifier</a>
                 {% endif %}
-                {% if can_manage and bon.status == "READY_FOR_VALIDATION" or bon.status == "DRAFT" %}
+                {% if can_manage and bon.status == "READY_FOR_VALIDATION" %}
                     <a class="button-link" href="{% url 'bons:validate' bon.pk %}">Valider</a>
+                {% endif %}
+                {% if can_manage and bon.status != "REIMBURSED" and bon.status != "VOID" %}
+                    <form method="post" action="{% url 'bons:delete' bon.pk %}" style="display:inline;"
+                          onsubmit="return confirm('Êtes-vous sûr de vouloir supprimer ce bon de commande ?');">
+                        {% csrf_token %}
+                        <button type="submit" class="button-link" style="color: var(--negative, #c0392b);">🗑 Supprimer</button>
+                    </form>
                 {% endif %}
             </div>
         </div>

@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+
+{% block title %}Bons créés | Tresorapide{% endblock %}
+
+{% block content %}
+    <section class="card">
+        <div class="section-heading">
+            <div>
+                <h1>Bons de commande créés</h1>
+                <p class="text-muted">
+                    {{ bons|length }} bon{{ bons|length|pluralize:"s" }} de commande créé{{ bons|length|pluralize:"s" }}
+                    à partir de vos factures. Vérifiez les détails avant de les valider.
+                </p>
+            </div>
+            <a class="button-link" href="{% url 'bons:list' %}">Retour à la liste</a>
+        </div>
+    </section>
+
+    {% for bon in bons %}
+    <section class="card">
+        <div class="section-heading">
+            <div>
+                <h2>BC {{ bon.number }}</h2>
+                <p class="text-muted">
+                    <span class="badge badge-{{ bon.status|lower }}">{{ bon.get_status_display }}</span>
+                    &middot; {{ bon.purchaser_member.display_name }}
+                    {% if bon.purchaser_apartment %}({{ bon.purchaser_apartment.code }}){% endif %}
+                </p>
+            </div>
+            <div class="quick-links">
+                <a class="button-link" href="{% url 'bons:detail' bon.pk %}">Voir les détails</a>
+                <a class="button-link" href="{% url 'bons:edit' bon.pk %}">Modifier</a>
+                <a class="button-link" href="{% url 'bons:validate' bon.pk %}">Valider</a>
+            </div>
+        </div>
+        <div class="detail-grid">
+            <div>
+                <strong>Description</strong>
+                <p>{{ bon.short_description }}</p>
+            </div>
+            <div>
+                <strong>Marchand</strong>
+                <p>{{ bon.merchant_name|default:"—" }}</p>
+            </div>
+            <div>
+                <strong>Sous-budget</strong>
+                <p>{{ bon.sub_budget.name }}</p>
+            </div>
+            <div>
+                <strong>Total</strong>
+                <p><strong>{{ bon.total|floatformat:2 }} $</strong></p>
+            </div>
+        </div>
+        {% if bon.receipt_files.exists %}
+        <p class="text-muted" style="margin-top: 0.5rem;">
+            📎 {{ bon.receipt_files.count }} reçu{{ bon.receipt_files.count|pluralize:"s" }} attaché{{ bon.receipt_files.count|pluralize:"s" }}
+        </p>
+        {% endif %}
+    </section>
+    {% empty %}
+    <section class="card">
+        <p class="empty-state">Aucun bon de commande trouvé.</p>
+    </section>
+    {% endfor %}
+{% endblock %}

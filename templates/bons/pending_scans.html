@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+
+{% block title %}Factures en attente | Tresorapide{% endblock %}
+
+{% block content %}
+    <section class="card">
+        <div class="section-heading">
+            <div>
+                <h1>Factures en attente de validation</h1>
+                <p class="text-muted">Sessions de scan non terminées. Cliquez pour continuer la vérification.</p>
+            </div>
+            <div class="quick-links">
+                <a class="button-link" href="{% url 'bons:upload' %}">＋ Nouvelle numérisation</a>
+                <a class="button-link" href="{% url 'bons:list' %}">Bons de commande</a>
+            </div>
+        </div>
+    </section>
+
+    <section class="card">
+        {% if sessions %}
+            <div class="table-responsive">
+                <table class="data-table enhanced-table">
+                    <thead>
+                        <tr>
+                            <th>Date</th>
+                            <th>Année budgétaire</th>
+                            <th>Nombre de reçus</th>
+                            <th>Confirmés</th>
+                            <th>Créé par</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for session in sessions %}
+                            {% with total=session.receipt_files.count confirmed=session.receipt_files_confirmed_count %}
+                            <tr>
+                                <td>{{ session.created_at|date:"Y-m-d H:i" }}</td>
+                                <td>{{ session.budget_year.label }}</td>
+                                <td>{{ total }}</td>
+                                <td>
+                                    {% if confirmed == total and total > 0 %}
+                                        <span class="badge badge-validated">{{ confirmed }}/{{ total }}</span>
+                                    {% else %}
+                                        <span class="badge badge-draft">{{ confirmed }}/{{ total }}</span>
+                                    {% endif %}
+                                </td>
+                                <td>{{ session.created_by|default:"—" }}</td>
+                                <td>
+                                    <a href="{% url 'bons:review' session.pk %}?idx={{ confirmed }}" class="btn btn-sm">
+                                        Continuer la vérification
+                                    </a>
+                                </td>
+                            </tr>
+                            {% endwith %}
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        {% else %}
+            <p class="empty-state">Aucune session de scan en attente.</p>
+        {% endif %}
+    </section>
+{% endblock %}

@@ -34,7 +34,7 @@ class BonListView(ListView):
     def get_queryset(self):
         qs = super().get_queryset().select_related(
             "budget_year", "sub_budget", "purchaser_member"
-        )
+        ).filter(is_scan_session=False)
 
         status = self.request.GET.get("status")
         if status and status in BonStatus.values:
@@ -129,7 +129,7 @@ class BonUpdateView(TreasurerRequiredMixin, UpdateView):
     def get_queryset(self):
         qs = super().get_queryset()
         qs = _filter_by_house(qs, self.request.user)
-        return qs.filter(status__in=[BonStatus.DRAFT, BonStatus.READY_FOR_REVIEW])
+        return qs.filter(status__in=[BonStatus.DRAFT, BonStatus.READY_FOR_REVIEW, BonStatus.READY_FOR_VALIDATION])
 
     def get_form_kwargs(self):
         kwargs = super().get_form_kwargs()
@@ -288,6 +288,7 @@ class ReceiptUploadWizardView(TreasurerRequiredMixin, FormView):
             temp_bon.purchaser_member = Member.objects.filter(is_active=True).first()
         temp_bon.created_by = user
         temp_bon.status = BonStatus.DRAFT
+        temp_bon.is_scan_session = True
         temp_bon.entered_date = timezone.now().date()
         super(BonDeCommande, temp_bon).save()
 
@@ -384,13 +385,14 @@ class OcrReviewView(TreasurerRequiredMixin, View):
                     initial["matched_member_id"] = member.pk
                     initial["purchaser_member"] = member.pk
 
-            # Check name mismatch
-            if member and member_name_raw and member_name_raw.upper() != "ILLISIBLE":
+            # Check name mismatch — if no member found from apartment, or name doesn't match
+            name_unreadable = not member_name_raw or member_name_raw.upper() == "ILLISIBLE"
+            if member and member_name_raw and not name_unreadable:
                 if member_name_raw.lower().strip() not in member.display_name.lower():
                     name_mismatch = True
 
             initial.update({
-                "member_name_raw": member_name_raw or "",
+                "member_name_raw": member_name_raw if (member and not name_mismatch and not name_unreadable) else "",
                 "apartment_number": apt_code,
                 "merchant_name": ef.final_merchant or ef.merchant_candidate,
                 "purchase_date": ef.final_purchase_date or ef.purchase_date_candidate,
@@ -416,7 +418,7 @@ class OcrReviewView(TreasurerRequiredMixin, View):
         # Populate sub_budget choices
         form.fields["sub_budget"].queryset = SubBudget.objects.filter(
             budget_year=bon.budget_year, is_active=True
-        ).order_by("name")
+        ).order_by("sort_order", "trace_code")
 
         return form, matched_member_name, name_mismatch
 
@@ -448,7 +450,7 @@ class OcrReviewView(TreasurerRequiredMixin, View):
         ).order_by("last_name", "first_name")
         form.fields["sub_budget"].queryset = SubBudget.objects.filter(
             budget_year=bon.budget_year, is_active=True
-        ).order_by("name")
+        ).order_by("sort_order", "trace_code")
 
         if not form.is_valid():
             messages.error(request, "Veuillez corriger les erreurs ci-dessous.")
@@ -490,11 +492,10 @@ class OcrReviewView(TreasurerRequiredMixin, View):
         # All receipts reviewed — finalize: group by member and create bons
         return self._finalize_bons(request, bon)
 
-    def _finalize_bons(self, request, original_bon):
-        """Group reviewed receipts by member, create separate bons if needed."""
-        from budget.models import SubBudget
-        receipts = list(original_bon.receipt_files.order_by("created_at", "pk"))
-        house = original_bon.house
+    def _finalize_bons(self, request, scan_session):
+        """Group reviewed receipts by member, create NEW bons, archive scan session."""
+        receipts = list(scan_session.receipt_files.order_by("created_at", "pk"))
+        house = scan_session.house
 
         # Group receipts by apartment_number (= member)
         groups = defaultdict(list)
@@ -508,54 +509,48 @@ class OcrReviewView(TreasurerRequiredMixin, View):
 
         created_bons = []
 
-        if len(groups) <= 1:
-            # All same member or no grouping needed — keep original bon
-            self._fill_bon_from_receipts(original_bon, receipts)
-            created_bons.append(original_bon)
-        else:
-            # Multiple members — split into separate bons
-            first = True
-            for apt_code, group_receipts in groups.items():
-                if first:
-                    # Reuse original bon for first group
-                    bon = original_bon
-                    first = False
-                else:
-                    # Create new bon for this group
-                    bon = BonDeCommande()
-                    bon.house = house
-                    bon.budget_year = original_bon.budget_year
-                    bon.number = generate_bon_number(house, original_bon.budget_year.year)
-                    bon.purchase_date = timezone.now().date()
-                    bon.short_description = "(en cours de création)"
-                    bon.total = 0
-                    bon.sub_budget = original_bon.sub_budget
-                    bon.purchaser_member = original_bon.purchaser_member
-                    bon.created_by = original_bon.created_by
-                    bon.status = BonStatus.READY_FOR_REVIEW
-                    bon.entered_date = timezone.now().date()
-                    super(BonDeCommande, bon).save()
+        for apt_code, group_receipts in groups.items():
+            bon = BonDeCommande()
+            bon.house = house
+            bon.budget_year = scan_session.budget_year
+            bon.number = generate_bon_number(house, scan_session.budget_year.year)
+            bon.purchase_date = timezone.now().date()
+            bon.short_description = "(en cours de création)"
+            bon.total = 0
+            bon.sub_budget = scan_session.sub_budget
+            bon.purchaser_member = scan_session.purchaser_member
+            bon.created_by = scan_session.created_by
+            bon.status = BonStatus.READY_FOR_VALIDATION
+            bon.is_scan_session = False
+            bon.entered_date = timezone.now().date()
+            super(BonDeCommande, bon).save()
 
-                    # Move receipts to new bon
-                    for r in group_receipts:
-                        r.bon_de_commande = bon
-                        r.save(update_fields=["bon_de_commande_id"])
+            # Move receipts to the new bon
+            for r in group_receipts:
+                r.bon_de_commande = bon
+                r.save(update_fields=["bon_de_commande_id"])
 
-                self._fill_bon_from_receipts(bon, group_receipts)
-                created_bons.append(bon)
+            self._fill_bon_from_receipts(bon, group_receipts)
+            created_bons.append(bon)
+
+        # Archive the scan session (no more receipts attached)
+        BonDeCommande.objects.filter(pk=scan_session.pk).update(
+            status=BonStatus.VOID,
+            void_reason="Session de scan terminée — bons créés",
+            voided_at=timezone.now(),
+        )
 
         if len(created_bons) == 1:
-            messages.success(request, "Données confirmées. Complétez les détails du bon.")
-            return redirect(reverse("bons:complete", kwargs={"pk": created_bons[0].pk}))
+            messages.success(request, "Bon de commande créé. Vérifiez les détails avant validation.")
+            return redirect(reverse("bons:detail", kwargs={"pk": created_bons[0].pk}))
         else:
-            # Multiple bons created — redirect to summary
             bon_numbers = ", ".join(b.number for b in created_bons)
             messages.success(
                 request,
                 f"{len(created_bons)} bons de commande créés ({bon_numbers}). "
-                f"Complétez chacun individuellement.",
+                f"Vérifiez chacun avant validation.",
             )
-            return redirect(reverse("bons:list"))
+            return redirect(reverse("bons:scan-complete") + "?bons=" + ",".join(str(b.pk) for b in created_bons))
 
     def _fill_bon_from_receipts(self, bon, receipts):
         """Pre-fill bon fields from its confirmed receipt data."""
@@ -744,7 +739,7 @@ class BonSearchView(RoleRequiredMixin, View):
         if request.GET and form.is_valid():
             qs = BonDeCommande.objects.select_related(
                 "house", "budget_year", "sub_budget", "purchaser_member"
-            ).order_by("-purchase_date", "-created_at")
+            ).filter(is_scan_session=False).order_by("-purchase_date", "-created_at")
 
             cd = form.cleaned_data
 
@@ -790,6 +785,65 @@ class BonSearchView(RoleRequiredMixin, View):
             "total_amount": total_amount,
             "result_count": len(results) if results is not None else None,
         })
+
+
+# ---------------------------------------------------------------------------
+# Scan session: pending scans & completion summary
+# ---------------------------------------------------------------------------
+
+class PendingScanSessionsView(TreasurerRequiredMixin, ListView):
+    """List scan sessions that have not been finalized yet."""
+    template_name = "bons/pending_scans.html"
+    context_object_name = "sessions"
+
+    def get_queryset(self):
+        qs = BonDeCommande.objects.filter(
+            is_scan_session=True,
+            status__in=[BonStatus.DRAFT, BonStatus.READY_FOR_REVIEW],
+        ).select_related("budget_year", "house", "created_by")
+        return _filter_by_house(qs, self.request.user)
+
+
+class ScanCompleteView(TreasurerRequiredMixin, View):
+    """Summary page after scan session creates multiple bons."""
+    template_name = "bons/scan_complete.html"
+
+    def get(self, request):
+        bon_pks = request.GET.get("bons", "").split(",")
+        bon_pks = [pk.strip() for pk in bon_pks if pk.strip().isdigit()]
+        bons = BonDeCommande.objects.filter(
+            pk__in=bon_pks, is_scan_session=False
+        ).select_related("budget_year", "sub_budget", "purchaser_member")
+        return TemplateResponse(request, self.template_name, {"bons": bons})
+
+
+# ---------------------------------------------------------------------------
+# Bon deletion (non-reimbursed only)
+# ---------------------------------------------------------------------------
+
+class BonDeleteView(TreasurerRequiredMixin, View):
+    """Archive (soft-delete) a bon that has NOT been reimbursed."""
+
+    def post(self, request, pk):
+        bon = get_object_or_404(
+            _filter_by_house(BonDeCommande.objects.all(), request.user),
+            pk=pk,
+        )
+        if bon.status == BonStatus.REIMBURSED:
+            messages.error(request, "Impossible de supprimer un bon déjà remboursé.")
+            return redirect(reverse("bons:detail", kwargs={"pk": pk}))
+
+        # Delete associated expense if any
+        from budget.models import Expense
+        Expense.objects.filter(bon_de_commande=bon).delete()
+
+        bon.status = BonStatus.VOID
+        bon.void_reason = f"Supprimé par {request.user.get_username()}"
+        bon.voided_at = timezone.now()
+        super(BonDeCommande, bon).save()
+
+        messages.success(request, f"Le bon {bon.number} a été supprimé.")
+        return redirect(reverse("bons:list"))
 
 
 # Needed for imports in urls.py — avoid circular import of BudgetYear

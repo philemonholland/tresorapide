@@ -144,7 +144,7 @@ class SubBudget(TimeStampedModel):
         return self.planned_amount - self.used
 
     def __str__(self):
-        return f"{self.budget_year.label} · {self.trace_code} · {self.name}"
+        return f"{self.trace_code} – {self.name}"
 
 
 class Expense(TimeStampedModel):

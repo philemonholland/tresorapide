@@ -66,16 +66,17 @@
                             {{ form.apartment_number }}
                             {% for error in form.apartment_number.errors %}<p class="error-text">{{ error }}</p>{% endfor %}
                         </div>
-                        <div class="form-group">
-                            <label for="{{ form.member_name_raw.id_for_label }}">{{ form.member_name_raw.label }}</label>
-                            {{ form.member_name_raw }}
-                            {% if name_mismatch %}
-                                <p style="color: red; font-weight: bold; margin-top: 0.25rem;">
-                                    ⚠️ Le nom extrait ne correspond pas au membre identifié. Vérifiez la sélection.
-                                </p>
-                            {% endif %}
-                            <small class="text-muted">{{ form.member_name_raw.help_text }}</small>
-                        </div>
+                        {% if name_mismatch %}
+                            <div class="message warning" style="margin-bottom: 0.5rem;">
+                                ⚠️ Le nom manuscrit n'a pas pu être associé au membre de cet appartement. Veuillez valider la sélection ci-dessous.
+                            </div>
+                        {% elif form.member_name_raw.value %}
+                            <div class="form-group">
+                                <label for="{{ form.member_name_raw.id_for_label }}">{{ form.member_name_raw.label }}</label>
+                                {{ form.member_name_raw }}
+                                <small class="text-muted">{{ form.member_name_raw.help_text }}</small>
+                            </div>
+                        {% endif %}
                         <div class="form-group {% if form.purchaser_member.errors %}has-error{% endif %}">
                             <label for="{{ form.purchaser_member.id_for_label }}">{{ form.purchaser_member.label }} <span style="color:red">*</span></label>
                             {{ form.purchaser_member }}

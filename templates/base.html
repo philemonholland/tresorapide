@@ -21,6 +21,9 @@
                     <a href="{% url 'budget:year-list' %}">Budget</a>
                     <a href="{% url 'bons:list' %}">Bons de commande</a>
                     <a href="{% url 'bons:search' %}">Recherche</a>
+                    {% if request.user.is_authenticated and request.user.can_manage_financials %}
+                        <a href="{% url 'bons:pending-scans' %}">📋 En attente</a>
+                    {% endif %}
                     <a href="{% url 'members:member-list' %}">Membres</a>
                     {% if request.user.is_authenticated %}
                         {% if request.user.can_manage_financials %}
@@ -59,6 +62,7 @@
         {% endif %}
         {% block content %}{% endblock %}
     </main>
+    <script src="{% static 'js/tables.js' %}"></script>
     <script>
     document.addEventListener("DOMContentLoaded", function () {
         document.querySelectorAll(".collapsible-toggle").forEach(function (btn) {

@@ -131,10 +131,10 @@ class BudgetCalculationTests(TestCase):
         vals = BudgetCalculationService.unbudgeted_available(self.by)
         # budget_total=12237, imprevues=12237*0.15=1835.55
         # planned non-contingency: 2000 + 1000 + 300 = 3300
-        # unbudgeted = 12237 - 3300 - 1835.55 = 7101.45
-        imprevues = Decimal("12237.00") * Decimal("0.15")
-        expected = Decimal("12237.00") - Decimal("3300.00") - imprevues
+        # unbudgeted = 12237 - 3300 = 8937 (no imprevues subtraction)
+        expected = Decimal("12237.00") - Decimal("3300.00")
         self.assertEqual(vals["unbudgeted_available"], expected)
         # minus_15 = (12237 - imprevues) - 3300
+        imprevues = Decimal("12237.00") * Decimal("0.15")
         expected_minus_15 = Decimal("12237.00") - imprevues - Decimal("3300.00")
         self.assertEqual(vals["unbudgeted_available_minus_15"], expected_minus_15)
