@@ -1,57 +1,67 @@
-"""Authentication models for the project."""
-from __future__ import annotations
-
-from typing import ClassVar
-
 from django.contrib.auth.models import AbstractUser
 from django.db import models
 
 
+class Role(models.TextChoices):
+    VIEWER = "VIEWER", "Lecteur"
+    TREASURER = "TREASURER", "Trésorier"
+    ADMIN = "ADMIN", "Administrateur"
+    GESTIONNAIRE = "GESTIONNAIRE", "Gestionnaire"
+
+
+ROLE_PRIORITY = {
+    Role.VIEWER: 10,
+    Role.TREASURER: 20,
+    Role.ADMIN: 30,
+    Role.GESTIONNAIRE: 40,
+}
+
+
 class User(AbstractUser):
-    """Application user with a role baseline for future authorization work."""
-
-    class Role(models.TextChoices):
-        ADMIN = "admin", "Admin"
-        TREASURER = "treasurer", "Treasurer"
-        VIEWER = "viewer", "Viewer"
-
-    ROLE_PRIORITY: ClassVar[dict[str, int]] = {
-        Role.VIEWER: 10,
-        Role.TREASURER: 20,
-        Role.ADMIN: 30,
-    }
+    Role = Role  # backward-compatible alias for User.Role.X access
 
     role = models.CharField(
-        max_length=20,
-        choices=Role.choices,
-        default=Role.VIEWER,
-        help_text="Co-op application role used for business-level authorization.",
+        max_length=20, choices=Role.choices, default=Role.VIEWER
+    )
+    house = models.ForeignKey(
+        "houses.House",
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name="users",
+        help_text="Required for VIEWER/TREASURER/ADMIN. Null for GESTIONNAIRE."
+    )
+    member = models.ForeignKey(
+        "members.Member",
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name="user_accounts",
+        help_text="Lien optionnel vers la fiche membre de cet utilisateur."
     )
 
-    def has_minimum_role(self, role: str) -> bool:
-        """Return whether the user satisfies an application role threshold."""
-        try:
-            required_priority = self.ROLE_PRIORITY[role]
-        except KeyError as exc:
-            raise ValueError(f"Unsupported role: {role}") from exc
+    class Meta:
+        ordering = ["username"]
 
-        if not self.is_authenticated or not self.is_active:
-            return False
+    def has_minimum_role(self, role):
         if self.is_superuser:
             return True
-        return self.ROLE_PRIORITY[self.role] >= required_priority
+        return ROLE_PRIORITY.get(self.role, 0) >= ROLE_PRIORITY.get(role, 0)
 
     @property
-    def is_app_admin(self) -> bool:
-        """Return whether the user is treated as an application administrator."""
-        return self.has_minimum_role(self.Role.ADMIN)
+    def is_app_admin(self):
+        return self.has_minimum_role(Role.ADMIN) or self.is_superuser
 
     @property
-    def can_manage_financials(self) -> bool:
-        """Return whether the user can manage treasurer workflows."""
-        return self.has_minimum_role(self.Role.TREASURER)
+    def can_manage_financials(self):
+        return self.has_minimum_role(Role.TREASURER) or self.is_superuser
 
     @property
-    def can_view_financials(self) -> bool:
-        """Return whether the user can view financial information."""
-        return self.has_minimum_role(self.Role.VIEWER)
+    def can_view_financials(self):
+        return self.has_minimum_role(Role.VIEWER) or self.is_superuser
+
+    @property
+    def is_gestionnaire(self):
+        return self.role == Role.GESTIONNAIRE or self.is_superuser
+
+    def __str__(self):
+        house_label = f" ({self.house.code})" if self.house else ""
+        return f"{self.username}{house_label} [{self.get_role_display()}]"

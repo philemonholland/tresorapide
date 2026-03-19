@@ -1,3 +1,4 @@
+import json
 from datetime import date
 from decimal import Decimal
 from unittest.mock import patch, MagicMock
@@ -129,99 +130,83 @@ class BonDeCommandeModelTests(TestCase):
 
 
 class ReceiptOcrParseTests(TestCase):
-    """Test OCR text parsing without requiring Tesseract binary."""
+    """Test GPT receipt analysis response parsing (batch format)."""
 
-    def test_parse_typical_receipt(self):
-        raw = """
-DOLLARAMA
-123 Rue Principale
-Montréal QC
+    def test_parse_batch_typical(self):
+        raw = '[{"filename": "recu1.png", "merchant": "DOLLARAMA", "purchase_date": "2025-01-15", "subtotal": 3.75, "tps": 0.19, "tvq": 0.37, "total": 4.31, "member_name": "Abla", "apartment_number": "207"}]'
+        results = ReceiptOcrService._parse_batch_response(raw, ["recu1.png"])
+        self.assertEqual(len(results), 1)
+        r = results[0]
+        self.assertEqual(r["filename"], "recu1.png")
+        self.assertEqual(r["merchant"], "DOLLARAMA")
+        self.assertEqual(r["purchase_date"], date(2025, 1, 15))
+        self.assertEqual(r["subtotal"], Decimal("3.75"))
+        self.assertEqual(r["tps"], Decimal("0.19"))
+        self.assertEqual(r["tvq"], Decimal("0.37"))
+        self.assertEqual(r["total"], Decimal("4.31"))
+        self.assertEqual(r["member_name"], "Abla")
+        self.assertEqual(r["apartment_number"], "207")
 
-2025-01-15
+    def test_parse_batch_empty(self):
+        results = ReceiptOcrService._parse_batch_response("", ["a.png"])
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["merchant"], "")
+        self.assertEqual(results[0]["member_name"], "")
+        self.assertIsNone(results[0]["purchase_date"])
+        self.assertIsNone(results[0]["total"])
 
-Savon       2.50
-Éponge      1.25
+    def test_parse_batch_with_nulls(self):
+        raw = '[{"filename": "r.png", "merchant": "METRO", "purchase_date": null, "subtotal": null, "tps": null, "tvq": null, "total": 12.34, "member_name": "ILLISIBLE", "apartment_number": "206"}]'
+        results = ReceiptOcrService._parse_batch_response(raw, ["r.png"])
+        r = results[0]
+        self.assertEqual(r["merchant"], "METRO")
+        self.assertIsNone(r["purchase_date"])
+        self.assertIsNone(r["subtotal"])
+        self.assertEqual(r["total"], Decimal("12.34"))
+        self.assertEqual(r["member_name"], "ILLISIBLE")
+        self.assertEqual(r["apartment_number"], "206")
 
-Sous-total   3.75
-TPS          0.19
-TVQ          0.37
-Total        4.31
-"""
-        result = ReceiptOcrService.parse_receipt_text(raw)
-        self.assertEqual(result["merchant"], "DOLLARAMA")
-        self.assertEqual(result["purchase_date"], date(2025, 1, 15))
-        self.assertEqual(result["subtotal"], Decimal("3.75"))
-        self.assertEqual(result["tps"], Decimal("0.19"))
-        self.assertEqual(result["tvq"], Decimal("0.37"))
-        self.assertEqual(result["total"], Decimal("4.31"))
+    def test_parse_batch_with_code_fences(self):
+        raw = '```json\n[{"filename": "r.png", "merchant": "RONA", "purchase_date": "2025-03-01", "subtotal": 45.00, "tps": 2.25, "tvq": 4.49, "total": 51.74, "member_name": "Carl", "apartment_number": "101"}]\n```'
+        results = ReceiptOcrService._parse_batch_response(raw, ["r.png"])
+        self.assertEqual(results[0]["merchant"], "RONA")
+        self.assertEqual(results[0]["tps"], Decimal("2.25"))
+        self.assertEqual(results[0]["total"], Decimal("51.74"))
 
-    def test_parse_empty_text(self):
-        result = ReceiptOcrService.parse_receipt_text("")
-        self.assertEqual(result["merchant"], "")
-        self.assertIsNone(result["purchase_date"])
-        self.assertIsNone(result["subtotal"])
-        self.assertIsNone(result["tps"])
-        self.assertIsNone(result["tvq"])
-        self.assertIsNone(result["total"])
+    def test_parse_batch_single_object_fallback(self):
+        """GPT might return a single object instead of array for 1 receipt."""
+        raw = '{"filename": "x.png", "merchant": "IGA", "total": 9.99, "purchase_date": null, "subtotal": null, "tps": null, "tvq": null, "member_name": "", "apartment_number": ""}'
+        results = ReceiptOcrService._parse_batch_response(raw, ["x.png"])
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["merchant"], "IGA")
+        self.assertEqual(results[0]["total"], Decimal("9.99"))
 
-    def test_parse_total_only(self):
-        raw = """
-CANADIAN TIRE
-Total  $29.99
-"""
-        result = ReceiptOcrService.parse_receipt_text(raw)
-        self.assertEqual(result["merchant"], "CANADIAN TIRE")
-        self.assertEqual(result["total"], Decimal("29.99"))
-        self.assertIsNone(result["subtotal"])
+    def test_parse_batch_multiple_receipts(self):
+        raw = json.dumps([
+            {"filename": "a.png", "merchant": "Metro", "total": 10.00, "purchase_date": None, "subtotal": None, "tps": None, "tvq": None, "member_name": "A", "apartment_number": "101"},
+            {"filename": "b.png", "merchant": "IGA", "total": 20.00, "purchase_date": None, "subtotal": None, "tps": None, "tvq": None, "member_name": "B", "apartment_number": "202"},
+        ])
+        results = ReceiptOcrService._parse_batch_response(raw, ["a.png", "b.png"])
+        self.assertEqual(len(results), 2)
+        self.assertEqual(results[0]["merchant"], "Metro")
+        self.assertEqual(results[1]["merchant"], "IGA")
 
-    def test_parse_date_slash_format(self):
-        raw = """
-METRO
-15/01/2025
-Total 12.34
-"""
-        result = ReceiptOcrService.parse_receipt_text(raw)
-        self.assertEqual(result["purchase_date"], date(2025, 1, 15))
-
-    def test_parse_gst_qst_labels(self):
-        raw = """
-RONA
-Subtotal  45.00
-GST       2.25
-QST       4.49
-Total     51.74
-"""
-        result = ReceiptOcrService.parse_receipt_text(raw)
-        self.assertEqual(result["tps"], Decimal("2.25"))
-        self.assertEqual(result["tvq"], Decimal("4.49"))
-        self.assertEqual(result["total"], Decimal("51.74"))
-
-    def test_parse_amount_with_dollar_sign(self):
-        raw = """
-SHOP
-Total $ 9.99
-"""
-        result = ReceiptOcrService.parse_receipt_text(raw)
-        self.assertEqual(result["total"], Decimal("9.99"))
-
-    def test_is_available_without_tesseract(self):
-        with patch("bons.ocr_service.TESSERACT_AVAILABLE", False):
+    def test_is_available_without_key(self):
+        with self.settings(OPENAI_API_KEY=""):
             self.assertFalse(ReceiptOcrService.is_available())
 
-    @patch("bons.ocr_service.TESSERACT_AVAILABLE", True)
-    @patch("bons.ocr_service.pytesseract")
-    def test_is_available_with_tesseract(self, mock_pytesseract):
-        mock_pytesseract.get_tesseract_version.return_value = "5.0.0"
-        self.assertTrue(ReceiptOcrService.is_available())
+    def test_is_available_with_key(self):
+        with self.settings(OPENAI_API_KEY="sk-test-key"):
+            self.assertTrue(ReceiptOcrService.is_available())
 
-    def test_parse_amount_helper(self):
-        self.assertEqual(ReceiptOcrService._parse_amount("$12.50"), Decimal("12.50"))
-        self.assertEqual(ReceiptOcrService._parse_amount("3,75"), Decimal("3.75"))
-        self.assertIsNone(ReceiptOcrService._parse_amount(""))
-        self.assertIsNone(ReceiptOcrService._parse_amount("abc"))
+    def test_safe_decimal(self):
+        self.assertEqual(ReceiptOcrService._safe_decimal(12.50), Decimal("12.50"))
+        self.assertEqual(ReceiptOcrService._safe_decimal("3.75"), Decimal("3.75"))
+        self.assertIsNone(ReceiptOcrService._safe_decimal(None))
+        self.assertIsNone(ReceiptOcrService._safe_decimal("abc"))
 
-    def test_parse_date_helper(self):
-        self.assertEqual(ReceiptOcrService._parse_date("2025-01-15"), date(2025, 1, 15))
-        self.assertEqual(ReceiptOcrService._parse_date("2025/01/15"), date(2025, 1, 15))
-        self.assertIsNone(ReceiptOcrService._parse_date(""))
-        self.assertIsNone(ReceiptOcrService._parse_date("not-a-date"))
+    def test_safe_date(self):
+        self.assertEqual(ReceiptOcrService._safe_date("2025-01-15"), date(2025, 1, 15))
+        self.assertIsNone(ReceiptOcrService._safe_date(""))
+        self.assertIsNone(ReceiptOcrService._safe_date("not-a-date"))
+        self.assertIsNone(ReceiptOcrService._safe_date(None))

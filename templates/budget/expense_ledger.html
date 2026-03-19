@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+
+{% block title %}Grand livre des dépenses — {{ budget_year.label }} | Tresorapide{% endblock %}
+
+{% block content %}
+    <section class="card">
+        <div class="section-heading">
+            <div>
+                <h1>Grand livre des dépenses</h1>
+                <p class="text-muted">{{ budget_year.label }} — {{ budget_year.house.code }}</p>
+            </div>
+            <div class="quick-links">
+                <a class="button-link" href="{% url 'budget:year-detail' budget_year.pk %}">Retour au budget</a>
+                {% if can_manage %}
+                    <a class="button-link" href="{% url 'budget:expense-create' budget_year.pk %}">Ajouter une dépense</a>
+                {% endif %}
+            </div>
+        </div>
+    </section>
+
+    <section class="card">
+        {% if ledger_rows %}
+            <div class="table-responsive">
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>Date</th>
+                            <th>Description</th>
+                            <th>BC #</th>
+                            <th>Code</th>
+                            <th>Fournisseur</th>
+                            <th>Dépensé par</th>
+                            <th>Montant</th>
+                            <th>Solde</th>
+                            <th>Solde − 15 %</th>
+                            {% if can_manage %}
+                                <th>Actions</th>
+                            {% endif %}
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for row in ledger_rows %}
+                            <tr>
+                                <td>{{ row.expense.entry_date|date:"Y-m-d" }}</td>
+                                <td>{{ row.expense.description }}</td>
+                                <td>{{ row.expense.bon_number|default:"—" }}</td>
+                                <td>{{ row.expense.sub_budget.trace_code }}</td>
+                                <td>{{ row.expense.supplier_name|default:"—" }}</td>
+                                <td>{{ row.expense.spent_by_label }}</td>
+                                <td>{{ row.expense.amount|floatformat:2 }} $</td>
+                                <td>{{ row.balance|floatformat:2 }} $</td>
+                                <td>{{ row.balance_minus_imprevues|floatformat:2 }} $</td>
+                                {% if can_manage %}
+                                    <td>
+                                        <a href="{% url 'budget:expense-edit' row.expense.pk %}">Modifier</a>
+                                    </td>
+                                {% endif %}
+                            </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        {% else %}
+            <p class="empty-state">Aucune dépense enregistrée pour cette année.</p>
+        {% endif %}
+    </section>
+{% endblock %}

@@ -1,38 +1,31 @@
 {% extends "base.html" %}
 
-{% block title %}Members | Tresorapide{% endblock %}
+{% block title %}Membres | Tresorapide{% endblock %}
 
 {% block content %}
     <section class="card">
         <div class="section-heading">
             <div>
-                <h1>Members</h1>
-                <p class="text-muted">Search and maintain co-op member records.</p>
+                <h1>Membres</h1>
+                <p class="text-muted">Gestion des membres de la coopérative.</p>
             </div>
-            <div class="quick-links">
-                <a class="button-link" href="{% url 'members:index' %}">Back to member dashboard</a>
-                <a class="button-link" href="{% url 'members:member-create' %}">New member</a>
-            </div>
+            <a class="button-link" href="{% url 'members:member-create' %}">Ajouter un membre</a>
         </div>
     </section>
 
     <section class="card">
         <form method="get" class="filter-bar">
             <label class="filter-field">
-                <span>Search</span>
-                <input type="text" name="q" value="{{ query }}" placeholder="Name, email, or phone">
-            </label>
-            <label class="filter-field">
-                <span>Status</span>
-                <select name="activity">
-                    <option value="">All members</option>
-                    <option value="active"{% if activity == "active" %} selected{% endif %}>Active only</option>
-                    <option value="inactive"{% if activity == "inactive" %} selected{% endif %}>Inactive only</option>
+                <span>Statut</span>
+                <select name="show">
+                    <option value="active"{% if show == "active" %} selected{% endif %}>Actifs</option>
+                    <option value="inactive"{% if show == "inactive" %} selected{% endif %}>Inactifs</option>
+                    <option value="all"{% if show == "all" %} selected{% endif %}>Tous</option>
                 </select>
             </label>
             <div class="filter-actions">
-                <button type="submit" class="button-link">Apply filter</button>
-                <a class="button-link" href="{% url 'members:member-list' %}">Reset</a>
+                <button type="submit" class="button-link">Filtrer</button>
+                <a class="button-link" href="{% url 'members:member-list' %}">Réinitialiser</a>
             </div>
         </form>
 
@@ -41,33 +34,28 @@
                 <table class="data-table">
                     <thead>
                         <tr>
-                            <th>Name</th>
-                            <th>Email</th>
-                            <th>Phone</th>
-                            <th>Status</th>
-                            <th>Residencies</th>
-                            <th>Actions</th>
+                            <th>Nom</th>
+                            <th>Téléphone</th>
+                            <th>Courriel</th>
+                            <th>Appartement</th>
+                            <th>Maison</th>
+                            <th>Actif</th>
                         </tr>
                     </thead>
                     <tbody>
                         {% for member in members %}
                             <tr>
-                                <td>{{ member.display_name }}</td>
-                                <td>{{ member.email|default:"—" }}</td>
+                                <td><a href="{% url 'members:member-detail' member.pk %}">{{ member.display_name }}</a></td>
                                 <td>{{ member.phone_number|default:"—" }}</td>
+                                <td>{{ member.email|default:"—" }}</td>
+                                <td>{{ member.current_apartment|default:"—" }}</td>
+                                <td>{{ member.current_house|default:"—" }}</td>
                                 <td>
                                     {% if member.is_active %}
-                                        <span class="badge badge-approved">Active</span>
+                                        <span class="badge badge-approved">Oui</span>
                                     {% else %}
-                                        <span class="badge badge-archived">Inactive</span>
+                                        <span class="badge badge-archived">Non</span>
                                     {% endif %}
-                                </td>
-                                <td>{{ member.current_residency_count }} current / {{ member.residency_count }} total</td>
-                                <td>
-                                    <a href="{% url 'members:member-edit' member.pk %}">Edit</a>
-                                    <div class="text-muted">
-                                        <a href="{% url 'members:residency-create' %}?member={{ member.pk }}">Add residency</a>
-                                    </div>
                                 </td>
                             </tr>
                         {% endfor %}
@@ -75,7 +63,7 @@
                 </table>
             </div>
         {% else %}
-            <p class="empty-state">No members match the current filters.</p>
+            <p class="empty-state">Aucun membre trouvé.</p>
         {% endif %}
     </section>
 {% endblock %}

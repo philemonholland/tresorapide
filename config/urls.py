@@ -19,15 +19,17 @@ def optional_include(prefix: str, module_path: str, namespace: str):
 
 urlpatterns = [
     path("", include("core.urls")),
-    path("accounts/", include(("accounts.urls", "accounts"), namespace="accounts")),
+    path("accounts/", include("accounts.urls")),
     path("api/", include("core.api_urls")),
     path("admin/", admin.site.urls),
 ]
 
 optional_patterns = [
+    optional_include("houses/", "houses.urls", "houses"),
     optional_include("members/", "members.urls", "members"),
     optional_include("budget/", "budget.urls", "budget"),
-    optional_include("reimbursements/", "reimbursements.urls", "reimbursements"),
+    optional_include("bons/", "bons.urls", "bons"),
+    optional_include("maintenance/", "maintenance.urls", "maintenance"),
     optional_include("audits/", "audits.urls", "audits"),
 ]
 urlpatterns += [pattern for pattern in optional_patterns if pattern is not None]

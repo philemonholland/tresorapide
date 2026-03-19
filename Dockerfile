@@ -10,8 +10,6 @@ RUN apt-get update \
         build-essential \
         libcairo2-dev \
         pkg-config \
-        tesseract-ocr \
-        tesseract-ocr-fra \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt /app/requirements.txt

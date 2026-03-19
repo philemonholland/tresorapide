@@ -1,0 +1,87 @@
+{% extends "base.html" %}
+
+{% block title %}Bons de commande | Tresorapide{% endblock %}
+
+{% block content %}
+    <section class="card">
+        <div class="section-heading">
+            <div>
+                <h1>Bons de commande</h1>
+                <p class="text-muted">Liste des bons de commande de votre immeuble.</p>
+            </div>
+            <div class="quick-links">
+                <a class="button-link" href="{% url 'home' %}">Tableau de bord</a>
+                {% if can_manage %}
+                    <a class="button-link" href="{% url 'bons:create' %}">Créer un bon</a>
+                {% endif %}
+            </div>
+        </div>
+
+        <form method="get" class="filter-bar">
+            <div class="form-row">
+                <label for="id_status">Statut</label>
+                <select name="status" id="id_status">
+                    <option value="">Tous</option>
+                    {% for value, label in status_choices %}
+                        <option value="{{ value }}" {% if current_status == value %}selected{% endif %}>{{ label }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="form-row">
+                <label for="id_budget_year">Année budgétaire</label>
+                <select name="budget_year" id="id_budget_year">
+                    <option value="">Toutes</option>
+                    {% for by in budget_years %}
+                        <option value="{{ by.pk }}" {% if current_budget_year == by.pk|stringformat:"d" %}selected{% endif %}>{{ by.label }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <button type="submit">Filtrer</button>
+        </form>
+    </section>
+
+    <section class="card">
+        {% if bons %}
+            <div class="table-responsive">
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>Numéro</th>
+                            <th>Date</th>
+                            <th>Description</th>
+                            <th>Montant</th>
+                            <th>Sous-budget</th>
+                            <th>Statut</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for bon in bons %}
+                            <tr>
+                                <td><a href="{% url 'bons:detail' bon.pk %}">{{ bon.number }}</a></td>
+                                <td>{{ bon.purchase_date|date:"Y-m-d" }}</td>
+                                <td>{{ bon.short_description }}</td>
+                                <td>{{ bon.total|floatformat:2 }}&nbsp;$</td>
+                                <td>{{ bon.sub_budget.name }}</td>
+                                <td><span class="badge badge-{{ bon.status|lower }}">{{ bon.get_status_display }}</span></td>
+                            </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+
+            {% if is_paginated %}
+                <nav class="pagination">
+                    {% if page_obj.has_previous %}
+                        <a href="?page={{ page_obj.previous_page_number }}&status={{ current_status }}&budget_year={{ current_budget_year }}">« Précédent</a>
+                    {% endif %}
+                    <span>Page {{ page_obj.number }} sur {{ page_obj.paginator.num_pages }}</span>
+                    {% if page_obj.has_next %}
+                        <a href="?page={{ page_obj.next_page_number }}&status={{ current_status }}&budget_year={{ current_budget_year }}">Suivant »</a>
+                    {% endif %}
+                </nav>
+            {% endif %}
+        {% else %}
+            <p class="empty-state">Aucun bon de commande trouvé.</p>
+        {% endif %}
+    </section>
+{% endblock %}

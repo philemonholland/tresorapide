@@ -3,12 +3,12 @@
 {% block title %}Nouveau bon de commande — Téléverser vos reçus | Tresorapide{% endblock %}
 
 {% block content %}
-    <section class="card">
+    <section class="card" id="upload-section">
         <div class="section-heading">
             <div>
                 <h1>Nouveau bon de commande</h1>
                 <p class="text-muted">
-                    Étape 1 sur 3 — Commencez par téléverser vos reçus. L'OCR extraira automatiquement les informations.
+                    Étape 1 sur 3 — Téléversez vos reçus. L'IA analysera automatiquement les informations.
                 </p>
             </div>
             <a class="button-link" href="{% url 'bons:list' %}">Retour à la liste</a>
@@ -16,11 +16,12 @@
 
         {% if not ocr_available %}
             <div class="message warning" style="margin-bottom: 1rem;">
-                ⚠️ L'OCR n'est pas disponible. Vous pourrez saisir les informations manuellement à l'étape suivante.
+                ⚠️ La clé API OpenAI n'est pas configurée. Vous pourrez saisir les informations manuellement à l'étape suivante.
+                Pour activer l'analyse automatique, ajoutez <code>OPENAI_API_KEY</code> dans le fichier <code>.env</code>.
             </div>
         {% endif %}
 
-        <form method="post" enctype="multipart/form-data" class="stack">
+        <form method="post" enctype="multipart/form-data" class="stack" id="upload-form">
             {% csrf_token %}
             {{ form.non_field_errors }}
 
@@ -40,9 +41,13 @@
                 {{ form.files }}
                 {% if form.files.help_text %}<p class="help-text">{{ form.files.help_text }}</p>{% endif %}
                 {% for error in form.files.errors %}<p class="error-text">{{ error }}</p>{% endfor %}
+                <p class="text-muted" style="font-size: 0.85em; margin-top: 0.3rem;">
+                    💡 Vous pouvez sélectionner plusieurs fichiers. Les reçus de différents membres seront automatiquement
+                    regroupés en bons de commande séparés.
+                </p>
             </div>
 
-            <button type="submit" class="btn btn-primary">Téléverser et analyser</button>
+            <button type="submit" class="btn btn-primary" id="submit-btn">Téléverser et analyser</button>
         </form>
 
         <hr style="margin-top: 2rem;">
@@ -51,4 +56,33 @@
             <a href="{% url 'bons:create-manual' %}">Créer un bon sans reçu</a>
         </p>
     </section>
+
+    <!-- Loading overlay -->
+    <section class="card" id="loading-section" style="display: none; text-align: center; padding: 3rem;">
+        <div style="font-size: 2rem; margin-bottom: 1rem;">🔄</div>
+        <h2>Analyse en cours…</h2>
+        <p class="text-muted" id="loading-text">
+            Téléversement et analyse IA des reçus. Cela peut prendre quelques secondes par reçu.
+        </p>
+        <div style="margin-top: 1.5rem;">
+            <div style="width: 200px; height: 4px; background: #eee; border-radius: 2px; margin: 0 auto; overflow: hidden;">
+                <div style="width: 30%; height: 100%; background: #2563eb; border-radius: 2px; animation: loading-bar 2s ease-in-out infinite;"></div>
+            </div>
+        </div>
+    </section>
+
+    <style>
+        @keyframes loading-bar {
+            0% { transform: translateX(-100%); }
+            50% { transform: translateX(200%); }
+            100% { transform: translateX(-100%); }
+        }
+    </style>
+
+    <script>
+        document.getElementById('upload-form').addEventListener('submit', function() {
+            document.getElementById('upload-section').style.display = 'none';
+            document.getElementById('loading-section').style.display = 'block';
+        });
+    </script>
 {% endblock %}

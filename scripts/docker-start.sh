@@ -39,6 +39,9 @@ fi
 python manage.py migrate --noinput
 python manage.py collectstatic --noinput
 
+# Seed BB demo data on first run (idempotent — skips if data exists)
+python manage.py seed_bb_data
+
 if [ "$#" -gt 0 ]; then
   exec "$@"
 fi

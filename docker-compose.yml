@@ -40,6 +40,8 @@ services:
       POSTGRES_CONN_MAX_AGE: ${POSTGRES_CONN_MAX_AGE:-60}
       POSTGRES_CONNECT_TIMEOUT: ${POSTGRES_CONNECT_TIMEOUT:-5}
       DB_WAIT_TIMEOUT: ${DB_WAIT_TIMEOUT:-60}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-5.4}
     depends_on:
       db:
         condition: service_healthy

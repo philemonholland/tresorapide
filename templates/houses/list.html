@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+
+{% block title %}Maisons | Tresorapide{% endblock %}
+
+{% block content %}
+<section class="card">
+    <div class="section-heading">
+        <div>
+            <h1>Maisons</h1>
+            <p class="text-muted">Liste de toutes les maisons de la coopérative</p>
+        </div>
+        {% if can_manage %}
+        <div class="quick-links">
+            <a class="btn btn-primary" href="{% url 'houses:create' %}">+ Nouvelle maison</a>
+        </div>
+        {% endif %}
+    </div>
+
+    {% if houses %}
+    <div class="table-responsive">
+        <table class="data-table">
+            <thead>
+                <tr>
+                    <th>Code</th>
+                    <th>Nom</th>
+                    <th>Compte</th>
+                    <th>Adresse</th>
+                    <th>Trésorier</th>
+                    <th>Correspondant</th>
+                    {% if can_manage %}<th>Actions</th>{% endif %}
+                </tr>
+            </thead>
+            <tbody>
+                {% for house in houses %}
+                <tr>
+                    <td><a href="{% url 'houses:detail' house.pk %}"><strong>{{ house.code }}</strong></a></td>
+                    <td>{{ house.name }}</td>
+                    <td>{{ house.account_number }}</td>
+                    <td>{{ house.address|default:"—"|truncatewords:6 }}</td>
+                    <td>{{ house.treasurer_member.display_name|default:"—" }}</td>
+                    <td>{{ house.correspondent_member.display_name|default:"—" }}</td>
+                    {% if can_manage %}
+                    <td><a href="{% url 'houses:edit' house.pk %}">Modifier</a></td>
+                    {% endif %}
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <p class="empty-state">Aucune maison configurée.</p>
+    {% endif %}
+</section>
+{% endblock %}

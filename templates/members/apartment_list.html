@@ -1,38 +1,31 @@
 {% extends "base.html" %}
 
-{% block title %}Apartments | Tresorapide{% endblock %}
+{% block title %}Appartements | Tresorapide{% endblock %}
 
 {% block content %}
     <section class="card">
         <div class="section-heading">
             <div>
-                <h1>Apartments</h1>
-                <p class="text-muted">Maintain apartment identifiers used in residency and reimbursement records.</p>
+                <h1>Appartements</h1>
+                <p class="text-muted">Gestion des appartements de la coopérative.</p>
             </div>
-            <div class="quick-links">
-                <a class="button-link" href="{% url 'members:index' %}">Back to member dashboard</a>
-                <a class="button-link" href="{% url 'members:apartment-create' %}">New apartment</a>
-            </div>
+            <a class="button-link" href="{% url 'members:apartment-create' %}">Ajouter un appartement</a>
         </div>
     </section>
 
     <section class="card">
         <form method="get" class="filter-bar">
             <label class="filter-field">
-                <span>Search</span>
-                <input type="text" name="q" value="{{ query }}" placeholder="Code or address">
-            </label>
-            <label class="filter-field">
-                <span>Status</span>
-                <select name="activity">
-                    <option value="">All apartments</option>
-                    <option value="active"{% if activity == "active" %} selected{% endif %}>Active only</option>
-                    <option value="inactive"{% if activity == "inactive" %} selected{% endif %}>Inactive only</option>
+                <span>Statut</span>
+                <select name="show">
+                    <option value="active"{% if show == "active" %} selected{% endif %}>Actifs</option>
+                    <option value="inactive"{% if show == "inactive" %} selected{% endif %}>Inactifs</option>
+                    <option value="all"{% if show == "all" %} selected{% endif %}>Tous</option>
                 </select>
             </label>
             <div class="filter-actions">
-                <button type="submit" class="button-link">Apply filter</button>
-                <a class="button-link" href="{% url 'members:apartment-list' %}">Reset</a>
+                <button type="submit" class="button-link">Filtrer</button>
+                <a class="button-link" href="{% url 'members:apartment-list' %}">Réinitialiser</a>
             </div>
         </form>
 
@@ -41,31 +34,36 @@
                 <table class="data-table">
                     <thead>
                         <tr>
-                            <th>Apartment</th>
-                            <th>Status</th>
-                            <th>Residents</th>
-                            <th>Residency history</th>
+                            <th>Code</th>
+                            <th>Maison</th>
+                            <th>Adresse</th>
+                            <th>Résident(s) actuel(s)</th>
+                            <th>Actif</th>
                             <th>Actions</th>
                         </tr>
                     </thead>
                     <tbody>
-                        {% for apartment in apartments %}
+                        {% for apt in apartments %}
                             <tr>
-                                <td>{{ apartment.display_name }}</td>
+                                <td>{{ apt.code }}</td>
+                                <td>{{ apt.house }}</td>
+                                <td>{{ apt.street_address|default:"—" }}</td>
                                 <td>
-                                    {% if apartment.is_active %}
-                                        <span class="badge badge-approved">Active</span>
+                                    {% for r in apt.current_residencies %}
+                                        {{ r.member.display_name }}{% if not forloop.last %}, {% endif %}
+                                    {% empty %}
+                                        —
+                                    {% endfor %}
+                                </td>
+                                <td>
+                                    {% if apt.is_active %}
+                                        <span class="badge badge-approved">Oui</span>
                                     {% else %}
-                                        <span class="badge badge-archived">Inactive</span>
+                                        <span class="badge badge-archived">Non</span>
                                     {% endif %}
                                 </td>
-                                <td>{{ apartment.current_resident_count }}</td>
-                                <td>{{ apartment.residency_count }}</td>
                                 <td>
-                                    <a href="{% url 'members:apartment-edit' apartment.pk %}">Edit</a>
-                                    <div class="text-muted">
-                                        <a href="{% url 'members:residency-create' %}?apartment={{ apartment.pk }}">Add residency</a>
-                                    </div>
+                                    <a href="{% url 'members:apartment-edit' apt.pk %}">Modifier</a>
                                 </td>
                             </tr>
                         {% endfor %}
@@ -73,7 +71,7 @@
                 </table>
             </div>
         {% else %}
-            <p class="empty-state">No apartments match the current filters.</p>
+            <p class="empty-state">Aucun appartement trouvé.</p>
         {% endif %}
     </section>
 {% endblock %}

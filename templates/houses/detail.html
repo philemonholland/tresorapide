@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+
+{% block title %}{{ house }} | Tresorapide{% endblock %}
+
+{% block content %}
+<section class="card">
+    <div class="section-heading">
+        <div>
+            <h1>{{ house.code }} — {{ house.name }}</h1>
+            <p class="text-muted">Compte : {{ house.account_number }}</p>
+        </div>
+        {% if can_manage %}
+        <div class="quick-links">
+            <a class="btn btn-primary" href="{% url 'houses:edit' house.pk %}">Modifier</a>
+            <a class="button-link" href="{% url 'houses:list' %}">Toutes les maisons</a>
+        </div>
+        {% endif %}
+    </div>
+
+    <dl class="detail-grid">
+        <div>
+            <dt>Adresse</dt>
+            <dd>{{ house.address|default:"—" }}</dd>
+        </div>
+        <div>
+            <dt>Téléphone</dt>
+            <dd>{{ house.phone|default:"—" }}</dd>
+        </div>
+        <div>
+            <dt>Courriel</dt>
+            <dd>{{ house.email|default:"—" }}</dd>
+        </div>
+        <div>
+            <dt>Trésorier</dt>
+            <dd>{{ house.treasurer_member.display_name|default:"Non assigné" }}</dd>
+        </div>
+        <div>
+            <dt>Correspondant</dt>
+            <dd>{{ house.correspondent_member.display_name|default:"Non assigné" }}</dd>
+        </div>
+        <div>
+            <dt>Active</dt>
+            <dd>{{ house.is_active|yesno:"Oui,Non" }}</dd>
+        </div>
+    </dl>
+
+    {% if house.notes %}
+    <div style="margin-top: 1rem;">
+        <dt>Notes</dt>
+        <dd>{{ house.notes }}</dd>
+    </div>
+    {% endif %}
+</section>
+
+{% if apartments %}
+<section class="card">
+    <h2>Appartements ({{ apartments|length }})</h2>
+    <div class="table-responsive">
+        <table class="data-table">
+            <thead>
+                <tr>
+                    <th>Code</th>
+                    <th>Adresse</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for apt in apartments %}
+                <tr>
+                    <td>{{ apt.code }}</td>
+                    <td>{{ apt.street_address|default:"—" }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+{% endif %}
+{% endblock %}

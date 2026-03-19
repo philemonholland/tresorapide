@@ -1,0 +1,101 @@
+{% extends "base.html" %}
+
+{% block title %}{{ member.display_name }} | Tresorapide{% endblock %}
+
+{% block content %}
+    <section class="card">
+        <div class="section-heading">
+            <div>
+                <h1>{{ member.display_name }}</h1>
+                <p class="text-muted">Fiche membre et historique des résidences.</p>
+            </div>
+            <div class="quick-links">
+                <a class="button-link" href="{% url 'members:member-edit' member.pk %}">Modifier</a>
+                <a class="button-link" href="{% url 'members:residency-create' %}?member={{ member.pk }}">Ajouter une résidence</a>
+            </div>
+        </div>
+
+        <div class="detail-grid">
+            <div>
+                <dt>Prénom</dt>
+                <dd>{{ member.first_name }}</dd>
+            </div>
+            <div>
+                <dt>Nom de famille</dt>
+                <dd>{{ member.last_name }}</dd>
+            </div>
+            {% if member.preferred_name %}
+            <div>
+                <dt>Nom préféré</dt>
+                <dd>{{ member.preferred_name }}</dd>
+            </div>
+            {% endif %}
+            <div>
+                <dt>Courriel</dt>
+                <dd>{{ member.email|default:"—" }}</dd>
+            </div>
+            <div>
+                <dt>Téléphone</dt>
+                <dd>{{ member.phone_number|default:"—" }}</dd>
+            </div>
+            <div>
+                <dt>Statut</dt>
+                <dd>
+                    {% if member.is_active %}
+                        <span class="badge badge-approved">Actif</span>
+                    {% else %}
+                        <span class="badge badge-archived">Inactif</span>
+                    {% endif %}
+                </dd>
+            </div>
+            {% if member.notes %}
+            <div>
+                <dt>Notes</dt>
+                <dd>{{ member.notes }}</dd>
+            </div>
+            {% endif %}
+        </div>
+    </section>
+
+    <section class="card">
+        <div class="section-heading">
+            <h2>Historique des résidences</h2>
+        </div>
+        {% if residencies %}
+            <div class="table-responsive">
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>Appartement</th>
+                            <th>Maison</th>
+                            <th>Début</th>
+                            <th>Fin</th>
+                            <th>Contact principal</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for r in residencies %}
+                            <tr>
+                                <td>{{ r.apartment.code }}</td>
+                                <td>{{ r.apartment.house }}</td>
+                                <td>{{ r.start_date|date:"j M Y" }}</td>
+                                <td>{% if r.end_date %}{{ r.end_date|date:"j M Y" }}{% else %}—{% endif %}</td>
+                                <td>
+                                    {% if r.is_primary_contact %}
+                                        <span class="badge badge-approved">Oui</span>
+                                    {% else %}
+                                        Non
+                                    {% endif %}
+                                </td>
+                                <td><a href="{% url 'members:residency-edit' r.pk %}">Modifier</a></td>
+                            </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        {% else %}
+            <p class="empty-state">Aucune résidence enregistrée.</p>
+        {% endif %}
+    </section>
+{% endblock %}

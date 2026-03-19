@@ -11,25 +11,25 @@
             </div>
             <div class="quick-links">
                 {% if can_manage %}
-                    <a class="button-link" href="{% url 'reimbursements:create' %}">New reimbursement</a>
+                    <a class="button-link" href="{% url 'reimbursements:create' %}">Nouveau remboursement</a>
                 {% endif %}
-                <a class="button-link" href="{{ archive_url }}">Archive &amp; void history</a>
-                <a class="button-link" href="{% url 'budget:list' %}">Budget summary</a>
+                <a class="button-link" href="{{ archive_url }}">Archives et annulations</a>
+                <a class="button-link" href="{% url 'budget:list' %}">Résumé budgétaire</a>
             </div>
         </div>
         <p>{{ transparency_note }}</p>
         <div class="stat-grid compact-grid">
             <article class="stat-card subtle-card">
                 <h3>{{ summary.reimbursement_count }}</h3>
-                <p>Visible records</p>
+                <p>Enregistrements visibles</p>
             </article>
             <article class="stat-card subtle-card">
                 <h3>{{ summary.archived_count }}</h3>
-                <p>Archived records</p>
+                <p>Enregistrements archivés</p>
             </article>
             <article class="stat-card subtle-card">
                 <h3>{{ summary.void_count }}</h3>
-                <p>Voided records</p>
+                <p>Enregistrements annulés</p>
             </article>
         </div>
     </section>
@@ -37,13 +37,13 @@
     <section class="card">
         <form method="get" class="filter-bar">
             <label class="filter-field">
-                <span>Search</span>
-                <input type="text" name="q" value="{{ current_query }}" placeholder="Reference, title, member, budget">
+                <span>Recherche</span>
+                <input type="text" name="q" value="{{ current_query }}" placeholder="Référence, titre, membre, budget">
             </label>
             <label class="filter-field">
-                <span>Budget year</span>
+                <span>Année budgétaire</span>
                 <select name="year">
-                    <option value="">All years</option>
+                    <option value="">Toutes les années</option>
                     {% for budget_year in budget_years %}
                         <option value="{{ budget_year.pk }}"{% if current_year == budget_year.pk|stringformat:"s" %} selected{% endif %}>
                             {{ budget_year.label }}
@@ -52,9 +52,9 @@
                 </select>
             </label>
             <label class="filter-field">
-                <span>Budget category</span>
+                <span>Catégorie budgétaire</span>
                 <select name="category">
-                    <option value="">All categories</option>
+                    <option value="">Toutes les catégories</option>
                     {% for category in budget_categories %}
                         <option value="{{ category.pk }}"{% if current_category == category.pk|stringformat:"s" %} selected{% endif %}>
                             {{ category.budget_year.label }} / {{ category.code }} - {{ category.name }}
@@ -63,9 +63,9 @@
                 </select>
             </label>
             <label class="filter-field">
-                <span>Status</span>
+                <span>Statut</span>
                 <select name="status">
-                    <option value="">All visible statuses</option>
+                    <option value="">Tous les statuts visibles</option>
                     {% for status_value, status_label in status_choices %}
                         <option value="{{ status_value }}"{% if current_status == status_value %} selected{% endif %}>
                             {{ status_label }}
@@ -74,8 +74,8 @@
                 </select>
             </label>
             <div class="filter-actions">
-                <button type="submit" class="button-link">Apply filter</button>
-                <a class="button-link" href="{% url 'reimbursements:list' %}">Reset</a>
+                <button type="submit" class="button-link">Appliquer le filtre</button>
+                <a class="button-link" href="{% url 'reimbursements:list' %}">Réinitialiser</a>
             </div>
         </form>
 
@@ -84,16 +84,16 @@
                 <table class="data-table">
                     <thead>
                         <tr>
-                            <th>Reference</th>
-                            <th>Member</th>
-                            <th>Title</th>
+                            <th>Référence</th>
+                            <th>Membre</th>
+                            <th>Titre</th>
                             <th>Budget</th>
-                            <th>Status</th>
-                            <th>Expense date</th>
-                            <th>Requested</th>
-                            <th>Approved</th>
-                            <th>Receipts</th>
-                            <th>Archive notes</th>
+                            <th>Statut</th>
+                            <th>Date de dépense</th>
+                            <th>Demandé</th>
+                            <th>Approuvé</th>
+                            <th>Reçus</th>
+                            <th>Notes d'archive</th>
                             {% if can_manage %}
                                 <th>Actions</th>
                             {% endif %}
@@ -107,21 +107,21 @@
                                 <td>{{ reimbursement.title }}</td>
                                 <td>{{ reimbursement.budget_year_label_snapshot }} / {{ reimbursement.budget_category_code_snapshot }}</td>
                                 <td><span class="badge badge-{{ reimbursement.status }}">{{ reimbursement.get_status_display }}</span></td>
-                                <td>{{ reimbursement.expense_date|date:"M j, Y" }}</td>
-                                <td>${{ reimbursement.amount_requested|floatformat:2 }}</td>
+                                <td>{{ reimbursement.expense_date|date:"j M Y" }}</td>
+                                <td>{{ reimbursement.amount_requested|floatformat:2 }}&nbsp;$</td>
                                 <td>
                                     {% if reimbursement.amount_approved is not None %}
-                                        ${{ reimbursement.amount_approved|floatformat:2 }}
+                                        {{ reimbursement.amount_approved|floatformat:2 }}&nbsp;$
                                     {% else %}
                                         —
                                     {% endif %}
                                 </td>
-                                <td>{{ reimbursement.active_receipt_count }} active / {{ reimbursement.archived_receipt_count }} archived</td>
+                                <td>{{ reimbursement.active_receipt_count }} actif{{ reimbursement.active_receipt_count|pluralize:"s" }} / {{ reimbursement.archived_receipt_count }} archivé{{ reimbursement.archived_receipt_count|pluralize:"s" }}</td>
                                 <td>
                                     {% if reimbursement.archived_at %}
-                                        Archived {{ reimbursement.archived_at|date:"M j, Y" }}
+                                        Archivé le {{ reimbursement.archived_at|date:"j M Y" }}
                                     {% elif reimbursement.status == "void" %}
-                                        {{ reimbursement.void_reason|default:"Voided" }}
+                                        {{ reimbursement.void_reason|default:"Annulé" }}
                                     {% else %}
                                         —
                                     {% endif %}
@@ -129,11 +129,11 @@
                                 {% if can_manage %}
                                     <td>
                                         <a href="{% url 'reimbursements:detail' reimbursement.pk %}">
-                                            {% if reimbursement.status == "submitted" %}Review{% else %}Open{% endif %}
+                                            {% if reimbursement.status == "submitted" %}Réviser{% else %}Ouvrir{% endif %}
                                         </a>
                                         {% if reimbursement.status == "draft" or reimbursement.status == "submitted" %}
                                             <div class="text-muted">
-                                                <a href="{% url 'reimbursements:edit' reimbursement.pk %}">Edit</a>
+                                                <a href="{% url 'reimbursements:edit' reimbursement.pk %}">Modifier</a>
                                             </div>
                                         {% endif %}
                                         <div class="text-muted">
@@ -147,7 +147,7 @@
                 </table>
             </div>
         {% else %}
-            <p class="empty-state">No reimbursements match the current visibility and filter settings.</p>
+            <p class="empty-state">Aucun remboursement ne correspond aux paramètres de visibilité et de filtre actuels.</p>
         {% endif %}
     </section>
 {% endblock %}

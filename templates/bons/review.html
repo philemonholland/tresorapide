@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 
-{% block title %}Vérifier les données extraites — BC {{ bon.number }} | Tresorapide{% endblock %}
+{% block title %}Vérifier reçu {{ current_idx|add:1 }} de {{ total_receipts }} — BC {{ bon.number }} | Tresorapide{% endblock %}
 
 {% block content %}
     <section class="card">
@@ -8,77 +8,147 @@
             <div>
                 <h1>Vérifier les données extraites</h1>
                 <p class="text-muted">
-                    Étape 2 sur 3 — Vérifiez et corrigez les informations extraites de vos reçus pour le bon {{ bon.number }}.
+                    Étape 2 sur 3 — Reçu <strong>{{ current_idx|add:1 }}</strong> de <strong>{{ total_receipts }}</strong>
+                    {% if total_receipts > 1 %}
+                    · Bon {{ bon.number }}
+                    {% endif %}
                 </p>
             </div>
             <a class="button-link" href="{% url 'bons:list' %}">Retour à la liste</a>
         </div>
     </section>
 
-    <form method="post" class="stack">
-        {% csrf_token %}
+    <section class="card">
+        <h2>{{ receipt.original_filename }}</h2>
 
-        {% for receipt, form in receipt_forms %}
-        <section class="card">
-            <h2>Reçu : {{ receipt.original_filename }}</h2>
+        {% if receipt.ocr_status == "FAILED" and receipt.ocr_raw_text %}
+            <div class="message warning" style="margin-bottom: 1rem;">
+                ⚠️ {{ receipt.ocr_raw_text }}
+            </div>
+        {% elif receipt.ocr_status == "FAILED" or receipt.ocr_status == "NOT_REQUESTED" %}
+            <div class="message warning" style="margin-bottom: 1rem;">
+                ⚠️ L'analyse automatique n'a pas fonctionné. Veuillez saisir les informations manuellement.
+            </div>
+        {% endif %}
+
+        <form method="post" class="stack" action="?idx={{ current_idx }}">
+            {% csrf_token %}
+            <input type="hidden" name="idx" value="{{ current_idx }}">
+
             <div style="display: flex; gap: 2rem; flex-wrap: wrap;">
+                <!-- Receipt image -->
                 <div style="flex: 1; min-width: 250px;">
                     {% if receipt.content_type == "application/pdf" %}
                         <p>
-                            <a href="{{ receipt.file.url }}" target="_blank">📄 Ouvrir le PDF</a>
+                            <a href="{{ receipt.file.url }}" target="_blank" class="btn">📄 Ouvrir le PDF</a>
                         </p>
                     {% else %}
                         <img src="{{ receipt.file.url }}" alt="{{ receipt.original_filename }}"
-                             style="max-width: 100%; max-height: 500px; border: 1px solid #ccc; border-radius: 4px;">
-                    {% endif %}
-
-                    {% if receipt.ocr_status == "FAILED" or receipt.ocr_status == "NOT_REQUESTED" %}
-                        <p class="message warning" style="margin-top: 0.5rem;">
-                            ⚠️ L'OCR n'a pas pu extraire de données. Veuillez saisir les informations manuellement.
-                        </p>
+                             style="max-width: 100%; max-height: 600px; border: 1px solid #ccc; border-radius: 4px;">
                     {% endif %}
                 </div>
 
+                <!-- Extracted data form -->
                 <div style="flex: 1; min-width: 300px;">
                     {{ form.non_field_errors }}
 
-                    <div class="form-group {% if form.merchant_name.errors %}has-error{% endif %}">
-                        <label for="{{ form.merchant_name.id_for_label }}">{{ form.merchant_name.label }}</label>
-                        {{ form.merchant_name }}
-                        {% for error in form.merchant_name.errors %}<p class="error-text">{{ error }}</p>{% endfor %}
+                    {% if matched_member_name %}
+                    <div class="message success" style="margin-bottom: 1rem;">
+                        ✅ Membre identifié : <strong>{{ matched_member_name }}</strong>
                     </div>
-                    <div class="form-group {% if form.purchase_date.errors %}has-error{% endif %}">
-                        <label for="{{ form.purchase_date.id_for_label }}">{{ form.purchase_date.label }}</label>
-                        {{ form.purchase_date }}
-                        {% for error in form.purchase_date.errors %}<p class="error-text">{{ error }}</p>{% endfor %}
-                    </div>
-                    <div class="form-group {% if form.subtotal.errors %}has-error{% endif %}">
-                        <label for="{{ form.subtotal.id_for_label }}">{{ form.subtotal.label }}</label>
-                        {{ form.subtotal }}
-                        {% for error in form.subtotal.errors %}<p class="error-text">{{ error }}</p>{% endfor %}
-                    </div>
-                    <div class="form-group {% if form.tps.errors %}has-error{% endif %}">
-                        <label for="{{ form.tps.id_for_label }}">{{ form.tps.label }}</label>
-                        {{ form.tps }}
-                        {% for error in form.tps.errors %}<p class="error-text">{{ error }}</p>{% endfor %}
-                    </div>
-                    <div class="form-group {% if form.tvq.errors %}has-error{% endif %}">
-                        <label for="{{ form.tvq.id_for_label }}">{{ form.tvq.label }}</label>
-                        {{ form.tvq }}
-                        {% for error in form.tvq.errors %}<p class="error-text">{{ error }}</p>{% endfor %}
-                    </div>
-                    <div class="form-group {% if form.total.errors %}has-error{% endif %}">
-                        <label for="{{ form.total.id_for_label }}">{{ form.total.label }}</label>
-                        {{ form.total }}
-                        {% for error in form.total.errors %}<p class="error-text">{{ error }}</p>{% endfor %}
-                    </div>
+                    {% endif %}
+
+                    <fieldset style="border: 1px solid #ddd; border-radius: 4px; padding: 1rem; margin-bottom: 1rem;">
+                        <legend style="font-weight: bold; padding: 0 0.5rem;">Identification du membre</legend>
+
+                        <div class="form-group {% if form.apartment_number.errors %}has-error{% endif %}">
+                            <label for="{{ form.apartment_number.id_for_label }}">{{ form.apartment_number.label }}</label>
+                            {{ form.apartment_number }}
+                            {% for error in form.apartment_number.errors %}<p class="error-text">{{ error }}</p>{% endfor %}
+                        </div>
+                        <div class="form-group">
+                            <label for="{{ form.member_name_raw.id_for_label }}">{{ form.member_name_raw.label }}</label>
+                            {{ form.member_name_raw }}
+                            {% if name_mismatch %}
+                                <p style="color: red; font-weight: bold; margin-top: 0.25rem;">
+                                    ⚠️ Le nom extrait ne correspond pas au membre identifié. Vérifiez la sélection.
+                                </p>
+                            {% endif %}
+                            <small class="text-muted">{{ form.member_name_raw.help_text }}</small>
+                        </div>
+                        <div class="form-group {% if form.purchaser_member.errors %}has-error{% endif %}">
+                            <label for="{{ form.purchaser_member.id_for_label }}">{{ form.purchaser_member.label }} <span style="color:red">*</span></label>
+                            {{ form.purchaser_member }}
+                            {% for error in form.purchaser_member.errors %}<p class="error-text">{{ error }}</p>{% endfor %}
+                        </div>
+                        {{ form.matched_member_id }}
+                    </fieldset>
+
+                    <fieldset style="border: 1px solid #ddd; border-radius: 4px; padding: 1rem; margin-bottom: 1rem;">
+                        <legend style="font-weight: bold; padding: 0 0.5rem;">Détails de l'achat</legend>
+
+                        <div class="form-group {% if form.sub_budget.errors %}has-error{% endif %}">
+                            <label for="{{ form.sub_budget.id_for_label }}">{{ form.sub_budget.label }} <span style="color:red">*</span></label>
+                            {{ form.sub_budget }}
+                            {% for error in form.sub_budget.errors %}<p class="error-text">{{ error }}</p>{% endfor %}
+                        </div>
+                        <div class="form-group {% if form.merchant_name.errors %}has-error{% endif %}">
+                            <label for="{{ form.merchant_name.id_for_label }}">{{ form.merchant_name.label }}</label>
+                            {{ form.merchant_name }}
+                            {% for error in form.merchant_name.errors %}<p class="error-text">{{ error }}</p>{% endfor %}
+                        </div>
+                        <div class="form-group {% if form.purchase_date.errors %}has-error{% endif %}">
+                            <label for="{{ form.purchase_date.id_for_label }}">{{ form.purchase_date.label }}</label>
+                            {{ form.purchase_date }}
+                            {% for error in form.purchase_date.errors %}<p class="error-text">{{ error }}</p>{% endfor %}
+                        </div>
+                    </fieldset>
+
+                    <fieldset style="border: 1px solid #ddd; border-radius: 4px; padding: 1rem; margin-bottom: 1rem;">
+                        <legend style="font-weight: bold; padding: 0 0.5rem;">Montants</legend>
+
+                        <div class="form-group {% if form.subtotal.errors %}has-error{% endif %}">
+                            <label for="{{ form.subtotal.id_for_label }}">{{ form.subtotal.label }}</label>
+                            {{ form.subtotal }}
+                            {% for error in form.subtotal.errors %}<p class="error-text">{{ error }}</p>{% endfor %}
+                        </div>
+                        <div class="form-group {% if form.tps.errors %}has-error{% endif %}">
+                            <label for="{{ form.tps.id_for_label }}">{{ form.tps.label }}</label>
+                            {{ form.tps }}
+                            {% for error in form.tps.errors %}<p class="error-text">{{ error }}</p>{% endfor %}
+                        </div>
+                        <div class="form-group {% if form.tvq.errors %}has-error{% endif %}">
+                            <label for="{{ form.tvq.id_for_label }}">{{ form.tvq.label }}</label>
+                            {{ form.tvq }}
+                            {% for error in form.tvq.errors %}<p class="error-text">{{ error }}</p>{% endfor %}
+                        </div>
+                        <div class="form-group {% if form.total.errors %}has-error{% endif %}">
+                            <label for="{{ form.total.id_for_label }}">{{ form.total.label }}</label>
+                            {{ form.total }}
+                            {% for error in form.total.errors %}<p class="error-text">{{ error }}</p>{% endfor %}
+                        </div>
+                    </fieldset>
                 </div>
             </div>
-        </section>
-        {% endfor %}
 
-        <section class="card" style="text-align: center;">
-            <button type="submit" class="btn btn-primary btn-lg">Confirmer et compléter le bon</button>
-        </section>
-    </form>
+            <!-- Navigation -->
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 1.5rem; padding-top: 1rem; border-top: 1px solid #eee;">
+                {% if prev_url %}
+                    <a href="{{ prev_url }}" class="btn">← Précédent</a>
+                {% else %}
+                    <span></span>
+                {% endif %}
+
+                {% if is_last %}
+                    <button type="submit" class="btn btn-primary btn-lg">
+                        ✓ Confirmer et {% if total_receipts > 1 %}créer les bons{% else %}compléter le bon{% endif %}
+                    </button>
+                {% else %}
+                    <button type="submit" class="btn btn-primary">
+                        Confirmer et passer au suivant →
+                    </button>
+                {% endif %}
+            </div>
+        </form>
+    </section>
 {% endblock %}

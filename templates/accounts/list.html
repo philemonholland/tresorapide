@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+
+{% block title %}Comptes | Tresorapide{% endblock %}
+
+{% block content %}
+    <section class="card">
+        <div class="section-heading">
+            <div>
+                <h1>Comptes utilisateurs</h1>
+                <p class="text-muted">Gestion des comptes d'accès à l'application.</p>
+            </div>
+            {% if can_create %}
+                <a class="button-link" href="{% url 'accounts:create' %}">Créer un compte</a>
+            {% endif %}
+        </div>
+    </section>
+
+    <section class="card">
+        {% if accounts %}
+            <div class="table-responsive">
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>Nom d'utilisateur</th>
+                            <th>Rôle</th>
+                            <th>Maison</th>
+                            <th>Membre</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for account in accounts %}
+                            <tr>
+                                <td>{{ account.username }}</td>
+                                <td>{{ account.get_role_display }}</td>
+                                <td>{{ account.house|default:"—" }}</td>
+                                <td>
+                                    {% if account.member %}
+                                        <a href="{% url 'members:member-detail' account.member.pk %}">{{ account.member.display_name }}</a>
+                                    {% else %}
+                                        —
+                                    {% endif %}
+                                </td>
+                                <td>
+                                    {% if account.pk != request.user.pk %}
+                                        <form method="post" action="{% url 'accounts:delete' account.pk %}"
+                                              onsubmit="return confirm('Supprimer le compte « {{ account.username }} » ?');">
+                                            {% csrf_token %}
+                                            <button type="submit" class="btn btn-danger btn-sm">Supprimer</button>
+                                        </form>
+                                    {% else %}
+                                        <span class="text-muted">—</span>
+                                    {% endif %}
+                                </td>
+                            </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        {% else %}
+            <p class="empty-state">Aucun compte trouvé.</p>
+        {% endif %}
+    </section>
+{% endblock %}

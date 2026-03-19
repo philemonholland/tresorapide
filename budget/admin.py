@@ -1,34 +1,36 @@
-"""Admin registrations for budget app."""
-
-from __future__ import annotations
-
 from django.contrib import admin
+from .models import BudgetYear, SubBudget, Expense
 
-from budget.models import BudgetCategory, BudgetYear
 
-
-class BudgetCategoryInline(admin.TabularInline):
-    """Inline category configuration per budget year."""
-
-    model = BudgetCategory
+class SubBudgetInline(admin.TabularInline):
+    model = SubBudget
     extra = 0
+    fields = ("trace_code", "name", "repeat_type", "planned_amount", "sort_order", "is_contingency", "is_active")
 
 
 @admin.register(BudgetYear)
 class BudgetYearAdmin(admin.ModelAdmin):
-    """Admin configuration for budget years."""
-
-    list_display = ("label", "start_date", "end_date", "is_closed")
-    list_filter = ("is_closed",)
-    search_fields = ("label",)
-    inlines = (BudgetCategoryInline,)
+    list_display = ("label", "house", "year", "annual_budget_total", "snow_budget", "is_active", "is_closed")
+    list_filter = ("house", "is_active", "is_closed")
+    search_fields = ("label", "house__code", "house__name")
+    inlines = [SubBudgetInline]
 
 
-@admin.register(BudgetCategory)
-class BudgetCategoryAdmin(admin.ModelAdmin):
-    """Admin configuration for budget categories."""
+@admin.register(SubBudget)
+class SubBudgetAdmin(admin.ModelAdmin):
+    list_display = ("name", "trace_code", "budget_year", "planned_amount", "repeat_type", "is_contingency", "is_active")
+    list_filter = ("budget_year__house", "repeat_type", "is_contingency", "is_active")
+    search_fields = ("name",)
 
-    list_display = ("code", "name", "budget_year", "planned_amount", "is_active", "sort_order")
-    list_filter = ("budget_year", "is_active")
-    search_fields = ("code", "name")
-    autocomplete_fields = ("budget_year",)
+
+@admin.register(Expense)
+class ExpenseAdmin(admin.ModelAdmin):
+    list_display = ("entry_date", "description_short", "amount", "sub_budget", "source_type", "validated_gl")
+    list_filter = ("budget_year__house", "source_type", "validated_gl", "budget_year")
+    search_fields = ("description", "supplier_name", "bon_number")
+    raw_id_fields = ("budget_year", "sub_budget", "bon_de_commande", "entered_by")
+    date_hierarchy = "entry_date"
+
+    def description_short(self, obj):
+        return obj.description[:80]
+    description_short.short_description = "Description"

@@ -1,241 +1,281 @@
-"""Budget transparency and treasurer management views."""
-from __future__ import annotations
-
 from decimal import Decimal
 
-from django.contrib import messages
-from django.db.models import Count, DecimalField, ExpressionWrapper, F, Q, Sum, Value
-from django.db.models.functions import Coalesce
-from django.urls import reverse, reverse_lazy
-from django.views.generic import CreateView, DetailView, ListView, UpdateView
+from django.core.exceptions import PermissionDenied
+from django.urls import reverse_lazy, reverse
+from django.views.generic import ListView, DetailView, CreateView, UpdateView
+from django.shortcuts import get_object_or_404
 
-from accounts.access import RoleRequiredMixin, TreasurerRequiredMixin
-from budget.forms import BudgetCategoryForm, BudgetYearForm
-from budget.models import BudgetCategory, BudgetYear
-from reimbursements.models import ReimbursementStatus
-from reimbursements.queries import (
-    can_user_review_internal_reimbursements,
-    transparency_visibility_note,
-    viewer_visible_reimbursement_q,
-    visible_reimbursements_for_user,
-)
+from accounts.access import RoleRequiredMixin, TreasurerRequiredMixin, check_house_permission
+from .models import BudgetYear, SubBudget, Expense
+from .forms import BudgetYearForm, SubBudgetForm, ExpenseForm
+from .services import BudgetCalculationService
 
-MONEY_FIELD = DecimalField(max_digits=14, decimal_places=2)
-ZERO_MONEY = Value(Decimal("0.00"), output_field=MONEY_FIELD)
-
-
-class SuccessMessageFormMixin:
-    """Attach a success message for budget management forms."""
-
-    success_message = ""
-
-    def form_valid(self, form):  # type: ignore[override]
-        """Show a friendly message after saving."""
-        response = super().form_valid(form)
-        if self.success_message:
-            messages.success(self.request, self.success_message)
-        return response
+SEED_CATEGORIES = [
+    # (trace_code, name, repeat_type, sort_order)
+    (1, "Réparations par appartement", "annual", 1),
+    (2, "Réparations BB", "annual", 2),
+    (3, "Inspection alarme/extincteurs", "annual", 3),
+    (4, "Inspection extincteurs", "annual", 4),
+    (5, "Exterminateur", "annual", 5),
+    (6, "Corvées", "annual", 6),
+    (7, "Produits ménager/entretien", "annual", 7),
+    (8, "Transport", "annual", 8),
+    (9, "Photocopies", "annual", 9),
+    (10, "Activités sociales", "annual", 10),
+    (11, "Peinture", "annual", 11),
+    (12, "Rouille", "unique", 12),
+    (99, "Autre dépenses", "annual", 99),
+]
 
 
-class BudgetYearListView(RoleRequiredMixin, ListView):
-    """List budget years with planned-versus-used summaries."""
+def _filter_by_house(qs, user):
+    """Les non-gestionnaires ne voient que les données de leur maison."""
+    if not user.is_gestionnaire:
+        return qs.filter(house=user.house)
+    return qs
 
+
+# ---------------------------------------------------------------------------
+# BudgetYear views
+# ---------------------------------------------------------------------------
+
+class BudgetYearListView(ListView):
     model = BudgetYear
     template_name = "budget/year_list.html"
     context_object_name = "budget_years"
 
     def get_queryset(self):
-        """Annotate year-level budget planning totals."""
+        return super().get_queryset()
 
-        return (
-            BudgetYear.objects.annotate(
-                category_count=Count("categories", distinct=True),
-                planned_total=Coalesce(
-                    Sum("categories__planned_amount"),
-                    ZERO_MONEY,
-                    output_field=MONEY_FIELD,
-                ),
-            )
-            .annotate(
-                remaining_total=ExpressionWrapper(
-                    F("planned_total") - F("approved_reimbursement_total"),
-                    output_field=MONEY_FIELD,
-                )
-            )
-            .order_by("-start_date", "-id")
+    def get_context_data(self, **kwargs):
+        ctx = super().get_context_data(**kwargs)
+        ctx["can_manage"] = (
+            self.request.user.is_authenticated
+            and self.request.user.can_manage_financials
         )
-
-    def get_context_data(self, **kwargs: object) -> dict[str, object]:
-        """Add a short visibility note for viewer roles."""
-
-        context = super().get_context_data(**kwargs)
-        context["transparency_note"] = transparency_visibility_note(self.request.user)
-        context["can_manage"] = can_user_review_internal_reimbursements(self.request.user)
-        return context
+        return ctx
 
 
-class BudgetYearDetailView(RoleRequiredMixin, DetailView):
-    """Show category-level planned-versus-used reporting for a year."""
-
+class BudgetYearDetailView(DetailView):
     model = BudgetYear
     template_name = "budget/year_detail.html"
     context_object_name = "budget_year"
 
-    def get_queryset(self):
-        """Annotate the selected year with roll-up planning totals."""
+    def get_context_data(self, **kwargs):
+        ctx = super().get_context_data(**kwargs)
+        by = self.object
+        svc = BudgetCalculationService
 
-        return BudgetYear.objects.annotate(
-            category_count=Count("categories", distinct=True),
-            planned_total=Coalesce(
-                Sum("categories__planned_amount"),
-                ZERO_MONEY,
-                output_field=MONEY_FIELD,
-            ),
-        ).annotate(
-            remaining_total=ExpressionWrapper(
-                F("planned_total") - F("approved_reimbursement_total"),
-                output_field=MONEY_FIELD,
-            ),
+        ctx["base"] = svc.base_values(by)
+        ctx["repair_totals"] = svc.repair_totals(by)
+        ctx["imprevues_totals"] = svc.imprevues_totals(by)
+        ctx["available"] = svc.available_money(by)
+        ctx["unbudgeted"] = svc.unbudgeted_available(by)
+        ctx["categories"] = svc.category_summary(by)
+        ctx["ledger_rows"] = svc.running_balances(by)
+        ctx["can_manage"] = (
+            self.request.user.is_authenticated
+            and self.request.user.can_manage_financials
         )
 
-    def get_context_data(self, **kwargs: object) -> dict[str, object]:
-        """Add category summaries and recent visible reimbursements."""
-
-        context = super().get_context_data(**kwargs)
-        visible_filter = (
-            Q()
-            if can_user_review_internal_reimbursements(self.request.user)
-            else viewer_visible_reimbursement_q("reimbursements__")
+        # Totals excluding contingency for sub-budget table footer
+        non_contingency = [
+            c for c in ctx["categories"] if not c["sub_budget"].is_contingency
+        ]
+        ctx["cat_total_planned"] = (
+            sum((c["planned"] for c in non_contingency), Decimal("0"))
         )
-        context["categories"] = self.object.categories.annotate(
-            visible_reimbursement_count=Count(
-                "reimbursements",
-                filter=visible_filter,
-                distinct=True,
-            ),
-            archived_reimbursement_count=Count(
-                "reimbursements",
-                filter=visible_filter & Q(reimbursements__archived_at__isnull=False),
-                distinct=True,
-            ),
-            void_reimbursement_count=Count(
-                "reimbursements",
-                filter=visible_filter & Q(reimbursements__status=ReimbursementStatus.VOID),
-                distinct=True,
-            ),
-            remaining_amount=ExpressionWrapper(
-                F("planned_amount") - F("approved_reimbursement_total"),
-                output_field=MONEY_FIELD,
-            ),
-        ).order_by("sort_order", "code", "id")
-        context["recent_reimbursements"] = visible_reimbursements_for_user(
-            self.request.user
-        ).filter(budget_year=self.object)[:10]
-        context["transparency_note"] = transparency_visibility_note(self.request.user)
-        context["can_manage"] = can_user_review_internal_reimbursements(self.request.user)
-        return context
-
-
-class BudgetCategoryDetailView(RoleRequiredMixin, DetailView):
-    """Show read-only category transparency details."""
-
-    model = BudgetCategory
-    template_name = "budget/category_detail.html"
-    context_object_name = "category"
-
-    def get_queryset(self):
-        """Annotate the category with remaining-planned information."""
-
-        return BudgetCategory.objects.select_related("budget_year").annotate(
-            remaining_amount=ExpressionWrapper(
-                F("planned_amount") - F("approved_reimbursement_total"),
-                output_field=MONEY_FIELD,
-            )
+        ctx["cat_total_used"] = (
+            sum((c["used"] for c in non_contingency), Decimal("0"))
         )
-
-    def get_context_data(self, **kwargs: object) -> dict[str, object]:
-        """Add visible reimbursements and transparency summaries."""
-
-        context = super().get_context_data(**kwargs)
-        reimbursements = visible_reimbursements_for_user(self.request.user).filter(
-            budget_category=self.object
+        ctx["cat_total_remaining"] = (
+            sum((c["remaining"] for c in non_contingency), Decimal("0"))
         )
-        context["reimbursements"] = reimbursements
-        context["reimbursement_summary"] = reimbursements.aggregate(
-            visible_count=Count("id"),
-            archived_count=Count("id", filter=Q(archived_at__isnull=False)),
-            void_count=Count("id", filter=Q(status=ReimbursementStatus.VOID)),
-        )
-        context["transparency_note"] = transparency_visibility_note(self.request.user)
-        context["can_manage"] = can_user_review_internal_reimbursements(self.request.user)
-        return context
+        return ctx
 
 
-class BudgetYearCreateView(TreasurerRequiredMixin, SuccessMessageFormMixin, CreateView):
-    """Create a budget year from the treasurer interface."""
-
+class BudgetYearCreateView(TreasurerRequiredMixin, CreateView):
     model = BudgetYear
     form_class = BudgetYearForm
     template_name = "budget/year_form.html"
-    success_url = reverse_lazy("budget:list")
-    success_message = "Budget year created."
+
+    def get_form(self, form_class=None):
+        form = super().get_form(form_class)
+        if not self.request.user.is_gestionnaire:
+            form.fields["house"].initial = self.request.user.house
+            form.fields["house"].widget = form.fields["house"].hidden_widget()
+        return form
+
+    def form_valid(self, form):
+        if not self.request.user.is_gestionnaire:
+            form.instance.house = self.request.user.house
+        check_house_permission(self.request.user, form.instance.house)
+        response = super().form_valid(form)
+        if form.cleaned_data.get("seed_default_categories"):
+            for code, name, repeat, order in SEED_CATEGORIES:
+                SubBudget.objects.get_or_create(
+                    budget_year=self.object,
+                    trace_code=code,
+                    defaults={
+                        "name": name,
+                        "repeat_type": repeat,
+                        "sort_order": order,
+                    },
+                )
+        return response
+
+    def get_success_url(self):
+        return reverse("budget:year-detail", kwargs={"pk": self.object.pk})
 
 
-class BudgetYearUpdateView(TreasurerRequiredMixin, SuccessMessageFormMixin, UpdateView):
-    """Update budget year metadata."""
-
+class BudgetYearUpdateView(TreasurerRequiredMixin, UpdateView):
     model = BudgetYear
     form_class = BudgetYearForm
     template_name = "budget/year_form.html"
-    success_message = "Budget year updated."
 
-    def get_success_url(self) -> str:
-        """Return to the year detail after saving."""
-        return reverse("budget:year-detail", args=[self.object.pk])
+    def get_queryset(self):
+        qs = super().get_queryset()
+        return _filter_by_house(qs, self.request.user)
 
+    def get_form(self, form_class=None):
+        form = super().get_form(form_class)
+        # Hide seed checkbox on edit — categories already exist
+        if "seed_default_categories" in form.fields:
+            del form.fields["seed_default_categories"]
+        if not self.request.user.is_gestionnaire:
+            form.fields["house"].widget = form.fields["house"].hidden_widget()
+        return form
 
-class BudgetCategoryInitialMixin:
-    """Prefill the budget year when creating categories from a year detail page."""
-
-    def get_initial(self) -> dict[str, object]:
-        """Seed the budget year from the routed year id when available."""
-        initial = super().get_initial()
-        year_pk = self.kwargs.get("year_pk")
-        if year_pk is not None:
-            initial["budget_year"] = year_pk
-        return initial
-
-
-class BudgetCategoryCreateView(
-    TreasurerRequiredMixin,
-    BudgetCategoryInitialMixin,
-    SuccessMessageFormMixin,
-    CreateView,
-):
-    """Create a budget category for a year."""
-
-    model = BudgetCategory
-    form_class = BudgetCategoryForm
-    template_name = "budget/category_form.html"
-    success_message = "Budget category created."
-
-    def get_success_url(self) -> str:
-        """Return to the parent year after creation."""
-        return reverse("budget:year-detail", args=[self.object.budget_year_id])
+    def get_success_url(self):
+        return reverse("budget:year-detail", kwargs={"pk": self.object.pk})
 
 
-class BudgetCategoryUpdateView(
-    TreasurerRequiredMixin,
-    SuccessMessageFormMixin,
-    UpdateView,
-):
-    """Update a budget category."""
+# ---------------------------------------------------------------------------
+# SubBudget views
+# ---------------------------------------------------------------------------
 
-    model = BudgetCategory
-    form_class = BudgetCategoryForm
-    template_name = "budget/category_form.html"
-    success_message = "Budget category updated."
+class SubBudgetCreateView(TreasurerRequiredMixin, CreateView):
+    model = SubBudget
+    form_class = SubBudgetForm
+    template_name = "budget/subbudget_form.html"
 
-    def get_success_url(self) -> str:
-        """Return to the category detail after saving."""
-        return reverse("budget:category-detail", args=[self.object.pk])
+    def dispatch(self, request, *args, **kwargs):
+        self.budget_year = get_object_or_404(BudgetYear, pk=self.kwargs["budget_year_pk"])
+        if request.user.is_authenticated:
+            check_house_permission(request.user, self.budget_year.house)
+        return super().dispatch(request, *args, **kwargs)
+
+    def form_valid(self, form):
+        form.instance.budget_year = self.budget_year
+        return super().form_valid(form)
+
+    def get_context_data(self, **kwargs):
+        ctx = super().get_context_data(**kwargs)
+        ctx["budget_year"] = self.budget_year
+        return ctx
+
+    def get_success_url(self):
+        return reverse("budget:year-detail", kwargs={"pk": self.budget_year.pk})
+
+
+class SubBudgetUpdateView(TreasurerRequiredMixin, UpdateView):
+    model = SubBudget
+    form_class = SubBudgetForm
+    template_name = "budget/subbudget_form.html"
+
+    def dispatch(self, request, *args, **kwargs):
+        response = super().dispatch(request, *args, **kwargs)
+        if request.user.is_authenticated:
+            check_house_permission(request.user, self.object.budget_year.house)
+        return response
+
+    def get_context_data(self, **kwargs):
+        ctx = super().get_context_data(**kwargs)
+        ctx["budget_year"] = self.object.budget_year
+        return ctx
+
+    def get_success_url(self):
+        return reverse("budget:year-detail", kwargs={"pk": self.object.budget_year.pk})
+
+
+# ---------------------------------------------------------------------------
+# Expense views
+# ---------------------------------------------------------------------------
+
+class ExpenseLedgerView(ListView):
+    model = Expense
+    template_name = "budget/expense_ledger.html"
+    context_object_name = "ledger_rows"
+
+    def dispatch(self, request, *args, **kwargs):
+        self.budget_year = get_object_or_404(BudgetYear, pk=self.kwargs["budget_year_pk"])
+        return super().dispatch(request, *args, **kwargs)
+
+    def get_queryset(self):
+        # queryset not used directly; running_balances returns dicts
+        return Expense.objects.none()
+
+    def get_context_data(self, **kwargs):
+        ctx = super().get_context_data(**kwargs)
+        ctx["budget_year"] = self.budget_year
+        ctx["ledger_rows"] = BudgetCalculationService.running_balances(self.budget_year)
+        ctx["can_manage"] = (
+            self.request.user.is_authenticated
+            and self.request.user.can_manage_financials
+        )
+        return ctx
+
+
+class ExpenseCreateView(TreasurerRequiredMixin, CreateView):
+    model = Expense
+    form_class = ExpenseForm
+    template_name = "budget/expense_form.html"
+
+    def dispatch(self, request, *args, **kwargs):
+        self.budget_year = get_object_or_404(BudgetYear, pk=self.kwargs["budget_year_pk"])
+        if request.user.is_authenticated:
+            check_house_permission(request.user, self.budget_year.house)
+        return super().dispatch(request, *args, **kwargs)
+
+    def get_form_kwargs(self):
+        kwargs = super().get_form_kwargs()
+        kwargs["budget_year"] = self.budget_year
+        return kwargs
+
+    def form_valid(self, form):
+        form.instance.budget_year = self.budget_year
+        form.instance.entered_by = self.request.user
+        return super().form_valid(form)
+
+    def get_context_data(self, **kwargs):
+        ctx = super().get_context_data(**kwargs)
+        ctx["budget_year"] = self.budget_year
+        return ctx
+
+    def get_success_url(self):
+        return reverse("budget:expense-ledger", kwargs={"budget_year_pk": self.budget_year.pk})
+
+
+class ExpenseUpdateView(TreasurerRequiredMixin, UpdateView):
+    model = Expense
+    form_class = ExpenseForm
+    template_name = "budget/expense_form.html"
+
+    def dispatch(self, request, *args, **kwargs):
+        response = super().dispatch(request, *args, **kwargs)
+        if request.user.is_authenticated:
+            check_house_permission(request.user, self.object.budget_year.house)
+        return response
+
+    def get_form_kwargs(self):
+        kwargs = super().get_form_kwargs()
+        kwargs["budget_year"] = self.object.budget_year
+        return kwargs
+
+    def get_context_data(self, **kwargs):
+        ctx = super().get_context_data(**kwargs)
+        ctx["budget_year"] = self.object.budget_year
+        return ctx
+
+    def get_success_url(self):
+        return reverse("budget:expense-ledger", kwargs={"budget_year_pk": self.object.budget_year.pk})

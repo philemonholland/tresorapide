@@ -73,6 +73,24 @@ class UserModelTests(TestCase):
 
         self.assertFalse(user_has_minimum_role(user, User.Role.VIEWER))
 
+    def test_gestionnaire_role(self) -> None:
+        user = User.objects.create_user(
+            username="acct",
+            password="StrongPassw0rd!",
+            role=User.Role.GESTIONNAIRE,
+        )
+        self.assertTrue(user.is_gestionnaire)
+        self.assertTrue(user.has_minimum_role(User.Role.ADMIN))
+
+    def test_superuser_overrides_all(self) -> None:
+        user = User.objects.create_superuser(
+            username="super-all",
+            password="StrongPassw0rd!",
+        )
+        self.assertTrue(user.is_app_admin)
+        self.assertTrue(user.can_manage_financials)
+        self.assertTrue(user.is_gestionnaire)
+
 
 class AuthenticationFlowTests(TestCase):
     def test_login_and_logout_flow(self) -> None:

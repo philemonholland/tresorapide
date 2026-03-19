@@ -17,16 +17,19 @@
             </div>
             <div class="header-actions">
                 <nav class="site-nav">
-                    <a href="{% url 'home' %}">{% if request.user.is_authenticated %}Tableau de bord{% else %}Accueil{% endif %}</a>
-                    {% if request.user.is_authenticated and request.user.can_view_financials %}
-                        <a href="{% url 'budget:year-list' %}">Budget</a>
-                        <a href="{% url 'bons:list' %}">Bons de commande</a>
-                    {% endif %}
-                    {% if request.user.is_authenticated and request.user.can_manage_financials %}
-                        <a href="{% url 'members:member-list' %}">Membres</a>
-                    {% endif %}
-                    {% if request.user.is_app_admin or request.user.is_staff or request.user.is_superuser %}
-                        <a href="{% url 'admin-setup' %}">Admin</a>
+                    <a href="{% url 'home' %}">Tableau de bord</a>
+                    <a href="{% url 'budget:year-list' %}">Budget</a>
+                    <a href="{% url 'bons:list' %}">Bons de commande</a>
+                    <a href="{% url 'bons:search' %}">Recherche</a>
+                    <a href="{% url 'members:member-list' %}">Membres</a>
+                    {% if request.user.is_authenticated %}
+                        {% if request.user.can_manage_financials %}
+                            <a href="{% url 'accounts:list' %}">Comptes</a>
+                        {% endif %}
+                        {% if request.user.is_app_admin or request.user.is_staff or request.user.is_superuser %}
+                            <a href="{% url 'houses:list' %}">Maisons</a>
+                            <a href="{% url 'admin-setup' %}">Admin</a>
+                        {% endif %}
                     {% endif %}
                 </nav>
                 <div class="user-nav">
@@ -34,6 +37,7 @@
                         <span class="nav-text">
                             {{ request.user.get_username }} ({{ request.user.get_role_display|default:"Utilisateur" }})
                         </span>
+                        <a href="{% url 'accounts:password_change' %}">Mot de passe</a>
                         <form action="{% url 'accounts:logout' %}" method="post">
                             {% csrf_token %}
                             <button type="submit">Déconnexion</button>

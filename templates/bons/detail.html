@@ -1,0 +1,174 @@
+{% extends "base.html" %}
+
+{% block title %}BC {{ bon.number }} | Tresorapide{% endblock %}
+
+{% block content %}
+    <section class="card">
+        <div class="section-heading">
+            <div>
+                <h1>BC {{ bon.number }}</h1>
+                <p class="text-muted">
+                    <span class="badge badge-{{ bon.status|lower }}">{{ bon.get_status_display }}</span>
+                    &middot; {{ bon.purchase_date|date:"Y-m-d" }}
+                </p>
+            </div>
+            <div class="quick-links">
+                <a class="button-link" href="{% url 'bons:list' %}">Retour à la liste</a>
+                <a class="button-link" href="{% url 'bons:export-pdf' bon.pk %}">📄 PDF</a>
+                <a class="button-link" href="{% url 'bons:export-xlsx' bon.pk %}">📊 Excel</a>
+                {% if can_manage and bon.status == "DRAFT" %}
+                    <a class="button-link" href="{% url 'bons:edit' bon.pk %}">Modifier</a>
+                {% endif %}
+                {% if can_manage and bon.status == "READY_FOR_VALIDATION" or bon.status == "DRAFT" %}
+                    <a class="button-link" href="{% url 'bons:validate' bon.pk %}">Valider</a>
+                {% endif %}
+            </div>
+        </div>
+    </section>
+
+    <section class="card">
+        <h2>Informations</h2>
+        <div class="detail-grid">
+            <div>
+                <strong>Description</strong>
+                <p>{{ bon.short_description }}</p>
+            </div>
+            <div>
+                <strong>Marchand</strong>
+                <p>{{ bon.merchant_name|default:"—" }}</p>
+            </div>
+            <div>
+                <strong>Fournisseur</strong>
+                <p>{{ bon.supplier_name|default:"—" }}</p>
+            </div>
+            <div>
+                <strong>Lieu de travaux / livraison</strong>
+                <p>{{ bon.work_or_delivery_location|default:"—" }}</p>
+            </div>
+            <div>
+                <strong>Année budgétaire</strong>
+                <p>{{ bon.budget_year.label }}</p>
+            </div>
+            <div>
+                <strong>Sous-budget</strong>
+                <p>{{ bon.sub_budget.name }} ({{ bon.sub_budget.trace_code }})</p>
+            </div>
+        </div>
+    </section>
+
+    <section class="card">
+        <h2>Montants</h2>
+        <div class="stat-grid">
+            <article class="stat-card subtle-card">
+                <h3>{{ bon.subtotal|floatformat:2|default:"—" }}&nbsp;$</h3>
+                <p>Sous-total</p>
+            </article>
+            <article class="stat-card subtle-card">
+                <h3>{{ bon.tps|floatformat:2|default:"—" }}&nbsp;$</h3>
+                <p>TPS</p>
+            </article>
+            <article class="stat-card subtle-card">
+                <h3>{{ bon.tvq|floatformat:2|default:"—" }}&nbsp;$</h3>
+                <p>TVQ</p>
+            </article>
+            <article class="stat-card subtle-card">
+                <h3>{{ bon.total|floatformat:2 }}&nbsp;$</h3>
+                <p>Total</p>
+            </article>
+        </div>
+    </section>
+
+    <section class="card">
+        <h2>Personnes</h2>
+        <div class="detail-grid">
+            <div>
+                <strong>Acheteur</strong>
+                <p>
+                    {{ bon.purchaser_member.display_name }}
+                    {% if bon.purchaser_apartment %}
+                        ({{ bon.purchaser_apartment.code }})
+                    {% endif %}
+                </p>
+            </div>
+            <div>
+                <strong>Approbateur</strong>
+                <p>{{ bon.approver_member.display_name|default:"—" }}</p>
+            </div>
+            <div>
+                <strong>Créé par</strong>
+                <p>{{ bon.created_by|default:"—" }}</p>
+            </div>
+            <div>
+                <strong>Validé par</strong>
+                <p>
+                    {% if bon.validated_by %}
+                        {{ bon.validated_by }} — {{ bon.validated_at|date:"Y-m-d H:i" }}
+                    {% else %}
+                        —
+                    {% endif %}
+                </p>
+            </div>
+        </div>
+    </section>
+
+    {% if bon.notes %}
+    <section class="card">
+        <h2>Notes</h2>
+        <p>{{ bon.notes|linebreaksbr }}</p>
+    </section>
+    {% endif %}
+
+    <section class="card">
+        <div class="section-heading">
+            <h2>Reçus / factures</h2>
+        </div>
+        {% if receipts %}
+            <div class="table-responsive">
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>Fichier</th>
+                            <th>Type</th>
+                            <th>Taille</th>
+                            <th>Téléversé par</th>
+                            <th>Date</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for r in receipts %}
+                            <tr>
+                                <td><a href="{{ r.file.url }}">{{ r.original_filename }}</a></td>
+                                <td>{{ r.content_type|default:"—" }}</td>
+                                <td>
+                                    {% if r.file_size_bytes %}
+                                        {{ r.file_size_bytes|filesizeformat }}
+                                    {% else %}
+                                        —
+                                    {% endif %}
+                                </td>
+                                <td>{{ r.uploaded_by|default:"—" }}</td>
+                                <td>{{ r.created_at|date:"Y-m-d H:i" }}</td>
+                            </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        {% else %}
+            <p class="empty-state">Aucun reçu téléversé.</p>
+        {% endif %}
+
+        {% if can_manage %}
+            <form method="post" enctype="multipart/form-data" action="{% url 'bons:receipt-upload' bon.pk %}" class="stack" style="margin-top: 1rem;">
+                {% csrf_token %}
+                <div class="form-row">
+                    <label for="id_file">{{ upload_form.file.label }}</label>
+                    {{ upload_form.file }}
+                    {% if upload_form.file.help_text %}
+                        <small>{{ upload_form.file.help_text }}</small>
+                    {% endif %}
+                </div>
+                <button type="submit">Téléverser un reçu</button>
+            </form>
+        {% endif %}
+    </section>
+{% endblock %}

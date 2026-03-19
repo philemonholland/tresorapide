@@ -1,0 +1,142 @@
+{% extends "base.html" %}
+
+{% block title %}Recherche — Bons de commande | Tresorapide{% endblock %}
+
+{% block content %}
+    <section class="card">
+        <div class="section-heading">
+            <h1>🔍 Recherche de bons de commande</h1>
+            <a class="button-link" href="{% url 'bons:list' %}">Retour à la liste</a>
+        </div>
+
+        <form method="get" class="stack" style="margin-top: 1rem;">
+            <!-- Row 1: Free text search -->
+            <div class="form-group">
+                <label for="{{ form.q.id_for_label }}">{{ form.q.label }}</label>
+                {{ form.q }}
+            </div>
+
+            <!-- Filters grid -->
+            <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 1rem;">
+                <div class="form-group">
+                    <label for="{{ form.house.id_for_label }}">{{ form.house.label }}</label>
+                    {{ form.house }}
+                </div>
+                <div class="form-group">
+                    <label for="{{ form.budget_year.id_for_label }}">{{ form.budget_year.label }}</label>
+                    {{ form.budget_year }}
+                </div>
+                <div class="form-group">
+                    <label for="{{ form.purchaser.id_for_label }}">{{ form.purchaser.label }}</label>
+                    {{ form.purchaser }}
+                </div>
+                <div class="form-group">
+                    <label for="{{ form.merchant.id_for_label }}">{{ form.merchant.label }}</label>
+                    {{ form.merchant }}
+                </div>
+                <div class="form-group">
+                    <label for="{{ form.amount_min.id_for_label }}">{{ form.amount_min.label }}</label>
+                    {{ form.amount_min }}
+                </div>
+                <div class="form-group">
+                    <label for="{{ form.amount_max.id_for_label }}">{{ form.amount_max.label }}</label>
+                    {{ form.amount_max }}
+                </div>
+                <div class="form-group">
+                    <label for="{{ form.date_from.id_for_label }}">{{ form.date_from.label }}</label>
+                    {{ form.date_from }}
+                </div>
+                <div class="form-group">
+                    <label for="{{ form.date_to.id_for_label }}">{{ form.date_to.label }}</label>
+                    {{ form.date_to }}
+                </div>
+                <div class="form-group">
+                    <label for="{{ form.status.id_for_label }}">{{ form.status.label }}</label>
+                    {{ form.status }}
+                </div>
+            </div>
+
+            <div style="display: flex; gap: 1rem; align-items: center;">
+                <button type="submit" class="btn btn-primary">🔍 Rechercher</button>
+                <a href="{% url 'bons:search' %}" class="btn">Réinitialiser</a>
+            </div>
+        </form>
+    </section>
+
+    {% if results is not None %}
+    <section class="card">
+        <div class="section-heading">
+            <h2>
+                Résultats
+                {% if result_count is not None %}
+                    <span class="text-muted" style="font-weight: normal; font-size: 0.9rem;">
+                        ({{ result_count }} bon{{ result_count|pluralize }} trouvé{{ result_count|pluralize }})
+                    </span>
+                {% endif %}
+            </h2>
+            {% if total_amount is not None %}
+                <span style="font-size: 1.1rem; font-weight: bold;">
+                    Total : {{ total_amount|floatformat:2 }}&nbsp;$
+                </span>
+            {% endif %}
+        </div>
+
+        {% if results %}
+            <div class="table-responsive">
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>No</th>
+                            <th>Date</th>
+                            <th>Maison</th>
+                            <th>Description</th>
+                            <th>Marchand</th>
+                            <th>Membre</th>
+                            <th>Sous-budget</th>
+                            <th style="text-align: right;">Total</th>
+                            <th>Statut</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for bon in results %}
+                            <tr>
+                                <td>
+                                    <a href="{% url 'bons:detail' bon.pk %}">{{ bon.number }}</a>
+                                </td>
+                                <td>{{ bon.purchase_date|date:"Y-m-d" }}</td>
+                                <td>{{ bon.house.code }}</td>
+                                <td>{{ bon.short_description|truncatechars:40 }}</td>
+                                <td>{{ bon.merchant_name|default:"—" }}</td>
+                                <td>
+                                    {% if bon.purchaser_member %}
+                                        {{ bon.purchaser_member.display_name }}
+                                    {% else %}
+                                        {{ bon.purchaser_name_snapshot|default:"—" }}
+                                    {% endif %}
+                                </td>
+                                <td>{{ bon.sub_budget.name|default:"—" }}</td>
+                                <td style="text-align: right;">{{ bon.total|floatformat:2 }}&nbsp;$</td>
+                                <td>
+                                    <span class="badge badge-{{ bon.status|lower }}">{{ bon.get_status_display }}</span>
+                                </td>
+                                <td>
+                                    <a href="{% url 'bons:export-pdf' bon.pk %}" title="PDF">📄</a>
+                                    <a href="{% url 'bons:export-xlsx' bon.pk %}" title="Excel">📊</a>
+                                </td>
+                            </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            {% if result_count >= 200 %}
+                <p class="text-muted" style="margin-top: 0.5rem;">
+                    ⚠️ Résultats limités à 200. Affinez vos critères de recherche.
+                </p>
+            {% endif %}
+        {% else %}
+            <p class="empty-state">Aucun bon de commande ne correspond à vos critères.</p>
+        {% endif %}
+    </section>
+    {% endif %}
+{% endblock %}

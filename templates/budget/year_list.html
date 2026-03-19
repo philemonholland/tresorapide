@@ -1,24 +1,21 @@
 {% extends "base.html" %}
 
-{% block title %}Budget summary | Tresorapide{% endblock %}
+{% block title %}Années budgétaires | Tresorapide{% endblock %}
 
 {% block content %}
     <section class="card">
         <div class="section-heading">
             <div>
-                <h1>Budget summary</h1>
-                <p class="text-muted">
-                    Planned-versus-used reporting by budget year{% if can_manage %}, with treasurer editing links{% endif %}.
-                </p>
+                <h1>Années budgétaires</h1>
+                <p class="text-muted">Suivi budgétaire par année.</p>
             </div>
             <div class="quick-links">
-                <a class="button-link" href="{% url 'home' %}">Back to dashboard</a>
+                <a class="button-link" href="{% url 'home' %}">Tableau de bord</a>
                 {% if can_manage %}
-                    <a class="button-link" href="{% url 'budget:year-create' %}">New budget year</a>
+                    <a class="button-link" href="{% url 'budget:year-create' %}">Créer une année budgétaire</a>
                 {% endif %}
             </div>
         </div>
-        <p>{{ transparency_note }}</p>
     </section>
 
     <section class="card">
@@ -27,40 +24,38 @@
                 <table class="data-table">
                     <thead>
                         <tr>
-                            <th>Year</th>
-                            <th>Period</th>
-                            <th>Status</th>
-                            <th>Categories</th>
-                            <th>Planned</th>
-                            <th>Approved</th>
-                            <th>Paid</th>
-                            <th>Remaining</th>
+                            <th>Année</th>
+                            <th>Immeuble</th>
+                            <th>Statut</th>
+                            <th>Budget total</th>
+                            <th>Déneigement</th>
+                            <th>Imprévues</th>
                             {% if can_manage %}
                                 <th>Actions</th>
                             {% endif %}
                         </tr>
                     </thead>
                     <tbody>
-                        {% for budget_year in budget_years %}
+                        {% for by in budget_years %}
                             <tr>
                                 <td>
-                                    <a href="{% url 'budget:year-detail' budget_year.pk %}">{{ budget_year.label }}</a>
+                                    <a href="{% url 'budget:year-detail' by.pk %}">{{ by.label }}</a>
                                 </td>
-                                <td>{{ budget_year.start_date|date:"M j, Y" }} - {{ budget_year.end_date|date:"M j, Y" }}</td>
+                                <td>{{ by.house.code }}</td>
                                 <td>
-                                    {% if budget_year.is_closed %}
-                                        <span class="badge badge-archived">Closed</span>
+                                    {% if by.is_closed %}
+                                        <span class="badge badge-archived">Fermé</span>
+                                    {% elif by.is_active %}
+                                        <span class="badge badge-approved">Actif</span>
                                     {% else %}
-                                        <span class="badge badge-approved">Open</span>
+                                        <span class="badge">Inactif</span>
                                     {% endif %}
                                 </td>
-                                <td>{{ budget_year.category_count }}</td>
-                                <td>${{ budget_year.planned_total|floatformat:2 }}</td>
-                                <td>${{ budget_year.approved_reimbursement_total|floatformat:2 }}</td>
-                                <td>${{ budget_year.paid_reimbursement_total|floatformat:2 }}</td>
-                                <td>${{ budget_year.remaining_total|floatformat:2 }}</td>
+                                <td>{{ by.annual_budget_total|floatformat:2 }} $</td>
+                                <td>{{ by.snow_budget|floatformat:2 }} $</td>
+                                <td>{{ by.imprevues_amount|floatformat:2 }} $</td>
                                 {% if can_manage %}
-                                    <td><a href="{% url 'budget:year-edit' budget_year.pk %}">Edit</a></td>
+                                    <td><a href="{% url 'budget:year-edit' by.pk %}">Modifier</a></td>
                                 {% endif %}
                             </tr>
                         {% endfor %}
@@ -68,7 +63,7 @@
                 </table>
             </div>
         {% else %}
-            <p class="empty-state">No budget years are configured yet.</p>
+            <p class="empty-state">Aucune année budgétaire configurée.</p>
         {% endif %}
     </section>
 {% endblock %}

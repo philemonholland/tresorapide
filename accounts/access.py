@@ -1,68 +1,42 @@
-"""Authorization helpers for role-aware Django and DRF views."""
-from __future__ import annotations
-
 from django.contrib.auth.mixins import LoginRequiredMixin, UserPassesTestMixin
-from rest_framework.permissions import BasePermission
+from django.core.exceptions import PermissionDenied
+from .models import Role
 
-from .models import User
 
-
-def user_has_minimum_role(user: object, required_role: str) -> bool:
-    """Return whether a user-like object satisfies a required application role."""
-    if not getattr(user, "is_authenticated", False):
+def user_has_minimum_role(user, role):
+    if not user.is_authenticated or not user.is_active:
         return False
-    if not getattr(user, "is_active", False):
-        return False
-    if getattr(user, "is_superuser", False):
-        return True
-
-    has_minimum_role = getattr(user, "has_minimum_role", None)
-    if callable(has_minimum_role):
-        return bool(has_minimum_role(required_role))
-    return False
+    return user.has_minimum_role(role)
 
 
 class RoleRequiredMixin(LoginRequiredMixin, UserPassesTestMixin):
-    """Gate class-based views behind a minimum application role."""
-
-    required_role = User.Role.VIEWER
+    required_role = Role.VIEWER
     raise_exception = True
 
-    def test_func(self) -> bool:
-        """Return whether the current request user meets the role requirement."""
+    def test_func(self):
         return user_has_minimum_role(self.request.user, self.required_role)
 
 
 class TreasurerRequiredMixin(RoleRequiredMixin):
-    """Require treasurer-level or higher access."""
-
-    required_role = User.Role.TREASURER
+    required_role = Role.TREASURER
 
 
 class AdminRequiredMixin(RoleRequiredMixin):
-    """Require admin-level or higher access."""
-
-    required_role = User.Role.ADMIN
+    required_role = Role.ADMIN
 
 
-class MinimumRolePermission(BasePermission):
-    """Gate DRF views behind a minimum application role."""
-
-    required_role = User.Role.VIEWER
-    message = "You do not have permission to access this resource."
-
-    def has_permission(self, request, view) -> bool:
-        """Return whether the request user meets the role requirement."""
-        return user_has_minimum_role(request.user, self.required_role)
+class GestionnaireRequiredMixin(RoleRequiredMixin):
+    required_role = Role.GESTIONNAIRE
 
 
-class TreasurerPermission(MinimumRolePermission):
-    """Require treasurer-level or higher API access."""
-
-    required_role = User.Role.TREASURER
+class ViewerRequiredMixin(RoleRequiredMixin):
+    required_role = Role.VIEWER
 
 
-class AdminPermission(MinimumRolePermission):
-    """Require admin-level or higher API access."""
-
-    required_role = User.Role.ADMIN
+def check_house_permission(user, house):
+    """Raise PermissionDenied if user is a non-gestionnaire treasurer
+    trying to access a different house."""
+    if user.is_superuser or user.is_gestionnaire:
+        return
+    if user.house_id != house.id:
+        raise PermissionDenied("Vous ne pouvez modifier que votre propre maison.")

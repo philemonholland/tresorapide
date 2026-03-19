@@ -10,20 +10,20 @@
                 <p class="text-muted">{{ reimbursement.title }}</p>
             </div>
             <div class="quick-links">
-                <a class="button-link" href="{% url 'reimbursements:list' %}">Back to reimbursements</a>
+                <a class="button-link" href="{% url 'reimbursements:list' %}">Retour aux remboursements</a>
                 {% if can_edit_reimbursement %}
-                    <a class="button-link" href="{% url 'reimbursements:edit' reimbursement.pk %}">Edit reimbursement</a>
+                    <a class="button-link" href="{% url 'reimbursements:edit' reimbursement.pk %}">Modifier le remboursement</a>
                 {% endif %}
             </div>
         </div>
         <p>{{ transparency_note }}</p>
         <div class="quick-links">
             {% if pdf_download_url %}
-                <a class="button-link" href="{{ pdf_download_url }}">Download generated PDF</a>
-                <a class="button-link" href="{{ pdf_view_url }}">Open PDF in browser</a>
+                <a class="button-link" href="{{ pdf_download_url }}">Télécharger le PDF généré</a>
+                <a class="button-link" href="{{ pdf_view_url }}">Ouvrir le PDF dans le navigateur</a>
             {% endif %}
             <a class="button-link" href="{% url 'budget:category-detail' reimbursement.budget_category.pk %}">
-                Open category detail
+                Ouvrir le détail de la catégorie
             </a>
         </div>
     </section>
@@ -31,33 +31,33 @@
     <section class="card">
         <div class="detail-grid">
             <div>
-                <dt>Status</dt>
+                <dt>Statut</dt>
                 <dd><span class="badge badge-{{ reimbursement.status }}">{{ reimbursement.get_status_display }}</span></dd>
             </div>
             <div>
-                <dt>Expense date</dt>
-                <dd>{{ reimbursement.expense_date|date:"M j, Y" }}</dd>
+                <dt>Date de dépense</dt>
+                <dd>{{ reimbursement.expense_date|date:"j M Y" }}</dd>
             </div>
             <div>
-                <dt>Requested amount</dt>
-                <dd>${{ reimbursement.amount_requested|floatformat:2 }}</dd>
+                <dt>Montant demandé</dt>
+                <dd>{{ reimbursement.amount_requested|floatformat:2 }}&nbsp;$</dd>
             </div>
             <div>
-                <dt>Approved amount</dt>
+                <dt>Montant approuvé</dt>
                 <dd>
                     {% if reimbursement.amount_approved is not None %}
-                        ${{ reimbursement.amount_approved|floatformat:2 }}
+                        {{ reimbursement.amount_approved|floatformat:2 }}&nbsp;$
                     {% else %}
                         —
                     {% endif %}
                 </dd>
             </div>
             <div>
-                <dt>Member snapshot</dt>
+                <dt>Instantané du membre</dt>
                 <dd>{{ reimbursement.member_name_snapshot }}{% if reimbursement.member_email_snapshot %} ({{ reimbursement.member_email_snapshot }}){% endif %}</dd>
             </div>
             <div>
-                <dt>Apartment snapshot</dt>
+                <dt>Instantané de l'appartement</dt>
                 <dd>{{ reimbursement.apartment_display_snapshot|default:"—" }}</dd>
             </div>
             <div>
@@ -65,51 +65,51 @@
                 <dd>{{ reimbursement.budget_year_label_snapshot }} / {{ reimbursement.budget_category_code_snapshot }} - {{ reimbursement.budget_category_name_snapshot }}</dd>
             </div>
             <div>
-                <dt>Receipt signer</dt>
+                <dt>Signataire du reçu</dt>
                 <dd>{{ reimbursement.receipt_signer_name_snapshot|default:"—" }}</dd>
             </div>
             <div>
-                <dt>Submitted at</dt>
-                <dd>{% if reimbursement.submitted_at %}{{ reimbursement.submitted_at|date:"M j, Y H:i" }}{% else %}—{% endif %}</dd>
+                <dt>Soumis le</dt>
+                <dd>{% if reimbursement.submitted_at %}{{ reimbursement.submitted_at|date:"j M Y H:i" }}{% else %}—{% endif %}</dd>
             </div>
             <div>
-                <dt>Approved at</dt>
-                <dd>{% if reimbursement.approved_at %}{{ reimbursement.approved_at|date:"M j, Y H:i" }}{% else %}—{% endif %}</dd>
+                <dt>Approuvé le</dt>
+                <dd>{% if reimbursement.approved_at %}{{ reimbursement.approved_at|date:"j M Y H:i" }}{% else %}—{% endif %}</dd>
             </div>
             <div>
-                <dt>Signed receipt received</dt>
-                <dd>{% if reimbursement.signed_receipt_received_at %}{{ reimbursement.signed_receipt_received_at|date:"M j, Y H:i" }}{% else %}—{% endif %}</dd>
+                <dt>Reçu signé reçu le</dt>
+                <dd>{% if reimbursement.signed_receipt_received_at %}{{ reimbursement.signed_receipt_received_at|date:"j M Y H:i" }}{% else %}—{% endif %}</dd>
             </div>
             <div>
-                <dt>Signature verified</dt>
-                <dd>{% if reimbursement.signature_verified_at %}{{ reimbursement.signature_verified_at|date:"M j, Y H:i" }}{% else %}—{% endif %}</dd>
+                <dt>Signature vérifiée</dt>
+                <dd>{% if reimbursement.signature_verified_at %}{{ reimbursement.signature_verified_at|date:"j M Y H:i" }}{% else %}—{% endif %}</dd>
             </div>
             <div>
-                <dt>Created by</dt>
+                <dt>Créé par</dt>
                 <dd>{{ reimbursement.created_by|default:"—" }}</dd>
             </div>
             <div>
-                <dt>Approved by</dt>
+                <dt>Approuvé par</dt>
                 <dd>{{ reimbursement.approved_by|default:"—" }}</dd>
             </div>
             <div>
-                <dt>Signature verified by</dt>
+                <dt>Signature vérifiée par</dt>
                 <dd>{{ reimbursement.signature_verified_by|default:"—" }}</dd>
             </div>
             <div>
-                <dt>Archived at</dt>
-                <dd>{% if reimbursement.archived_at %}{{ reimbursement.archived_at|date:"M j, Y H:i" }}{% else %}—{% endif %}</dd>
+                <dt>Archivé le</dt>
+                <dd>{% if reimbursement.archived_at %}{{ reimbursement.archived_at|date:"j M Y H:i" }}{% else %}—{% endif %}</dd>
             </div>
             <div>
-                <dt>Archive reason</dt>
+                <dt>Raison d'archivage</dt>
                 <dd>{{ reimbursement.archive_reason|default:"—" }}</dd>
             </div>
             <div>
-                <dt>Voided at</dt>
-                <dd>{% if reimbursement.voided_at %}{{ reimbursement.voided_at|date:"M j, Y H:i" }}{% else %}—{% endif %}</dd>
+                <dt>Annulé le</dt>
+                <dd>{% if reimbursement.voided_at %}{{ reimbursement.voided_at|date:"j M Y H:i" }}{% else %}—{% endif %}</dd>
             </div>
             <div>
-                <dt>Void reason</dt>
+                <dt>Raison d'annulation</dt>
                 <dd>{{ reimbursement.void_reason|default:"—" }}</dd>
             </div>
         </div>
@@ -127,15 +127,15 @@
         <section class="card">
             <div class="section-heading">
                 <div>
-                    <h2>Treasurer workflow actions</h2>
-                    <p class="text-muted">Use the service-backed actions below to validate or void this reimbursement.</p>
+                    <h2>Actions du trésorier</h2>
+                    <p class="text-muted">Utilisez les actions ci-dessous pour valider ou annuler ce remboursement.</p>
                 </div>
             </div>
 
             {% if can_finalize %}
                 <form method="post" action="{% url 'reimbursements:finalize' reimbursement.pk %}" class="stack">
                     {% csrf_token %}
-                    <h3>Finalize validation</h3>
+                    <h3>Validation finale</h3>
                     {{ validation_form.non_field_errors }}
                     {% for field in validation_form %}
                         <div class="form-row">
@@ -147,18 +147,18 @@
                             {{ field.errors }}
                         </div>
                     {% endfor %}
-                    <button type="submit">Approve reimbursement</button>
+                    <button type="submit">Approuver le remboursement</button>
                 </form>
             {% else %}
                 <p class="empty-state">
-                    Final validation is only available while the reimbursement is in submitted status.
+                    La validation finale n'est disponible que lorsque le remboursement est en statut soumis.
                 </p>
             {% endif %}
 
             {% if can_void %}
                 <form method="post" action="{% url 'reimbursements:void' reimbursement.pk %}" class="stack">
                     {% csrf_token %}
-                    <h3>Void reimbursement</h3>
+                    <h3>Annuler le remboursement</h3>
                     {{ void_form.non_field_errors }}
                     {% for field in void_form %}
                         <div class="form-row">
@@ -170,7 +170,7 @@
                             {{ field.errors }}
                         </div>
                     {% endfor %}
-                    <button type="submit">Void reimbursement</button>
+                    <button type="submit">Annuler le remboursement</button>
                 </form>
             {% endif %}
         </section>
@@ -178,15 +178,15 @@
 
     <section class="card">
         <div class="section-heading">
-            <h2>Receipt files</h2>
+            <h2>Fichiers de reçus</h2>
             {% if can_upload_receipt %}
-                <span class="text-muted">Upload new scans and archive superseded files from here.</span>
+                <span class="text-muted">Téléversez de nouveaux scans et archivez les fichiers remplacés depuis ici.</span>
             {% endif %}
         </div>
         {% if can_upload_receipt %}
             <form method="post" action="{% url 'reimbursements:receipt-upload' reimbursement.pk %}" enctype="multipart/form-data" class="stack">
                 {% csrf_token %}
-                <h3>Upload receipt</h3>
+                <h3>Téléverser un reçu</h3>
                 {{ upload_form.non_field_errors }}
                 {% for field in upload_form %}
                     <div class="form-row">
@@ -198,22 +198,22 @@
                         {{ field.errors }}
                     </div>
                 {% endfor %}
-                <button type="submit">Upload receipt</button>
+                <button type="submit">Téléverser le reçu</button>
             </form>
         {% endif %}
 
         {% if active_receipt_entries %}
-            <h3>Active receipts</h3>
+            <h3>Reçus actifs</h3>
             <div class="table-responsive">
                 <table class="data-table">
                     <thead>
                         <tr>
-                            <th>File</th>
-                            <th>Uploaded</th>
-                            <th>Checksum</th>
-                            <th>Download</th>
+                            <th>Fichier</th>
+                            <th>Téléversé le</th>
+                            <th>Empreinte</th>
+                            <th>Télécharger</th>
                             {% if can_manage %}
-                                <th>Archive</th>
+                                <th>Archiver</th>
                             {% endif %}
                         </tr>
                     </thead>
@@ -222,9 +222,9 @@
                             <tr>
                                 {% with receipt=entry.receipt archive_form=entry.archive_form %}
                                 <td>{{ receipt.original_filename|default:receipt.file.name }}</td>
-                                <td>{{ receipt.created_at|date:"M j, Y H:i" }}</td>
+                                <td>{{ receipt.created_at|date:"j M Y H:i" }}</td>
                                 <td>{{ receipt.sha256_checksum|default:"—" }}</td>
-                                <td><a href="{% url 'reimbursements:receipt-download' receipt.pk %}">Download</a></td>
+                                <td><a href="{% url 'reimbursements:receipt-download' receipt.pk %}">Télécharger</a></td>
                                 {% if can_manage %}
                                     <td>
                                         <form method="post" action="{% url 'reimbursements:receipt-archive' receipt.pk %}" class="stack">
@@ -237,7 +237,7 @@
                                                     {{ field.errors }}
                                                 </div>
                                             {% endfor %}
-                                            <button type="submit">Archive</button>
+                                            <button type="submit">Archiver</button>
                                         </form>
                                     </td>
                                 {% endif %}
@@ -248,28 +248,28 @@
                 </table>
             </div>
         {% else %}
-            <p class="empty-state">No active receipt files are available.</p>
+            <p class="empty-state">Aucun fichier de reçu actif disponible.</p>
         {% endif %}
 
         {% if archived_receipts %}
-            <h3>Archived receipts</h3>
+            <h3>Reçus archivés</h3>
             <div class="table-responsive">
                 <table class="data-table">
                     <thead>
                         <tr>
-                            <th>File</th>
-                            <th>Archived</th>
-                            <th>Archive reason</th>
-                            <th>Download</th>
+                            <th>Fichier</th>
+                            <th>Archivé le</th>
+                            <th>Raison d'archivage</th>
+                            <th>Télécharger</th>
                         </tr>
                     </thead>
                     <tbody>
                         {% for receipt in archived_receipts %}
                             <tr>
                                 <td>{{ receipt.original_filename|default:receipt.file.name }}</td>
-                                <td>{{ receipt.archived_at|date:"M j, Y H:i" }}</td>
+                                <td>{{ receipt.archived_at|date:"j M Y H:i" }}</td>
                                 <td>{{ receipt.archive_reason|default:"—" }}</td>
-                                <td><a href="{% url 'reimbursements:receipt-download' receipt.pk %}">Download</a></td>
+                                <td><a href="{% url 'reimbursements:receipt-download' receipt.pk %}">Télécharger</a></td>
                             </tr>
                         {% endfor %}
                     </tbody>

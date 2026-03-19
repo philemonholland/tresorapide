@@ -79,9 +79,11 @@ INSTALLED_APPS = [
     "rest_framework",
     "core",
     "accounts",
+    "houses",
     "members",
     "budget",
-    "reimbursements",
+    "bons",
+    "maintenance",
     "audits",
 ]
 
@@ -157,7 +159,7 @@ AUTH_PASSWORD_VALIDATORS = [
     },
 ]
 
-LANGUAGE_CODE = "en-us"
+LANGUAGE_CODE = "fr"
 TIME_ZONE = get_env("DJANGO_TIME_ZONE", "America/Toronto")
 USE_I18N = True
 USE_TZ = True
@@ -195,3 +197,7 @@ REST_FRAMEWORK = {
 }
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+
+# OpenAI API for receipt analysis (GPT-5.4 Vision)
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.4")

@@ -661,11 +661,27 @@ function Resolve-EnvironmentConfiguration {
             -Validator { param($candidate) Test-IsValidPort -Value $candidate } `
             -ValidationMessage "Enter a port number between 1 and 65535."
 
+        $currentApiKey = if ($Values.ContainsKey("OPENAI_API_KEY")) { [string]$Values["OPENAI_API_KEY"] } else { "" }
+        $openaiKey = Get-SetupValue `
+            -Prompt "OpenAI API key for receipt analysis (leave blank to skip)" `
+            -DefaultValue $currentApiKey `
+            -Validator { param($candidate) $true } `
+            -ValidationMessage ""
+
+        $currentModel = if ($Values.ContainsKey("OPENAI_MODEL")) { [string]$Values["OPENAI_MODEL"] } else { "gpt-5.4" }
+        $openaiModel = Get-SetupValue `
+            -Prompt "OpenAI model for receipt analysis" `
+            -DefaultValue $currentModel `
+            -Validator { param($candidate) $true } `
+            -ValidationMessage ""
+
         $lanHosts = @(ConvertTo-HostList -Value $lanHostAnswer)
         $Values["DJANGO_ALLOWED_HOSTS"] = Build-AllowedHosts -LanHosts $lanHosts
         $Values["DJANGO_CSRF_TRUSTED_ORIGINS"] = Build-TrustedOrigins -LanHosts $lanHosts -AppPort $appPort
         $Values["APP_PUBLISHED_PORT"] = $appPort
         $Values["POSTGRES_PUBLISHED_PORT"] = "127.0.0.1:$dbPort"
+        $Values["OPENAI_API_KEY"] = $openaiKey
+        $Values["OPENAI_MODEL"] = $openaiModel
         $changed = $true
     }
     else {

@@ -17,7 +17,7 @@ class MemberForm(forms.ModelForm):
         model = Member
         fields = [
             "first_name", "last_name", "preferred_name",
-            "email", "phone_number", "is_active", "notes",
+            "email", "phone_number", "notes",
         ]
         labels = {
             "first_name": "Prénom",
@@ -25,7 +25,6 @@ class MemberForm(forms.ModelForm):
             "preferred_name": "Nom préféré",
             "email": "Courriel",
             "phone_number": "Téléphone",
-            "is_active": "Actif",
             "notes": "Notes",
         }
         widgets = {
@@ -39,12 +38,19 @@ class MemberForm(forms.ModelForm):
 
     # Essential fields shown prominently; rest in collapsible
     ESSENTIAL_FIELDS = ("first_name", "last_name", "apartment_code")
-    DETAIL_FIELDS = ("preferred_name", "email", "phone_number", "is_active", "notes")
+    DETAIL_FIELDS = ("preferred_name", "email", "phone_number", "notes")
 
-    def __init__(self, *args, is_update=False, **kwargs):
+    def __init__(self, *args, is_update=False, user=None, **kwargs):
         super().__init__(*args, **kwargs)
         if is_update:
-            del self.fields["apartment_code"]
+            if "apartment_code" in self.fields:
+                del self.fields["apartment_code"]
+        # Only admin/superuser can toggle is_active
+        if user and (user.is_app_admin or user.is_superuser):
+            self.fields["is_active"] = forms.BooleanField(
+                required=False, initial=True, label="Actif dans la coop",
+                help_text="Seul un administrateur peut désactiver un membre.",
+            )
 
 
 class ApartmentForm(forms.ModelForm):
@@ -74,7 +80,7 @@ class ResidencyForm(forms.ModelForm):
         model = Residency
         fields = [
             "member", "apartment", "start_date", "end_date",
-            "is_primary_contact", "notes",
+            "is_primary_contact", "is_coop_member", "notes",
         ]
         labels = {
             "member": "Membre",
@@ -82,6 +88,7 @@ class ResidencyForm(forms.ModelForm):
             "start_date": "Date de début",
             "end_date": "Date de fin",
             "is_primary_contact": "Contact principal",
+            "is_coop_member": "Membre de la coop",
             "notes": "Notes",
         }
         widgets = {

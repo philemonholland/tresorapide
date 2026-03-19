@@ -1,10 +1,24 @@
 from django import forms
+from django.core.exceptions import ValidationError
 from django.utils import timezone
 
 from .models import BonDeCommande, BonStatus, ReceiptFile
 from .services import generate_bon_number
 from budget.models import BudgetYear, SubBudget
 from members.models import Member
+
+
+class MultipleFileField(forms.FileField):
+    """FileField that properly handles lists from widgets with allow_multiple_selected."""
+
+    def clean(self, data, initial=None):
+        if isinstance(data, (list, tuple)):
+            if not data:
+                if self.required:
+                    raise ValidationError(self.error_messages["required"])
+                return []
+            return [super().clean(item, initial) for item in data]
+        return [super().clean(data, initial)] if data else []
 
 
 class BonDeCommandeForm(forms.ModelForm):
@@ -106,16 +120,18 @@ class MultiReceiptUploadForm(forms.Form):
         label="Année budgétaire",
         empty_label="— Sélectionnez —",
     )
-    files = forms.FileField(
+    files = MultipleFileField(
         label="Reçus / factures",
         help_text="PDF, JPEG ou PNG acceptés. Vous pouvez sélectionner plusieurs fichiers.",
+        widget=forms.FileInput(),
+        required=True,
     )
 
     def __init__(self, *args, house=None, **kwargs):
         super().__init__(*args, **kwargs)
-        # Enable multiple file selection (must be set after init to avoid Django validation error)
         widget = self.fields["files"].widget
-        widget.attrs.update({"multiple": True, "accept": ".pdf,.jpg,.jpeg,.png"})
+        widget.attrs["multiple"] = True
+        widget.attrs["accept"] = ".pdf,.jpg,.jpeg,.png"
         widget.allow_multiple_selected = True
         if house:
             self.fields["budget_year"].queryset = BudgetYear.objects.filter(
@@ -126,7 +142,34 @@ class MultiReceiptUploadForm(forms.Form):
 
 
 class OcrReviewForm(forms.Form):
-    """Review/correct OCR-extracted data for a single receipt."""
+    """Review/correct GPT-extracted data for a single receipt."""
+    member_name_raw = forms.CharField(
+        max_length=200, required=False,
+        label="Nom extrait (IA)",
+        widget=forms.TextInput(attrs={"readonly": "readonly", "class": "text-muted"}),
+        help_text="Nom manuscrit lu par l'IA (lecture seule)",
+    )
+    apartment_number = forms.CharField(
+        max_length=10, required=False,
+        label="Appartement",
+        widget=forms.TextInput(attrs={"placeholder": "ex : 307"}),
+    )
+    purchaser_member = forms.ModelChoiceField(
+        queryset=Member.objects.none(),
+        required=True,
+        label="Membre (acheteur)",
+        empty_label="-- Choisir un membre --",
+    )
+    matched_member_id = forms.IntegerField(
+        required=False,
+        widget=forms.HiddenInput(),
+    )
+    sub_budget = forms.ModelChoiceField(
+        queryset=SubBudget.objects.none(),
+        required=True,
+        label="Sous-budget",
+        empty_label="-- Choisir un sous-budget --",
+    )
     merchant_name = forms.CharField(
         max_length=200, required=False,
         label="Marchand",
@@ -134,7 +177,8 @@ class OcrReviewForm(forms.Form):
     purchase_date = forms.DateField(
         required=False,
         label="Date d'achat",
-        widget=forms.DateInput(attrs={"type": "date"}),
+        widget=forms.DateInput(format="%Y-%m-%d", attrs={"type": "date"}),
+        input_formats=["%Y-%m-%d"],
     )
     subtotal = forms.DecimalField(
         max_digits=10, decimal_places=2, required=False,
@@ -156,3 +200,80 @@ class OcrReviewForm(forms.Form):
         label="Total",
         widget=forms.NumberInput(attrs={"step": "0.01"}),
     )
+
+
+# ---------------------------------------------------------------------------
+# Search form
+# ---------------------------------------------------------------------------
+
+class BonSearchForm(forms.Form):
+    """Powerful yet user-friendly search for bons de commande."""
+    q = forms.CharField(
+        required=False,
+        label="Recherche libre",
+        widget=forms.TextInput(attrs={
+            "placeholder": "No bon, description, marchand…",
+            "autofocus": True,
+        }),
+    )
+    house = forms.ModelChoiceField(
+        queryset=None,
+        required=False,
+        label="Maison",
+        empty_label="Toutes les maisons",
+    )
+    budget_year = forms.ModelChoiceField(
+        queryset=BudgetYear.objects.none(),
+        required=False,
+        label="Année budgétaire",
+        empty_label="Toutes les années",
+    )
+    purchaser = forms.ModelChoiceField(
+        queryset=Member.objects.none(),
+        required=False,
+        label="Membre (acheteur)",
+        empty_label="Tous les membres",
+    )
+    merchant = forms.CharField(
+        required=False,
+        label="Marchand",
+        widget=forms.TextInput(attrs={"placeholder": "Nom du marchand"}),
+    )
+    amount_min = forms.DecimalField(
+        required=False, decimal_places=2,
+        label="Montant min ($)",
+        widget=forms.NumberInput(attrs={"step": "0.01", "placeholder": "0.00"}),
+    )
+    amount_max = forms.DecimalField(
+        required=False, decimal_places=2,
+        label="Montant max ($)",
+        widget=forms.NumberInput(attrs={"step": "0.01", "placeholder": "0.00"}),
+    )
+    date_from = forms.DateField(
+        required=False,
+        label="Date du",
+        widget=forms.DateInput(format="%Y-%m-%d", attrs={"type": "date"}),
+        input_formats=["%Y-%m-%d"],
+    )
+    date_to = forms.DateField(
+        required=False,
+        label="Date au",
+        widget=forms.DateInput(format="%Y-%m-%d", attrs={"type": "date"}),
+        input_formats=["%Y-%m-%d"],
+    )
+    status = forms.ChoiceField(
+        required=False,
+        label="Statut",
+        choices=[("", "Tous les statuts")] + list(BonStatus.choices),
+    )
+
+    def __init__(self, *args, **kwargs):
+        from houses.models import House
+        super().__init__(*args, **kwargs)
+        self.fields["house"].queryset = House.objects.filter(is_active=True).order_by("code")
+        self.fields["budget_year"].queryset = BudgetYear.objects.filter(
+            is_active=True
+        ).order_by("-year")
+        self.fields["purchaser"].queryset = Member.objects.filter(
+            is_active=True
+        ).order_by("last_name", "first_name")

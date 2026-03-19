@@ -1,31 +1,24 @@
-"""Audit models for important domain events."""
-
-from __future__ import annotations
-
-from django.conf import settings
 from django.db import models
-
-from accounts.models import User
-from core.models import NonDestructiveModel, TimeStampedModel
+from core.models import TimeStampedModel, NonDestructiveModel
 
 
 class AuditLogEntry(TimeStampedModel, NonDestructiveModel):
-    """An append-only audit entry capturing who did what to which record."""
-
+    """Immutable, append-only audit trail for all material actions."""
     actor = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
-        on_delete=models.SET_NULL,
-        related_name="audit_log_entries",
-        blank=True,
-        null=True,
+        "accounts.User", on_delete=models.SET_NULL,
+        null=True, blank=True, related_name="audit_log_entries"
     )
     actor_role_snapshot = models.CharField(max_length=20, blank=True)
-    action = models.CharField(max_length=100)
+    action = models.CharField(
+        max_length=100,
+        help_text="ex : 'bon.validated', 'expense.created'"
+    )
     target_app_label = models.CharField(max_length=100)
     target_model = models.CharField(max_length=100)
     target_object_id = models.CharField(max_length=64)
     summary = models.CharField(max_length=255)
-    payload = models.JSONField(default=dict, blank=True)
+    payload = models.JSONField(default=dict)
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
 
     class Meta:
         ordering = ["-created_at", "-id"]
@@ -34,15 +27,10 @@ class AuditLogEntry(TimeStampedModel, NonDestructiveModel):
             models.Index(fields=["created_at"]),
         ]
 
-    def save(self, *args: object, **kwargs: object) -> None:
-        """Snapshot the actor role when available before saving."""
-        if self.actor is not None and not self.actor_role_snapshot:
-            user = self.actor
-            if isinstance(user, User):
-                self.actor_role_snapshot = user.role
-        self.full_clean()
+    def save(self, *args, **kwargs):
+        if self.actor and not self.actor_role_snapshot:
+            self.actor_role_snapshot = self.actor.role
         super().save(*args, **kwargs)
 
-    def __str__(self) -> str:
-        """Return a concise admin label."""
+    def __str__(self):
         return f"{self.action} on {self.target_app_label}.{self.target_model}:{self.target_object_id}"

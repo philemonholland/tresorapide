@@ -1,275 +1,264 @@
-"""Treasurer-facing member, apartment, and residency views."""
-
-from __future__ import annotations
-
+"""Member, apartment, and residency views."""
 from datetime import date
 
 from django.contrib import messages
-from django.db.models import Count, Q
-from django.http import HttpRequest, HttpResponse
+from django.contrib.auth.mixins import LoginRequiredMixin
+from django.db.models import Prefetch
 from django.urls import reverse, reverse_lazy
-from django.views.generic import CreateView, ListView, TemplateView, UpdateView
+from django.views.generic import CreateView, DetailView, ListView, UpdateView
 
-from accounts.access import TreasurerRequiredMixin
-from members.forms import ApartmentForm, MemberForm, ResidencyForm
-from members.models import Apartment, Member, Residency
+from accounts.access import TreasurerRequiredMixin, AdminRequiredMixin
 
-
-class SuccessMessageFormMixin:
-    """Attach a friendly success message after a create or update."""
-
-    success_message = ""
-
-    def form_valid(self, form):  # type: ignore[override]
-        """Show a success toast after the object is saved."""
-        response = super().form_valid(form)
-        if self.success_message:
-            messages.success(self.request, self.success_message)
-        return response
+from .forms import ApartmentForm, MemberForm, ResidencyForm
+from .models import Apartment, Member, Residency
 
 
-class MembersDashboardView(TreasurerRequiredMixin, TemplateView):
-    """Show quick treasurer access to membership, apartments, and residencies."""
-
-    template_name = "members/index.html"
-
-    def get_context_data(self, **kwargs: object) -> dict[str, object]:
-        """Summarize core member management records."""
-        context = super().get_context_data(**kwargs)
-        today = date.today()
-        context.update(
-            {
-                "member_count": Member.objects.count(),
-                "active_member_count": Member.objects.filter(is_active=True).count(),
-                "apartment_count": Apartment.objects.count(),
-                "active_apartment_count": Apartment.objects.filter(is_active=True).count(),
-                "current_residency_count": Residency.objects.current().count(),
-                "latest_members": Member.objects.order_by("-created_at", "-id")[:8],
-                "latest_apartments": Apartment.objects.order_by("code", "id")[:8],
-                "current_residencies": Residency.objects.current()
-                .select_related("member", "apartment")
-                .order_by("apartment__code", "member__last_name", "member__first_name")[:12],
-                "today": today,
-            }
-        )
-        return context
+def _filter_by_house(qs, user, field="house"):
+    """Les non-gestionnaires ne voient que les donnees de leur maison."""
+    if user.is_authenticated and not user.is_gestionnaire and user.house:
+        return qs.filter(**{field: user.house})
+    return qs
 
 
-class MemberListView(TreasurerRequiredMixin, ListView):
-    """Browse and filter members for treasurer workflows."""
+# -- Members (read-only views are public) ------------------------------------
 
+class MemberListView(ListView):
+    """Tous les membres. Accessible sans connexion (lecture seule)."""
     model = Member
     template_name = "members/member_list.html"
     context_object_name = "members"
 
     def get_queryset(self):
-        """Filter members by name and activity state."""
-        queryset = Member.objects.annotate(
-            residency_count=Count("residencies", distinct=True),
-            current_residency_count=Count(
+        qs = Member.objects.prefetch_related(
+            Prefetch(
                 "residencies",
-                filter=Q(residencies__start_date__lte=date.today())
-                & (
-                    Q(residencies__end_date__isnull=True)
-                    | Q(residencies__end_date__gte=date.today())
-                ),
-                distinct=True,
+                queryset=Residency.objects.filter(
+                    end_date__isnull=True,
+                ).select_related("apartment__house"),
+                to_attr="current_residencies",
             ),
-        ).order_by("last_name", "first_name", "id")
-        query = self.request.GET.get("q", "").strip()
-        activity = self.request.GET.get("activity", "").strip()
-        if query:
-            queryset = queryset.filter(
-                Q(first_name__icontains=query)
-                | Q(last_name__icontains=query)
-                | Q(preferred_name__icontains=query)
-                | Q(email__icontains=query)
-                | Q(phone_number__icontains=query)
-            )
-        if activity == "active":
-            queryset = queryset.filter(is_active=True)
-        elif activity == "inactive":
-            queryset = queryset.filter(is_active=False)
-        return queryset
-
-    def get_context_data(self, **kwargs: object) -> dict[str, object]:
-        """Expose current filters and navigation helpers."""
-        context = super().get_context_data(**kwargs)
-        context.update(
-            {
-                "query": self.request.GET.get("q", "").strip(),
-                "activity": self.request.GET.get("activity", "").strip(),
-            }
         )
-        return context
+        show = self.request.GET.get("show", "active")
+        if show == "active":
+            qs = qs.filter(is_active=True)
+        elif show == "inactive":
+            qs = qs.filter(is_active=False)
+        return qs
+
+    def get_context_data(self, **kwargs):
+        ctx = super().get_context_data(**kwargs)
+        ctx["show"] = self.request.GET.get("show", "active")
+        ctx["can_manage"] = (
+            self.request.user.is_authenticated
+            and self.request.user.can_manage_financials
+        )
+        return ctx
 
 
-class MemberCreateView(TreasurerRequiredMixin, SuccessMessageFormMixin, CreateView):
-    """Create a member record without leaving the treasurer workspace."""
+class MemberDetailView(DetailView):
+    """Detail d'un membre. Accessible sans connexion (lecture seule)."""
+    model = Member
+    template_name = "members/member_detail.html"
+    context_object_name = "member"
 
+    def get_context_data(self, **kwargs):
+        ctx = super().get_context_data(**kwargs)
+        ctx["residencies"] = self.object.residencies.select_related(
+            "apartment__house",
+        ).order_by("-start_date")
+        ctx["can_manage"] = (
+            self.request.user.is_authenticated
+            and self.request.user.can_manage_financials
+        )
+        return ctx
+
+
+class MemberCreateView(TreasurerRequiredMixin, CreateView):
     model = Member
     form_class = MemberForm
     template_name = "members/member_form.html"
-    success_url = reverse_lazy("members:member-list")
-    success_message = "Member created."
+
+    def get_form_kwargs(self):
+        kwargs = super().get_form_kwargs()
+        kwargs["user"] = self.request.user
+        return kwargs
+
+    def get_success_url(self):
+        return reverse("members:member-detail", kwargs={"pk": self.object.pk})
+
+    def form_valid(self, form):
+        response = super().form_valid(form)
+        apartment_code = form.cleaned_data.get("apartment_code", "").strip()
+        user = self.request.user
+        house = user.house
+        if apartment_code and house:
+            apartment, _created = Apartment.objects.get_or_create(
+                house=house, code=apartment_code,
+            )
+            Residency.objects.create(
+                member=self.object,
+                apartment=apartment,
+                start_date=date.today(),
+            )
+        messages.success(self.request, f"Membre \u00ab {self.object.display_name} \u00bb cree.")
+        return response
 
 
-class MemberUpdateView(TreasurerRequiredMixin, SuccessMessageFormMixin, UpdateView):
-    """Update a member record."""
-
+class MemberUpdateView(TreasurerRequiredMixin, UpdateView):
     model = Member
     form_class = MemberForm
     template_name = "members/member_form.html"
-    success_url = reverse_lazy("members:member-list")
-    success_message = "Member updated."
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        user = self.request.user
+        # Treasurer can only edit members in their house
+        if not user.is_gestionnaire and not user.is_app_admin and user.house:
+            qs = qs.filter(
+                residencies__apartment__house=user.house,
+                residencies__end_date__isnull=True,
+            ).distinct()
+        return qs
+
+    def get_form_kwargs(self):
+        kwargs = super().get_form_kwargs()
+        kwargs["is_update"] = True
+        kwargs["user"] = self.request.user
+        return kwargs
+
+    def get_success_url(self):
+        return reverse("members:member-detail", kwargs={"pk": self.object.pk})
+
+    def form_valid(self, form):
+        response = super().form_valid(form)
+        messages.success(
+            self.request, f"Membre \u00ab {self.object.display_name} \u00bb mis a jour.",
+        )
+        return response
 
 
-class ApartmentListView(TreasurerRequiredMixin, ListView):
-    """Browse apartments and their occupancy footprint."""
+# -- Apartments --------------------------------------------------------------
 
+class ApartmentListView(ListView):
+    """Liste des appartements. Accessible sans connexion."""
     model = Apartment
     template_name = "members/apartment_list.html"
     context_object_name = "apartments"
 
     def get_queryset(self):
-        """Filter apartments by code, address, and activity state."""
-        queryset = Apartment.objects.annotate(
-            residency_count=Count("residencies", distinct=True),
-            current_resident_count=Count(
+        qs = Apartment.objects.select_related("house").prefetch_related(
+            Prefetch(
                 "residencies",
-                filter=Q(residencies__start_date__lte=date.today())
-                & (
-                    Q(residencies__end_date__isnull=True)
-                    | Q(residencies__end_date__gte=date.today())
-                ),
-                distinct=True,
+                queryset=Residency.objects.filter(
+                    end_date__isnull=True,
+                ).select_related("member"),
+                to_attr="current_residencies",
             ),
-        ).order_by("code", "id")
-        query = self.request.GET.get("q", "").strip()
-        activity = self.request.GET.get("activity", "").strip()
-        if query:
-            queryset = queryset.filter(
-                Q(code__icontains=query) | Q(street_address__icontains=query)
-            )
-        if activity == "active":
-            queryset = queryset.filter(is_active=True)
-        elif activity == "inactive":
-            queryset = queryset.filter(is_active=False)
-        return queryset
-
-    def get_context_data(self, **kwargs: object) -> dict[str, object]:
-        """Expose filter state to the template."""
-        context = super().get_context_data(**kwargs)
-        context.update(
-            {
-                "query": self.request.GET.get("q", "").strip(),
-                "activity": self.request.GET.get("activity", "").strip(),
-            }
         )
-        return context
+        show = self.request.GET.get("show", "active")
+        if show == "active":
+            qs = qs.filter(is_active=True)
+        elif show == "inactive":
+            qs = qs.filter(is_active=False)
+        return qs
+
+    def get_context_data(self, **kwargs):
+        ctx = super().get_context_data(**kwargs)
+        ctx["show"] = self.request.GET.get("show", "active")
+        ctx["can_manage"] = (
+            self.request.user.is_authenticated
+            and self.request.user.can_manage_financials
+        )
+        return ctx
 
 
-class ApartmentCreateView(TreasurerRequiredMixin, SuccessMessageFormMixin, CreateView):
-    """Create an apartment record."""
-
+class ApartmentCreateView(TreasurerRequiredMixin, CreateView):
     model = Apartment
     form_class = ApartmentForm
     template_name = "members/apartment_form.html"
     success_url = reverse_lazy("members:apartment-list")
-    success_message = "Apartment created."
+
+    def get_form_kwargs(self):
+        kwargs = super().get_form_kwargs()
+        kwargs["user"] = self.request.user
+        return kwargs
+
+    def form_valid(self, form):
+        if not self.request.user.is_gestionnaire:
+            form.instance.house = self.request.user.house
+        response = super().form_valid(form)
+        messages.success(self.request, f"Appartement \u00ab {self.object} \u00bb cree.")
+        return response
 
 
-class ApartmentUpdateView(TreasurerRequiredMixin, SuccessMessageFormMixin, UpdateView):
-    """Update an apartment record."""
-
+class ApartmentUpdateView(TreasurerRequiredMixin, UpdateView):
     model = Apartment
     form_class = ApartmentForm
     template_name = "members/apartment_form.html"
     success_url = reverse_lazy("members:apartment-list")
-    success_message = "Apartment updated."
+
+    def get_form_kwargs(self):
+        kwargs = super().get_form_kwargs()
+        kwargs["user"] = self.request.user
+        return kwargs
+
+    def form_valid(self, form):
+        if not self.request.user.is_gestionnaire:
+            form.instance.house = self.request.user.house
+        response = super().form_valid(form)
+        messages.success(self.request, f"Appartement \u00ab {self.object} \u00bb mis a jour.")
+        return response
 
 
-class ResidencyListView(TreasurerRequiredMixin, ListView):
-    """Browse residency history with quick current-only filtering."""
+# -- Residencies -------------------------------------------------------------
 
+class ResidencyCreateView(TreasurerRequiredMixin, CreateView):
     model = Residency
-    template_name = "members/residency_list.html"
-    context_object_name = "residencies"
+    form_class = ResidencyForm
+    template_name = "members/residency_form.html"
 
-    def get_queryset(self):
-        """Filter residencies by member, apartment, and current state."""
-        queryset = Residency.objects.select_related("member", "apartment").order_by(
-            "-start_date",
-            "-id",
-        )
-        query = self.request.GET.get("q", "").strip()
-        scope = self.request.GET.get("scope", "").strip()
-        if query:
-            queryset = queryset.filter(
-                Q(member__first_name__icontains=query)
-                | Q(member__last_name__icontains=query)
-                | Q(member__preferred_name__icontains=query)
-                | Q(apartment__code__icontains=query)
-                | Q(apartment__street_address__icontains=query)
-            )
-        if scope == "current":
-            queryset = queryset.current()
-        elif scope == "ended":
-            queryset = queryset.filter(end_date__isnull=False, end_date__lt=date.today())
-        return queryset
+    def get_form_kwargs(self):
+        kwargs = super().get_form_kwargs()
+        kwargs["user"] = self.request.user
+        return kwargs
 
-    def get_context_data(self, **kwargs: object) -> dict[str, object]:
-        """Expose active filters."""
-        context = super().get_context_data(**kwargs)
-        context.update(
-            {
-                "query": self.request.GET.get("q", "").strip(),
-                "scope": self.request.GET.get("scope", "").strip(),
-            }
-        )
-        return context
-
-
-class ResidencyInitialMixin:
-    """Seed residency form values from query parameters when present."""
-
-    def get_initial(self) -> dict[str, object]:
-        """Prefill member or apartment from the current query string."""
+    def get_initial(self):
         initial = super().get_initial()
-        member_id = self.request.GET.get("member")
-        apartment_id = self.request.GET.get("apartment")
-        if member_id and member_id.isdigit():
-            initial["member"] = int(member_id)
-        if apartment_id and apartment_id.isdigit():
-            initial["apartment"] = int(apartment_id)
+        if "member" in self.request.GET:
+            initial["member"] = self.request.GET["member"]
+        if "apartment" in self.request.GET:
+            initial["apartment"] = self.request.GET["apartment"]
         return initial
 
+    def get_success_url(self):
+        return reverse("members:member-detail", kwargs={"pk": self.object.member.pk})
 
-class ResidencyCreateView(
-    TreasurerRequiredMixin,
-    ResidencyInitialMixin,
-    SuccessMessageFormMixin,
-    CreateView,
-):
-    """Create a residency record."""
+    def form_valid(self, form):
+        response = super().form_valid(form)
+        messages.success(
+            self.request,
+            f"Residence creee pour \u00ab {self.object.member.display_name} \u00bb.",
+        )
+        return response
 
+
+class ResidencyUpdateView(TreasurerRequiredMixin, UpdateView):
     model = Residency
     form_class = ResidencyForm
     template_name = "members/residency_form.html"
-    success_url = reverse_lazy("members:residency-list")
-    success_message = "Residency created."
 
+    def get_form_kwargs(self):
+        kwargs = super().get_form_kwargs()
+        kwargs["user"] = self.request.user
+        return kwargs
 
-class ResidencyUpdateView(
-    TreasurerRequiredMixin,
-    ResidencyInitialMixin,
-    SuccessMessageFormMixin,
-    UpdateView,
-):
-    """Update a residency record."""
+    def get_success_url(self):
+        return reverse("members:member-detail", kwargs={"pk": self.object.member.pk})
 
-    model = Residency
-    form_class = ResidencyForm
-    template_name = "members/residency_form.html"
-    success_url = reverse_lazy("members:residency-list")
-    success_message = "Residency updated."
+    def form_valid(self, form):
+        response = super().form_valid(form)
+        messages.success(
+            self.request,
+            f"Residence mise a jour pour \u00ab {self.object.member.display_name} \u00bb.",
+        )
+        return response

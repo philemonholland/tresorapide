@@ -1,25 +1,25 @@
 {% extends "base.html" %}
 
-{% block title %}Setup hub | Tresorapide{% endblock %}
+{% block title %}Hub de configuration | Tresorapide{% endblock %}
 
 {% block content %}
     <section class="card">
         <div class="section-heading">
             <div>
-                <h1>Admin setup hub</h1>
+                <h1>Hub de configuration admin</h1>
                 <p class="text-muted">
-                    Read-only setup guidance with direct links into Django admin where user and data
-                    management belongs.
+                    Guide de configuration en lecture seule avec liens directs vers Django admin
+                    pour la gestion des utilisateurs et des données.
                 </p>
             </div>
             <span class="badge badge-role">Admin</span>
         </div>
         {% if can_access_django_admin %}
-            <p>You can open the linked Django admin pages directly from this screen.</p>
+            <p>Vous pouvez ouvrir les pages Django admin liées directement depuis cet écran.</p>
         {% else %}
             <p>
-                Your app role allows access to this setup hub, but full Django admin management still
-                requires staff or superuser access.
+                Votre rôle applicatif permet l'accès à ce hub de configuration, mais la gestion complète
+                dans Django admin nécessite un accès staff ou superutilisateur.
             </p>
         {% endif %}
     </section>
@@ -28,15 +28,15 @@
         {% for role_count in role_counts %}
             <article class="card stat-card">
                 <h2>{{ role_count.count }}</h2>
-                <p>Active {{ role_count.label|lower }} account{{ role_count.count|pluralize }}</p>
+                <p>Compte{{ role_count.count|pluralize:"s" }} {{ role_count.label|lower }} actif{{ role_count.count|pluralize:"s" }}</p>
             </article>
         {% endfor %}
     </section>
 
     <section class="card">
         <div class="section-heading">
-            <h2>Management links</h2>
-            <a href="/admin/">Open Django admin</a>
+            <h2>Liens de gestion</h2>
+            <a href="/admin/">Ouvrir Django admin</a>
         </div>
         <div class="stat-grid compact-grid">
             {% for link in management_links %}
@@ -49,7 +49,7 @@
     </section>
 
     <section class="card">
-        <h2>Setup checklist</h2>
+        <h2>Liste de vérification</h2>
         <div class="stat-grid compact-grid">
             {% for check in setup_checks %}
                 <article class="stat-card subtle-card">
@@ -62,17 +62,17 @@
     </section>
 
     <section class="card">
-        <h2>Latest users</h2>
+        <h2>Derniers utilisateurs</h2>
         {% if latest_users %}
             <div class="table-responsive">
                 <table class="data-table">
                     <thead>
                         <tr>
-                            <th>Username</th>
-                            <th>Role</th>
-                            <th>Email</th>
-                            <th>Status</th>
-                            <th>Joined</th>
+                            <th>Nom d'utilisateur</th>
+                            <th>Rôle</th>
+                            <th>Courriel</th>
+                            <th>Statut</th>
+                            <th>Inscrit le</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -83,19 +83,19 @@
                                 <td>{{ user.email|default:"—" }}</td>
                                 <td>
                                     {% if user.is_active %}
-                                        <span class="badge badge-approved">Active</span>
+                                        <span class="badge badge-approved">Actif</span>
                                     {% else %}
-                                        <span class="badge badge-archived">Inactive</span>
+                                        <span class="badge badge-archived">Inactif</span>
                                     {% endif %}
                                 </td>
-                                <td>{{ user.date_joined|date:"M j, Y H:i" }}</td>
+                                <td>{{ user.date_joined|date:"j M Y H:i" }}</td>
                             </tr>
                         {% endfor %}
                     </tbody>
                 </table>
             </div>
         {% else %}
-            <p class="empty-state">No users have been created yet.</p>
+            <p class="empty-state">Aucun utilisateur n'a encore été créé.</p>
         {% endif %}
     </section>
 {% endblock %}
