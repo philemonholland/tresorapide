@@ -42,9 +42,10 @@
                                     {% endif %}
                                 </td>
                                 <td>
-                                    {% if account.pk != request.user.pk %}
+                                    {% if account.pk != request.user.pk and not account.is_superuser %}
                                         <form method="post" action="{% url 'accounts:delete' account.pk %}"
-                                              onsubmit="return confirm('Supprimer le compte « {{ account.username }} » ?');">
+                                              onsubmit="return confirm('Supprimer le compte « {{ account.username }} » ?');"
+                                              style="display:inline;">
                                             {% csrf_token %}
                                             <button type="submit" class="btn btn-danger btn-sm">Supprimer</button>
                                         </form>

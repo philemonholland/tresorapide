@@ -281,6 +281,9 @@ class ReceiptExtractedFields(TimeStampedModel):
     final_tps = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     final_tvq = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     final_total = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    # Summary
+    summary_candidate = models.CharField(max_length=255, blank=True)
+    final_summary = models.CharField(max_length=255, blank=True)
     sub_budget = models.ForeignKey(
         "budget.SubBudget", on_delete=models.SET_NULL,
         null=True, blank=True, related_name="receipt_fields",

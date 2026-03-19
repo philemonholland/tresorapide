@@ -27,7 +27,7 @@ class SetupAwareLoginView(auth_views.LoginView):
 
 
 class AccountListView(TreasurerRequiredMixin, ListView):
-    """List user accounts; filtered by house for treasurers."""
+    """List user accounts; strict hierarchy — only see accounts with role ≤ own."""
 
     model = User
     template_name = "accounts/list.html"
@@ -36,31 +36,27 @@ class AccountListView(TreasurerRequiredMixin, ListView):
     def get_queryset(self):
         qs = super().get_queryset().select_related("house", "member")
         user = self.request.user
-        if user.is_superuser or user.is_gestionnaire or user.role == Role.ADMIN:
+
+        if user.is_superuser:
             return qs
-        # Treasurer: only their house
+
+        # Filter by role: only show accounts with priority ≤ user's own
+        user_priority = ROLE_PRIORITY.get(user.role, 0)
+        allowed_roles = [r for r, p in ROLE_PRIORITY.items() if p <= user_priority]
+        qs = qs.filter(role__in=allowed_roles)
+
+        # Exclude superusers from non-superuser views
+        qs = qs.filter(is_superuser=False)
+
+        # Admin/gestionnaire see all houses; treasurer only own house
+        if user.is_gestionnaire or user.role == Role.ADMIN:
+            return qs
         return qs.filter(house=user.house)
 
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
         context["can_create"] = True
         return context
-
-    def _can_manage(self, target):
-        """Whether the request user can delete the target account."""
-        user = self.request.user
-        if target.pk == user.pk:
-            return False
-        if user.is_superuser:
-            return True
-        user_priority = ROLE_PRIORITY.get(user.role, 0)
-        target_priority = ROLE_PRIORITY.get(target.role, 0)
-        if target_priority >= user_priority:
-            return False
-        if not user.is_gestionnaire and user.role != Role.ADMIN:
-            if target.house_id != user.house_id:
-                return False
-        return True
 
 
 class AccountCreateView(TreasurerRequiredMixin, CreateView):
@@ -109,11 +105,16 @@ def account_delete_view(request, pk):
         messages.error(request, "Vous ne pouvez pas supprimer votre propre compte.")
         return redirect("accounts:list")
 
-    # Cannot delete a higher or equal role
+    # Cannot delete a higher or equal role (strict hierarchy)
     user_priority = ROLE_PRIORITY.get(user.role, 0)
     target_priority = ROLE_PRIORITY.get(target.role, 0)
     if not user.is_superuser and target_priority >= user_priority:
         messages.error(request, "Vous ne pouvez pas supprimer un compte de rôle supérieur ou égal.")
+        return redirect("accounts:list")
+
+    # Non-superuser cannot delete superusers
+    if not user.is_superuser and target.is_superuser:
+        messages.error(request, "Vous ne pouvez pas supprimer un superutilisateur.")
         return redirect("accounts:list")
 
     # Treasurer can only delete in their own house

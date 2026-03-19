@@ -9,18 +9,46 @@
                 <h1>Membres</h1>
                 <p class="text-muted">Gestion des membres de la coopérative.</p>
             </div>
-            <a class="button-link" href="{% url 'members:member-create' %}">Ajouter un membre</a>
+            {% if can_manage %}
+                <a class="button-link" href="{% url 'members:member-create' %}">Ajouter un membre</a>
+            {% endif %}
         </div>
     </section>
 
     <section class="card">
-        <form method="get" class="filter-bar">
+        <form method="get" class="filter-bar" style="display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: flex-end;">
             <label class="filter-field">
                 <span>Statut</span>
                 <select name="show">
                     <option value="active"{% if show == "active" %} selected{% endif %}>Actifs</option>
                     <option value="inactive"{% if show == "inactive" %} selected{% endif %}>Inactifs</option>
                     <option value="all"{% if show == "all" %} selected{% endif %}>Tous</option>
+                </select>
+            </label>
+            <label class="filter-field">
+                <span>Membre coop</span>
+                <select name="coop">
+                    <option value=""{% if not coop_filter %} selected{% endif %}>Tous</option>
+                    <option value="yes"{% if coop_filter == "yes" %} selected{% endif %}>Membres</option>
+                    <option value="no"{% if coop_filter == "no" %} selected{% endif %}>Non-membres</option>
+                </select>
+            </label>
+            <label class="filter-field">
+                <span>Maison</span>
+                <select name="house">
+                    <option value="">Toutes</option>
+                    {% for h in houses %}
+                        <option value="{{ h.pk }}"{% if house_filter == h.pk|stringformat:"d" %} selected{% endif %}>{{ h.code }}</option>
+                    {% endfor %}
+                </select>
+            </label>
+            <label class="filter-field">
+                <span>Trier par</span>
+                <select name="sort">
+                    <option value="last_name"{% if sort_field == "last_name" %} selected{% endif %}>Nom</option>
+                    <option value="first_name"{% if sort_field == "first_name" %} selected{% endif %}>Prénom</option>
+                    <option value="-last_name"{% if sort_field == "-last_name" %} selected{% endif %}>Nom (Z→A)</option>
+                    <option value="-first_name"{% if sort_field == "-first_name" %} selected{% endif %}>Prénom (Z→A)</option>
                 </select>
             </label>
             <div class="filter-actions">
@@ -35,19 +63,38 @@
                     <thead>
                         <tr>
                             <th>Nom</th>
-                            <th>Téléphone</th>
-                            <th>Courriel</th>
+                            <th>Prénom</th>
+                            {% if show_contact %}
+                                <th>Téléphone</th>
+                                <th>Courriel</th>
+                            {% endif %}
                             <th>Appartement</th>
                             <th>Maison</th>
                             <th>Actif</th>
+                            <th>Membre coop</th>
                         </tr>
                     </thead>
                     <tbody>
                         {% for member in members %}
                             <tr>
-                                <td><a href="{% url 'members:member-detail' member.pk %}">{{ member.display_name }}</a></td>
-                                <td>{{ member.phone_number|default:"—" }}</td>
-                                <td>{{ member.email|default:"—" }}</td>
+                                <td><a href="{% url 'members:member-detail' member.pk %}">{{ member.last_name }}</a></td>
+                                <td>{{ member.first_name }}</td>
+                                {% if show_contact %}
+                                    <td>
+                                        {% if member.pk in own_house_member_ids %}
+                                            {{ member.phone_number|default:"—" }}
+                                        {% else %}
+                                            <span class="text-muted">—</span>
+                                        {% endif %}
+                                    </td>
+                                    <td>
+                                        {% if member.pk in own_house_member_ids %}
+                                            {{ member.email|default:"—" }}
+                                        {% else %}
+                                            <span class="text-muted">—</span>
+                                        {% endif %}
+                                    </td>
+                                {% endif %}
                                 <td>{{ member.current_apartment|default:"—" }}</td>
                                 <td>{{ member.current_house|default:"—" }}</td>
                                 <td>
@@ -55,6 +102,13 @@
                                         <span class="badge badge-approved">Oui</span>
                                     {% else %}
                                         <span class="badge badge-archived">Non</span>
+                                    {% endif %}
+                                </td>
+                                <td>
+                                    {% if member.is_coop_member %}
+                                        <span class="badge badge-approved">Membre</span>
+                                    {% else %}
+                                        <span class="badge badge-archived">Non-membre</span>
                                     {% endif %}
                                 </td>
                             </tr>

@@ -102,7 +102,7 @@
                 <strong>Validé par</strong>
                 <p>
                     {% if bon.validated_by %}
-                        {{ bon.validated_by }} — {{ bon.validated_at|date:"Y-m-d H:i" }}
+                        {{ bon.validated_by.get_full_name|default:bon.validated_by.username }} — {{ bon.validated_at|date:"Y-m-d H:i" }}
                     {% else %}
                         —
                     {% endif %}

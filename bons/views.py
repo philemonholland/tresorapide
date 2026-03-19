@@ -168,6 +168,27 @@ class BonValidateView(TreasurerRequiredMixin, FormView):
         bon.validated_at = timezone.now()
         bon.refresh_snapshot_fields()
         bon.save()
+
+        # Create expense entry in the budget
+        from budget.models import Expense, ExpenseSourceType
+        if bon.sub_budget and bon.total:
+            Expense.objects.create(
+                budget_year=bon.budget_year,
+                sub_budget=bon.sub_budget,
+                bon_de_commande=bon,
+                entry_date=bon.purchase_date or timezone.now().date(),
+                description=bon.short_description or f"BC {bon.number}",
+                bon_number=bon.number,
+                supplier_name=bon.merchant_name or "",
+                spent_by_label=(
+                    f"{bon.purchaser_member.display_name}"
+                    if bon.purchaser_member else bon.purchaser_name_snapshot or "—"
+                ),
+                amount=bon.total,
+                source_type=ExpenseSourceType.BON_DE_COMMANDE,
+                entered_by=self.request.user,
+            )
+
         messages.success(self.request, f"Le bon {bon.number} a été validé.")
         return redirect(self.get_success_url())
 
@@ -377,6 +398,7 @@ class OcrReviewView(TreasurerRequiredMixin, View):
                 "tps": ef.final_tps if ef.final_tps is not None else ef.tps_candidate,
                 "tvq": ef.final_tvq if ef.final_tvq is not None else ef.tvq_candidate,
                 "total": ef.final_total if ef.final_total is not None else ef.total_candidate,
+                "summary": ef.final_summary or ef.summary_candidate or "",
             })
         except ReceiptExtractedFields.DoesNotExist:
             pass
@@ -443,6 +465,7 @@ class OcrReviewView(TreasurerRequiredMixin, View):
         ef.final_tps = form.cleaned_data.get("tps")
         ef.final_tvq = form.cleaned_data.get("tvq")
         ef.final_total = form.cleaned_data.get("total")
+        ef.final_summary = form.cleaned_data.get("summary") or ""
         ef.sub_budget = form.cleaned_data.get("sub_budget")
         ef.confirmed_by = request.user
         ef.confirmed_at = timezone.now()
@@ -552,6 +575,19 @@ class OcrReviewView(TreasurerRequiredMixin, View):
                 update_fields["purchase_date"] = first_ef.final_purchase_date
             if first_ef.sub_budget_id:
                 update_fields["sub_budget_id"] = first_ef.sub_budget_id
+
+        # Build short_description from receipt summaries
+        summaries = []
+        for r in receipts:
+            try:
+                ef = r.extracted_fields
+                s = ef.final_summary or ef.summary_candidate
+                if s:
+                    summaries.append(s)
+            except ReceiptExtractedFields.DoesNotExist:
+                continue
+        if summaries:
+            update_fields["short_description"] = "; ".join(summaries)[:255]
 
         # Sum totals across all receipts
         from decimal import Decimal
@@ -701,7 +737,7 @@ class BonSearchView(RoleRequiredMixin, View):
 
     def get(self, request):
         from django.db.models import Q
-        form = BonSearchForm(request.GET or None)
+        form = BonSearchForm(request.GET or None, user=request.user)
         results = None
         total_amount = None
 

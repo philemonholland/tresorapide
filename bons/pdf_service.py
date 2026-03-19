@@ -246,6 +246,18 @@ def generate_bon_pdf(bon) -> bytes:
     elements.append(sig_table)
     elements.append(Spacer(1, 0.3 * cm))
 
+    # ── Validation info ──────────────────────────────────────────────────
+    if bon.validated_by:
+        validator_name = bon.validated_by.get_full_name() or bon.validated_by.username
+        validated_text = f"Validé par : {validator_name}"
+        if bon.validated_at:
+            validated_text += f" — {bon.validated_at.strftime('%Y-%m-%d %H:%M')}"
+        elements.append(Paragraph(
+            f"<font size='9'><b>{validated_text}</b></font>",
+            style_normal,
+        ))
+        elements.append(Spacer(1, 0.3 * cm))
+
     # ── Footer ───────────────────────────────────────────────────────────
     footer_data = [[
         Paragraph("<font size='7'>Copie blanche : Fournisseur</font>", style_center),

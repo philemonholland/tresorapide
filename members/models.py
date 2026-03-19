@@ -50,6 +50,12 @@ class Member(TimeStampedModel):
             models.Q(end_date__isnull=True) | models.Q(end_date__gte=on_date)
         ).order_by('-start_date').first()
 
+    @property
+    def is_coop_member(self):
+        """True if the member's current residency has is_coop_member=True."""
+        r = self.current_residency()
+        return r.is_coop_member if r else False
+
     def __str__(self):
         return self.display_name
 

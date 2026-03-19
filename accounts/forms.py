@@ -44,23 +44,11 @@ class AccountCreateForm(forms.ModelForm):
         super().__init__(*args, **kwargs)
         self.creating_user = creating_user
 
-        # --- Filter role choices based on creating user ---
+        # --- Filter role choices based on creating user (strict: only roles ≤ own) ---
         if creating_user and creating_user.is_superuser:
             allowed_roles = ROLE_CHOICES_ORDERED
-        elif creating_user and creating_user.role == Role.GESTIONNAIRE:
-            max_priority = ROLE_PRIORITY[Role.ADMIN]
-            allowed_roles = [
-                (val, label) for val, label in ROLE_CHOICES_ORDERED
-                if ROLE_PRIORITY.get(val, 0) <= max_priority
-            ]
-        elif creating_user and creating_user.role == Role.ADMIN:
-            max_priority = ROLE_PRIORITY[Role.ADMIN]
-            allowed_roles = [
-                (val, label) for val, label in ROLE_CHOICES_ORDERED
-                if ROLE_PRIORITY.get(val, 0) <= max_priority
-            ]
-        elif creating_user and creating_user.role == Role.TREASURER:
-            max_priority = ROLE_PRIORITY[Role.TREASURER]
+        elif creating_user:
+            max_priority = ROLE_PRIORITY.get(creating_user.role, 0)
             allowed_roles = [
                 (val, label) for val, label in ROLE_CHOICES_ORDERED
                 if ROLE_PRIORITY.get(val, 0) <= max_priority

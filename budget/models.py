@@ -89,6 +89,12 @@ class BudgetYear(TimeStampedModel):
     def __str__(self):
         return f"{self.house.code} — {self.label}"
 
+    @property
+    def is_current_year(self):
+        """True if this budget corresponds to the current calendar year."""
+        from django.utils import timezone
+        return self.year == timezone.now().year
+
 
 class SubBudget(TimeStampedModel):
     """

@@ -200,6 +200,12 @@ class OcrReviewForm(forms.Form):
         label="Total",
         widget=forms.NumberInput(attrs={"step": "0.01"}),
     )
+    summary = forms.CharField(
+        max_length=255, required=False,
+        label="Résumé des achats",
+        widget=forms.TextInput(attrs={"placeholder": "Ex: Quincaillerie - vis et peinture"}),
+        help_text="Résumé généré par l'IA, modifiable par le trésorier.",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -261,19 +267,26 @@ class BonSearchForm(forms.Form):
         widget=forms.DateInput(format="%Y-%m-%d", attrs={"type": "date"}),
         input_formats=["%Y-%m-%d"],
     )
+    SEARCH_STATUSES = [
+        (v, l) for v, l in BonStatus.choices
+        if v != BonStatus.OCR_PENDING
+    ]
+
     status = forms.ChoiceField(
         required=False,
         label="Statut",
-        choices=[("", "Tous les statuts")] + list(BonStatus.choices),
+        choices=[("", "Tous les statuts")] + SEARCH_STATUSES,
     )
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, user=None, **kwargs):
         from houses.models import House
         super().__init__(*args, **kwargs)
         self.fields["house"].queryset = House.objects.filter(is_active=True).order_by("code")
-        self.fields["budget_year"].queryset = BudgetYear.objects.filter(
-            is_active=True
-        ).order_by("-year")
+        self.fields["budget_year"].queryset = BudgetYear.objects.order_by("-year")
         self.fields["purchaser"].queryset = Member.objects.filter(
             is_active=True
         ).order_by("last_name", "first_name")
+
+        # Pre-select user's house if available
+        if user and hasattr(user, 'house') and user.house and not self.is_bound:
+            self.fields["house"].initial = user.house.pk

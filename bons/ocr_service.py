@@ -58,7 +58,8 @@ Retourne UNIQUEMENT un tableau JSON. Chaque élément correspond à un reçu:
     "subtotal": 0.00,
     "tps": 0.00,
     "tvq": 0.00,
-    "total": 0.00
+    "total": 0.00,
+    "summary": "Courte description des achats"
   }
 ]
 
@@ -75,6 +76,9 @@ utilise "ILLISIBLE". Essaie quand même de lire, même partiellement.
 - tps: TPS (taxe fédérale, ~5%). Si absente, null.
 - tvq: TVQ (taxe provinciale, ~9.975%). Si absente, null.
 - total: montant TOTAL payé. Si absent, null.
+- summary: courte phrase ou série de mots décrivant les achats sur ce reçu \
+(ex: "Quincaillerie - vis et peinture", "Épicerie", "Pizza livraison"). \
+Si plusieurs reçus appartiennent au même membre, chaque reçu a son propre résumé.
 - Les montants en nombre décimal (pas de $).
 - Retourne UNIQUEMENT le JSON, sans texte additionnel.
 """
@@ -237,6 +241,7 @@ class ReceiptOcrService:
             "tps": cls._safe_decimal(data.get("tps")),
             "tvq": cls._safe_decimal(data.get("tvq")),
             "total": cls._safe_decimal(data.get("total")),
+            "summary": str(data.get("summary") or "").strip(),
         }
 
     @classmethod
@@ -299,6 +304,7 @@ class ReceiptOcrService:
             "tps": None,
             "tvq": None,
             "total": None,
+            "summary": "",
         }
 
     # ── Batch processing pipeline ────────────────────────────────────────
@@ -371,6 +377,7 @@ class ReceiptOcrService:
                         "tps_candidate": result.get("tps"),
                         "tvq_candidate": result.get("tvq"),
                         "total_candidate": result.get("total"),
+                        "summary_candidate": result.get("summary", ""),
                     },
                 )
 

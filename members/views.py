@@ -38,20 +38,65 @@ class MemberListView(ListView):
                 to_attr="current_residencies",
             ),
         )
+
+        # Activity filter
         show = self.request.GET.get("show", "active")
         if show == "active":
             qs = qs.filter(is_active=True)
         elif show == "inactive":
             qs = qs.filter(is_active=False)
+
+        # Coop member filter
+        coop = self.request.GET.get("coop", "")
+        if coop == "yes":
+            qs = qs.filter(residencies__end_date__isnull=True, residencies__is_coop_member=True).distinct()
+        elif coop == "no":
+            qs = qs.filter(residencies__end_date__isnull=True, residencies__is_coop_member=False).distinct()
+
+        # House filter
+        house_id = self.request.GET.get("house", "")
+        if house_id:
+            qs = qs.filter(residencies__apartment__house_id=house_id, residencies__end_date__isnull=True).distinct()
+
+        # Sorting
+        sort = self.request.GET.get("sort", "last_name")
+        if sort in ("last_name", "first_name", "-last_name", "-first_name"):
+            qs = qs.order_by(sort)
+        else:
+            qs = qs.order_by("last_name", "first_name")
+
         return qs
 
     def get_context_data(self, **kwargs):
+        from houses.models import House
         ctx = super().get_context_data(**kwargs)
+        user = self.request.user
         ctx["show"] = self.request.GET.get("show", "active")
+        ctx["coop_filter"] = self.request.GET.get("coop", "")
+        ctx["house_filter"] = self.request.GET.get("house", "")
+        ctx["sort_field"] = self.request.GET.get("sort", "last_name")
+        ctx["houses"] = House.objects.filter(is_active=True).order_by("code")
         ctx["can_manage"] = (
-            self.request.user.is_authenticated
-            and self.request.user.can_manage_financials
+            user.is_authenticated and user.can_manage_financials
         )
+
+        # Privacy: show contact info only if authenticated
+        ctx["show_contact"] = user.is_authenticated
+
+        # Build set of member PKs in user's own house (or all if admin)
+        own_house_ids = set()
+        if user.is_authenticated:
+            if user.is_app_admin or user.is_superuser:
+                # Admin sees all contact info
+                own_house_ids = set(Member.objects.values_list("pk", flat=True))
+            elif user.house:
+                own_house_ids = set(
+                    Residency.objects.filter(
+                        apartment__house=user.house, end_date__isnull=True
+                    ).values_list("member_id", flat=True)
+                )
+        ctx["own_house_member_ids"] = own_house_ids
+
         return ctx
 
 
