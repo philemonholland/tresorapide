@@ -1,0 +1,144 @@
+{% extends "base.html" %}
+
+{% block title %}Vérifier reçu — BC {{ bon.number }} | Tresorapide{% endblock %}
+
+{% block content %}
+    <section class="card">
+        <div class="section-heading">
+            <div>
+                <h1>Vérifier les données extraites</h1>
+                <p class="text-muted">
+                    Reçu ajouté au bon <strong>{{ bon.number }}</strong>
+                </p>
+            </div>
+            <a class="button-link" href="{% url 'bons:detail' bon.pk %}">← Retour au bon</a>
+        </div>
+    </section>
+
+    <section class="card">
+        <h2>{{ receipt.original_filename }}</h2>
+
+        {% if receipt.ocr_status == "FAILED" and receipt.ocr_raw_text %}
+            <div class="message warning" style="margin-bottom: 1rem;">
+                ⚠️ {{ receipt.ocr_raw_text }}
+            </div>
+        {% elif receipt.ocr_status == "FAILED" or receipt.ocr_status == "NOT_REQUESTED" %}
+            <div class="message warning" style="margin-bottom: 1rem;">
+                ⚠️ L'analyse automatique n'a pas fonctionné. Veuillez saisir les informations manuellement.
+            </div>
+        {% endif %}
+
+        <form method="post" class="stack">
+            {% csrf_token %}
+
+            <div style="display: flex; gap: 2rem; flex-wrap: wrap;">
+                <!-- Receipt image -->
+                <div style="flex: 1; min-width: 250px;">
+                    {% if receipt.content_type == "application/pdf" %}
+                        <p>
+                            <a href="{{ receipt.file.url }}" target="_blank" class="btn">📄 Ouvrir le PDF</a>
+                        </p>
+                    {% else %}
+                        <img src="{{ receipt.file.url }}" alt="{{ receipt.original_filename }}"
+                             style="max-width: 100%; max-height: 600px; border: 1px solid #ccc; border-radius: 4px;">
+                    {% endif %}
+                </div>
+
+                <!-- Extracted data form -->
+                <div style="flex: 1; min-width: 300px;">
+                    {{ form.non_field_errors }}
+
+                    {% if matched_member_name %}
+                    <div class="message success" style="margin-bottom: 1rem;">
+                        ✅ Membre identifié : <strong>{{ matched_member_name }}</strong>
+                    </div>
+                    {% endif %}
+
+                    <fieldset style="border: 1px solid #ddd; border-radius: 4px; padding: 1rem; margin-bottom: 1rem;">
+                        <legend style="font-weight: bold; padding: 0 0.5rem;">Identification du membre</legend>
+
+                        <div class="form-group {% if form.apartment_number.errors %}has-error{% endif %}">
+                            <label for="{{ form.apartment_number.id_for_label }}">{{ form.apartment_number.label }}</label>
+                            {{ form.apartment_number }}
+                            {% for error in form.apartment_number.errors %}<p class="error-text">{{ error }}</p>{% endfor %}
+                        </div>
+                        {% if name_mismatch %}
+                            <div class="message warning" style="margin-bottom: 0.5rem;">
+                                ⚠️ Le nom manuscrit n'a pas pu être associé au membre de cet appartement. Veuillez valider la sélection ci-dessous.
+                            </div>
+                        {% elif form.member_name_raw.value %}
+                            <div class="form-group">
+                                <label for="{{ form.member_name_raw.id_for_label }}">{{ form.member_name_raw.label }}</label>
+                                {{ form.member_name_raw }}
+                                <small class="text-muted">{{ form.member_name_raw.help_text }}</small>
+                            </div>
+                        {% endif %}
+                        <div class="form-group {% if form.purchaser_member.errors %}has-error{% endif %}">
+                            <label for="{{ form.purchaser_member.id_for_label }}">{{ form.purchaser_member.label }} <span style="color:red">*</span></label>
+                            {{ form.purchaser_member }}
+                            {% for error in form.purchaser_member.errors %}<p class="error-text">{{ error }}</p>{% endfor %}
+                        </div>
+                        {{ form.matched_member_id }}
+                    </fieldset>
+
+                    <fieldset style="border: 1px solid #ddd; border-radius: 4px; padding: 1rem; margin-bottom: 1rem;">
+                        <legend style="font-weight: bold; padding: 0 0.5rem;">Détails de l'achat</legend>
+
+                        <div class="form-group {% if form.sub_budget.errors %}has-error{% endif %}">
+                            <label for="{{ form.sub_budget.id_for_label }}">{{ form.sub_budget.label }} <span style="color:red">*</span></label>
+                            {{ form.sub_budget }}
+                            {% for error in form.sub_budget.errors %}<p class="error-text">{{ error }}</p>{% endfor %}
+                        </div>
+                        <div class="form-group {% if form.merchant_name.errors %}has-error{% endif %}">
+                            <label for="{{ form.merchant_name.id_for_label }}">{{ form.merchant_name.label }}</label>
+                            {{ form.merchant_name }}
+                            {% for error in form.merchant_name.errors %}<p class="error-text">{{ error }}</p>{% endfor %}
+                        </div>
+                        <div class="form-group {% if form.purchase_date.errors %}has-error{% endif %}">
+                            <label for="{{ form.purchase_date.id_for_label }}">{{ form.purchase_date.label }}</label>
+                            {{ form.purchase_date }}
+                            {% for error in form.purchase_date.errors %}<p class="error-text">{{ error }}</p>{% endfor %}
+                        </div>
+                        <div class="form-group {% if form.summary.errors %}has-error{% endif %}">
+                            <label for="{{ form.summary.id_for_label }}">{{ form.summary.label }}</label>
+                            {{ form.summary }}
+                            {% if form.summary.help_text %}<small class="text-muted">{{ form.summary.help_text }}</small>{% endif %}
+                            {% for error in form.summary.errors %}<p class="error-text">{{ error }}</p>{% endfor %}
+                        </div>
+                    </fieldset>
+
+                    <fieldset style="border: 1px solid #ddd; border-radius: 4px; padding: 1rem; margin-bottom: 1rem;">
+                        <legend style="font-weight: bold; padding: 0 0.5rem;">Montants</legend>
+
+                        <div class="form-group {% if form.subtotal.errors %}has-error{% endif %}">
+                            <label for="{{ form.subtotal.id_for_label }}">{{ form.subtotal.label }}</label>
+                            {{ form.subtotal }}
+                            {% for error in form.subtotal.errors %}<p class="error-text">{{ error }}</p>{% endfor %}
+                        </div>
+                        <div class="form-group {% if form.tps.errors %}has-error{% endif %}">
+                            <label for="{{ form.tps.id_for_label }}">{{ form.tps.label }}</label>
+                            {{ form.tps }}
+                            {% for error in form.tps.errors %}<p class="error-text">{{ error }}</p>{% endfor %}
+                        </div>
+                        <div class="form-group {% if form.tvq.errors %}has-error{% endif %}">
+                            <label for="{{ form.tvq.id_for_label }}">{{ form.tvq.label }}</label>
+                            {{ form.tvq }}
+                            {% for error in form.tvq.errors %}<p class="error-text">{{ error }}</p>{% endfor %}
+                        </div>
+                        <div class="form-group {% if form.total.errors %}has-error{% endif %}">
+                            <label for="{{ form.total.id_for_label }}">{{ form.total.label }}</label>
+                            {{ form.total }}
+                            {% for error in form.total.errors %}<p class="error-text">{{ error }}</p>{% endfor %}
+                        </div>
+                    </fieldset>
+                </div>
+            </div>
+
+            <div style="display: flex; justify-content: flex-end; margin-top: 1.5rem; padding-top: 1rem; border-top: 1px solid #eee;">
+                <button type="submit" class="btn btn-primary">
+                    ✓ Confirmer les données
+                </button>
+            </div>
+        </form>
+    </section>
+{% endblock %}

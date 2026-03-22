@@ -208,7 +208,7 @@ class BonValidateView(TreasurerRequiredMixin, FormView):
 
 
 class ReceiptUploadToExistingView(TreasurerRequiredMixin, View):
-    """Upload a receipt to an existing bon (from the detail page)."""
+    """Upload a receipt to an existing bon and run GPT Vision OCR."""
 
     def post(self, request, bon_pk):
         bon = get_object_or_404(
@@ -216,18 +216,175 @@ class ReceiptUploadToExistingView(TreasurerRequiredMixin, View):
             pk=bon_pk,
         )
         form = ReceiptUploadForm(request.POST, request.FILES)
-        if form.is_valid():
-            uploaded = form.cleaned_data["file"]
-            ReceiptFile.objects.create(
-                bon_de_commande=bon,
-                file=uploaded,
-                original_filename=uploaded.name,
-                content_type=getattr(uploaded, "content_type", ""),
-                uploaded_by=request.user,
-            )
-            messages.success(request, "Reçu téléversé avec succès.")
-        else:
+        if not form.is_valid():
             messages.error(request, "Erreur lors du téléversement du fichier.")
+            return redirect(reverse("bons:detail", kwargs={"pk": bon.pk}))
+
+        uploaded = form.cleaned_data["file"]
+        receipt = ReceiptFile.objects.create(
+            bon_de_commande=bon,
+            file=uploaded,
+            original_filename=uploaded.name,
+            content_type=getattr(uploaded, "content_type", ""),
+            uploaded_by=request.user,
+        )
+
+        # Run GPT Vision OCR (same as scan session flow)
+        from .ocr_service import ReceiptOcrService
+        if ReceiptOcrService.is_available():
+            _, err = ReceiptOcrService.process_receipts_batch([receipt])
+            if err:
+                messages.warning(request, err)
+        else:
+            messages.warning(
+                request,
+                "L'analyse automatique n'est pas disponible. "
+                "Vérifiez les données manuellement.",
+            )
+
+        messages.success(request, "Reçu téléversé et analysé.")
+        return redirect(
+            reverse("bons:receipt-review", kwargs={
+                "bon_pk": bon.pk, "receipt_pk": receipt.pk,
+            })
+        )
+
+
+class ReceiptReviewSingleView(TreasurerRequiredMixin, View):
+    """Review GPT-extracted data for a single receipt on an existing bon."""
+
+    template_name = "bons/receipt_review_single.html"
+
+    def _get_context(self, request, bon, receipt):
+        from members.models import Member, Residency
+        from budget.models import SubBudget
+
+        initial = {}
+        matched_member_name = ""
+        name_mismatch = False
+
+        try:
+            ef = receipt.extracted_fields
+            apt_code = ef.final_apartment_number or ef.apartment_number_candidate
+            member_name_raw = ef.final_member_name or ef.member_name_candidate
+
+            member = None
+            if apt_code:
+                _, member = _match_member_for_apartment(bon.house, apt_code)
+                if member:
+                    matched_member_name = member.display_name
+                    initial["matched_member_id"] = member.pk
+                    initial["purchaser_member"] = member.pk
+
+            name_unreadable = not member_name_raw or member_name_raw.upper() == "ILLISIBLE"
+            if member and member_name_raw and not name_unreadable:
+                if member_name_raw.lower().strip() not in member.display_name.lower():
+                    name_mismatch = True
+
+            initial.update({
+                "member_name_raw": member_name_raw if (member and not name_mismatch and not name_unreadable) else "",
+                "apartment_number": apt_code,
+                "merchant_name": ef.final_merchant or ef.merchant_candidate,
+                "purchase_date": ef.final_purchase_date or ef.purchase_date_candidate,
+                "subtotal": ef.final_subtotal if ef.final_subtotal is not None else ef.subtotal_candidate,
+                "tps": ef.final_tps if ef.final_tps is not None else ef.tps_candidate,
+                "tvq": ef.final_tvq if ef.final_tvq is not None else ef.tvq_candidate,
+                "total": ef.final_total if ef.final_total is not None else ef.total_candidate,
+                "summary": ef.final_summary or ef.summary_candidate or "",
+            })
+            # Pre-select existing bon's sub_budget if not set in extracted data
+            if ef.sub_budget_id:
+                initial["sub_budget"] = ef.sub_budget_id
+            elif bon.sub_budget_id:
+                initial["sub_budget"] = bon.sub_budget_id
+        except ReceiptExtractedFields.DoesNotExist:
+            if bon.sub_budget_id:
+                initial["sub_budget"] = bon.sub_budget_id
+
+        prefix = f"receipt_{receipt.pk}"
+        form = OcrReviewForm(prefix=prefix, initial=initial)
+
+        house_member_ids = Residency.objects.filter(
+            apartment__house=bon.house, end_date__isnull=True,
+        ).values_list("member_id", flat=True)
+        form.fields["purchaser_member"].queryset = Member.objects.filter(
+            pk__in=house_member_ids, is_active=True,
+        ).order_by("last_name", "first_name")
+        form.fields["sub_budget"].queryset = SubBudget.objects.filter(
+            budget_year=bon.budget_year, is_active=True,
+        ).order_by("sort_order", "trace_code")
+
+        return {
+            "bon": bon,
+            "receipt": receipt,
+            "form": form,
+            "matched_member_name": matched_member_name,
+            "name_mismatch": name_mismatch,
+        }
+
+    def get(self, request, bon_pk, receipt_pk):
+        bon = get_object_or_404(
+            _filter_by_house(BonDeCommande.objects.all(), request.user), pk=bon_pk,
+        )
+        receipt = get_object_or_404(ReceiptFile, pk=receipt_pk, bon_de_commande=bon)
+        ctx = self._get_context(request, bon, receipt)
+        return TemplateResponse(request, self.template_name, ctx)
+
+    def post(self, request, bon_pk, receipt_pk):
+        from members.models import Member, Residency
+        from budget.models import SubBudget
+
+        bon = get_object_or_404(
+            _filter_by_house(BonDeCommande.objects.all(), request.user), pk=bon_pk,
+        )
+        receipt = get_object_or_404(ReceiptFile, pk=receipt_pk, bon_de_commande=bon)
+
+        prefix = f"receipt_{receipt.pk}"
+        form = OcrReviewForm(data=request.POST, prefix=prefix)
+        house_member_ids = Residency.objects.filter(
+            apartment__house=bon.house, end_date__isnull=True,
+        ).values_list("member_id", flat=True)
+        form.fields["purchaser_member"].queryset = Member.objects.filter(
+            pk__in=house_member_ids, is_active=True,
+        ).order_by("last_name", "first_name")
+        form.fields["sub_budget"].queryset = SubBudget.objects.filter(
+            budget_year=bon.budget_year, is_active=True,
+        ).order_by("sort_order", "trace_code")
+
+        if not form.is_valid():
+            messages.error(request, "Veuillez corriger les erreurs ci-dessous.")
+            ctx = self._get_context(request, bon, receipt)
+            ctx["form"] = form
+            return TemplateResponse(request, self.template_name, ctx)
+
+        # Save confirmed fields
+        selected_member = form.cleaned_data.get("purchaser_member")
+        ef, _ = ReceiptExtractedFields.objects.get_or_create(receipt_file=receipt)
+        ef.final_member_name = selected_member.display_name if selected_member else ""
+        ef.final_apartment_number = form.cleaned_data.get("apartment_number") or ""
+        ef.final_merchant = form.cleaned_data.get("merchant_name") or ""
+        ef.final_purchase_date = form.cleaned_data.get("purchase_date")
+        ef.final_subtotal = form.cleaned_data.get("subtotal")
+        ef.final_tps = form.cleaned_data.get("tps")
+        ef.final_tvq = form.cleaned_data.get("tvq")
+        ef.final_total = form.cleaned_data.get("total")
+        ef.final_summary = form.cleaned_data.get("summary") or ""
+        ef.sub_budget = form.cleaned_data.get("sub_budget")
+        ef.confirmed_by = request.user
+        ef.confirmed_at = timezone.now()
+        ef.save()
+
+        if receipt.ocr_status in (OcrStatus.EXTRACTED, OcrStatus.NOT_REQUESTED, OcrStatus.FAILED):
+            receipt.ocr_status = OcrStatus.CORRECTED
+            receipt.save(update_fields=["ocr_status"])
+
+        # Auto-save merchant
+        merchant_name = (form.cleaned_data.get("merchant_name") or "").strip()
+        if merchant_name:
+            from .models import Merchant
+            Merchant.objects.get_or_create(name=merchant_name)
+
+        messages.success(request, "Données du reçu confirmées.")
         return redirect(reverse("bons:detail", kwargs={"pk": bon.pk}))
 
 
