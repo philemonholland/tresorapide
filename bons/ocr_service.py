@@ -28,29 +28,47 @@ try:
 except ImportError:
     PILLOW_AVAILABLE = False
 
+try:
+    from pdf2image import convert_from_path
+    PDF2IMAGE_AVAILABLE = True
+except ImportError:
+    PDF2IMAGE_AVAILABLE = False
+
 # ── Prompt for batch analysis (multiple receipts in one composite image) ─────
 
 RECEIPT_BATCH_PROMPT = """\
-Tu es un assistant spécialisé dans l'extraction de données de reçus et factures \
-pour une coopérative d'habitation au Québec.
+Tu es un assistant spécialisé dans l'extraction de données de documents \
+financiers pour une coopérative d'habitation au Québec.
 
-L'image contient un ou plusieurs reçus/factures, chacun précédé d'un bandeau \
-avec le nom du fichier original (ex: «TestRecu1.png»).
+L'image contient un ou plusieurs documents (reçus, factures, bons de commande \
+papier), chacun précédé d'un bandeau avec le nom du fichier original et le \
+numéro de page (ex: «BC16011.pdf - Page 1» ou «TestRecu1.png»).
 
-IMPORTANT: Un même reçu peut s'étendre sur PLUSIEURS sous-images consécutives \
-(par exemple si le reçu a été photographié en deux parties, ou si c'est une \
-facture de plusieurs pages). Dans ce cas, les sous-images du même reçu auront \
-des noms de fichier similaires ou consécutifs. Combine les informations de \
-toutes les sous-images qui font partie du MÊME reçu en UNE SEULE entrée JSON. \
-Utilise le nom de fichier de la PREMIÈRE sous-image comme "filename".
+IMPORTANT: Un même document peut s'étendre sur PLUSIEURS sous-images \
+consécutives (ex: facture de plusieurs pages, reçu photographié en 2 parties). \
+Dans ce cas, combine les informations en UNE SEULE entrée JSON et utilise le \
+nom de fichier de la PREMIÈRE sous-image comme "filename".
 
-Pour CHAQUE reçu dans l'image, un membre de la coopérative a fait l'achat, \
-signé le document et écrit son numéro d'appartement à la main.
+Types de documents — classifie chaque document:
+1. "paper_bc" — Bon de commande PAPIER officiel de la coopérative. Se reconnaît \
+par: le logo ou nom de la coopérative en haut, "Notre numéro de commande" avec \
+un numéro, des lignes description/quantité/prix, et un champ "Fournisseur ou \
+personne à rembourser".
+2. "invoice" — Facture ou soumission d'un fournisseur. Souvent associée à un \
+bon de commande papier dans le même lot.
+3. "receipt" — Reçu de caisse (magasin, quincaillerie, épicerie). Achat fait \
+par un MEMBRE de la coopérative qui se fait rembourser. Contient souvent un \
+nom manuscrit et un numéro d'appartement.
 
-Retourne UNIQUEMENT un tableau JSON. Chaque élément correspond à un reçu:
+Retourne UNIQUEMENT un tableau JSON. Chaque élément = un document distinct:
 [
   {
     "filename": "TestRecu1.png",
+    "document_type": "receipt",
+    "bc_number": "",
+    "associated_bc_number": "",
+    "supplier_name": "",
+    "supplier_address": "",
     "member_name": "Nom manuscrit du membre",
     "apartment_number": "207",
     "merchant": "Nom du marchand",
@@ -64,21 +82,28 @@ Retourne UNIQUEMENT un tableau JSON. Chaque élément correspond à un reçu:
 ]
 
 Règles:
-- filename: reproduis EXACTEMENT le nom affiché dans le bandeau au-dessus du reçu. \
-Si un reçu s'étend sur plusieurs sous-images, utilise le nom de la première.
-- member_name: le nom écrit à la main par le membre. Si complètement illisible, \
-utilise "ILLISIBLE". Essaie quand même de lire, même partiellement.
-- apartment_number: le numéro d'appartement écrit à la main (souvent 3 chiffres: \
-101, 202, 307). Cherche dans les annotations manuscrites ou la signature.
-- merchant: le nom du commerce tel qu'imprimé sur le reçu.
-- purchase_date: date d'achat au format ISO YYYY-MM-DD. Si absente, null.
+- filename: reproduis EXACTEMENT le nom affiché dans le bandeau. Si un document \
+s'étend sur plusieurs sous-images, utilise le nom de la première.
+- document_type: "paper_bc", "invoice", ou "receipt".
+- bc_number: pour "paper_bc" seulement — le numéro sous "Notre numéro de \
+commande". Laisser "" pour les autres types.
+- associated_bc_number: si c'est une "invoice" liée à un "paper_bc" du même \
+lot, mettre le numéro du BC. Utilise le contexte (montants, fournisseur, \
+description) pour associer. Laisser "" si pas de BC associé.
+- supplier_name: pour "paper_bc" et "invoice" — le nom du fournisseur ou la \
+personne à rembourser tel qu'inscrit sur le document.
+- supplier_address: adresse du fournisseur si visible.
+- member_name: pour "receipt" seulement — le nom écrit à la main par le membre. \
+Si complètement illisible, utilise "ILLISIBLE".
+- apartment_number: pour "receipt" seulement — le numéro d'appartement manuscrit \
+(souvent 3 chiffres: 101, 202, 307).
+- merchant: pour "receipt" — le nom du commerce sur le reçu.
+- purchase_date: date au format ISO YYYY-MM-DD. Si absente, null.
 - subtotal: sous-total AVANT taxes. Si absent, null (NE PAS calculer).
 - tps: TPS (taxe fédérale, ~5%). Si absente, null.
 - tvq: TVQ (taxe provinciale, ~9.975%). Si absente, null.
-- total: montant TOTAL payé. Si absent, null.
-- summary: courte phrase ou série de mots décrivant les achats sur ce reçu \
-(ex: "Quincaillerie - vis et peinture", "Épicerie", "Pizza livraison"). \
-Si plusieurs reçus appartiennent au même membre, chaque reçu a son propre résumé.
+- total: montant TOTAL. Si absent, null.
+- summary: courte description du contenu du document.
 - Les montants en nombre décimal (pas de $).
 - Retourne UNIQUEMENT le JSON, sans texte additionnel.
 """
@@ -101,52 +126,71 @@ class ReceiptOcrService:
     # ── Composite image builder ──────────────────────────────────────────
 
     @staticmethod
-    def _build_composite_image(file_map: dict[str, str]) -> bytes:
+    def _build_composite_image(file_map: dict[str, str]) -> tuple[bytes, list[str]]:
         """
         Stitch multiple receipt images into one vertical composite.
         Each sub-image gets a filename label banner above it.
+        Supports images (JPEG/PNG) and PDFs (converted to images).
 
         Args:
-            file_map: {original_filename: file_path}
+            file_map: {label: file_path} — label is used in the banner
 
         Returns:
-            PNG bytes of the composite image.
+            (PNG bytes of the composite image, list of page labels in order)
         """
         BANNER_HEIGHT = 40
         TARGET_WIDTH = 1200
         PADDING = 10
 
         panels = []
-        for filename, file_path in file_map.items():
-            try:
-                img = Image.open(file_path)
+        page_labels = []
+
+        for label, file_path in file_map.items():
+            lower_path = file_path.lower()
+            page_images = []
+
+            if lower_path.endswith(".pdf") and PDF2IMAGE_AVAILABLE:
+                try:
+                    pdf_pages = convert_from_path(file_path, dpi=200)
+                    for i, page_img in enumerate(pdf_pages):
+                        page_label = f"{label} - Page {i + 1}" if len(pdf_pages) > 1 else label
+                        page_images.append((page_label, page_img))
+                except Exception:
+                    logger.warning("Cannot convert PDF %s, skipping", file_path)
+                    continue
+            else:
+                try:
+                    img = Image.open(file_path)
+                    page_images.append((label, img))
+                except Exception:
+                    logger.warning("Cannot open image %s, skipping", file_path)
+                    continue
+
+            for page_label, img in page_images:
                 if img.mode != "RGB":
                     img = img.convert("RGB")
-            except Exception:
-                logger.warning("Cannot open image %s, skipping", file_path)
-                continue
 
-            # Resize to target width
-            ratio = TARGET_WIDTH / img.width
-            new_h = int(img.height * ratio)
-            img = img.resize((TARGET_WIDTH, new_h), Image.LANCZOS)
+                ratio = TARGET_WIDTH / img.width
+                new_h = int(img.height * ratio)
+                img = img.resize((TARGET_WIDTH, new_h), Image.LANCZOS)
 
-            # Create banner with filename
-            banner = Image.new("RGB", (TARGET_WIDTH, BANNER_HEIGHT), (40, 40, 40))
-            draw = ImageDraw.Draw(banner)
-            try:
-                font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 22)
-            except (OSError, IOError):
-                font = ImageFont.load_default()
-            draw.text((PADDING, 8), f"📄 {filename}", fill=(255, 255, 255), font=font)
+                banner = Image.new("RGB", (TARGET_WIDTH, BANNER_HEIGHT), (40, 40, 40))
+                draw = ImageDraw.Draw(banner)
+                try:
+                    font = ImageFont.truetype(
+                        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 22
+                    )
+                except (OSError, IOError):
+                    font = ImageFont.load_default()
+                draw.text((PADDING, 8), f"📄 {page_label}", fill=(255, 255, 255), font=font)
 
-            panels.append(banner)
-            panels.append(img)
+                panels.append(banner)
+                panels.append(img)
+                page_labels.append(page_label)
 
         if not panels:
             raise ValueError("Aucune image valide à analyser.")
 
-        # Stack vertically
         total_height = sum(p.height for p in panels) + PADDING * (len(panels) - 1)
         composite = Image.new("RGB", (TARGET_WIDTH, total_height), (255, 255, 255))
         y = 0
@@ -156,21 +200,22 @@ class ReceiptOcrService:
 
         buf = io.BytesIO()
         composite.save(buf, format="PNG", optimize=True)
-        return buf.getvalue()
+        return buf.getvalue(), page_labels
 
     # ── API call ─────────────────────────────────────────────────────────
 
     @classmethod
     def analyze_batch(cls, file_map: dict[str, str]) -> list[dict]:
         """
-        Send a composite image of all receipts to OpenAI in a single API call.
-        Returns a list of result dicts, one per receipt, keyed by 'filename'.
+        Send a composite image of all receipts/PDFs to OpenAI in a single call.
+        Returns a list of result dicts, one per document detected.
         """
         if not cls.is_available():
             raise RuntimeError("OpenAI API non configurée.")
 
-        composite_bytes = cls._build_composite_image(file_map)
+        composite_bytes, page_labels = cls._build_composite_image(file_map)
         image_b64 = base64.b64encode(composite_bytes).decode("utf-8")
+        num_pages = len(page_labels)
 
         client = OpenAI(api_key=settings.OPENAI_API_KEY)
         model = _get_openai_model()
@@ -185,8 +230,10 @@ class ReceiptOcrService:
                         {
                             "type": "text",
                             "text": (
-                                f"Cette image contient {len(file_map)} reçu(s). "
-                                "Extrais les informations de chacun en JSON."
+                                f"Cette image contient {num_pages} page(s) provenant "
+                                f"de {len(file_map)} fichier(s). "
+                                "Analyse chaque page, classifie les documents et "
+                                "extrais les informations en JSON."
                             ),
                         },
                         {
@@ -198,13 +245,13 @@ class ReceiptOcrService:
                     ],
                 },
             ],
-            max_completion_tokens=300 * max(len(file_map), 1),
+            max_completion_tokens=16000,
             temperature=0,
         )
 
         raw = response.choices[0].message.content.strip()
-        logger.info("GPT batch analysis (model=%s, %d receipts): %s",
-                     model, len(file_map), raw)
+        logger.info("GPT batch analysis (model=%s, %d pages): %s",
+                     model, num_pages, raw)
         return cls._parse_batch_response(raw, list(file_map.keys()))
 
     # ── Parsing helpers ──────────────────────────────────────────────────
@@ -230,9 +277,14 @@ class ReceiptOcrService:
 
     @classmethod
     def _parse_one(cls, data: dict) -> dict:
-        """Parse a single receipt entry from the GPT JSON response."""
+        """Parse a single document entry from the GPT JSON response."""
         return {
             "filename": str(data.get("filename") or ""),
+            "document_type": str(data.get("document_type") or "receipt").strip(),
+            "bc_number": str(data.get("bc_number") or "").strip(),
+            "associated_bc_number": str(data.get("associated_bc_number") or "").strip(),
+            "supplier_name": str(data.get("supplier_name") or "").strip(),
+            "supplier_address": str(data.get("supplier_address") or "").strip(),
             "member_name": str(data.get("member_name") or "").strip(),
             "apartment_number": str(data.get("apartment_number") or "").strip(),
             "merchant": str(data.get("merchant") or ""),
@@ -246,7 +298,14 @@ class ReceiptOcrService:
 
     @classmethod
     def _parse_batch_response(cls, raw_text: str, filenames: list[str]) -> list[dict]:
-        """Parse a JSON array response from batch analysis."""
+        """Parse a JSON array response from batch analysis.
+
+        GPT may return more results than input files (e.g., a PDF with a paper
+        BC on page 1 and an invoice on page 2 produces two entries).  Each
+        result is tagged with ``source_filename`` — the original upload name it
+        belongs to — in addition to the GPT-provided ``filename`` (which may be
+        a page label like ``"BC16011.pdf - Page 2"``).
+        """
         text = raw_text.strip()
         if text.startswith("```"):
             text = text.split("\n", 1)[-1]
@@ -270,32 +329,44 @@ class ReceiptOcrService:
         # Parse each entry
         results = [cls._parse_one(item) for item in data]
 
-        # Ensure we have a result for every filename (match by filename)
-        result_map = {}
+        # Tag each result with its source_filename (the original upload name).
+        # GPT filenames may be page labels like "X.pdf - Page 2"; map them back.
         for r in results:
-            result_map[r["filename"]] = r
+            gpt_fn = r["filename"]
+            # Exact match
+            if gpt_fn in filenames:
+                r["source_filename"] = gpt_fn
+                continue
+            # Fuzzy: GPT filename contains or is contained by an original name
+            matched = False
+            for fn in filenames:
+                if fn and gpt_fn and (fn in gpt_fn or gpt_fn in fn):
+                    r["source_filename"] = fn
+                    matched = True
+                    break
+            if not matched:
+                # Fallback: assign to first filename (single-file uploads)
+                r["source_filename"] = filenames[0] if filenames else ""
 
-        ordered = []
+        # Ensure every input filename has at least one result
+        seen_sources = {r["source_filename"] for r in results}
         for fn in filenames:
-            if fn in result_map:
-                ordered.append(result_map[fn])
-            else:
-                # Try fuzzy match (GPT might slightly alter filename)
-                matched = False
-                for key, val in result_map.items():
-                    if key and fn and (key in fn or fn in key):
-                        ordered.append(val)
-                        matched = True
-                        break
-                if not matched:
-                    ordered.append(cls._empty_result(fn))
+            if fn not in seen_sources:
+                empty = cls._empty_result(fn)
+                empty["source_filename"] = fn
+                results.append(empty)
 
-        return ordered
+        return results
 
     @staticmethod
     def _empty_result(filename: str = "") -> dict:
         return {
             "filename": filename,
+            "document_type": "receipt",
+            "bc_number": "",
+            "associated_bc_number": "",
+            "supplier_name": "",
+            "supplier_address": "",
             "member_name": "",
             "apartment_number": "",
             "merchant": "",
@@ -328,17 +399,17 @@ class ReceiptOcrService:
                 r.save(update_fields=["ocr_status", "ocr_raw_text"])
             return empties, msg
 
-        # Build file map: filename → file path (images only)
+        # Build file map: filename → file path (images AND PDFs)
         file_map = {}
         for r in receipt_file_objs:
             r.ocr_status = OcrStatus.PENDING
             r.save(update_fields=["ocr_status"])
-            if r.content_type and r.content_type.startswith("image/"):
+            ct = (r.content_type or "").lower()
+            if ct.startswith("image/") or ct == "application/pdf":
                 file_map[r.original_filename] = r.file.path
-            # PDFs skipped from composite for now
 
         if not file_map:
-            msg = "Aucune image à analyser (seuls les fichiers image sont supportés)."
+            msg = "Aucun fichier analysable (images et PDF supportés)."
             for r in receipt_file_objs:
                 r.ocr_status = OcrStatus.FAILED
                 r.ocr_raw_text = msg
@@ -348,36 +419,54 @@ class ReceiptOcrService:
         try:
             results = cls.analyze_batch(file_map)
 
-            # Map results back to receipt objects by filename
-            result_by_name = {r["filename"]: r for r in results}
+            # Group results by source_filename (one file may produce multiple docs)
+            from collections import defaultdict
+            results_by_source = defaultdict(list)
+            for r in results:
+                results_by_source[r.get("source_filename", r["filename"])].append(r)
+
             model = _get_openai_model()
 
             for receipt_obj in receipt_file_objs:
                 fn = receipt_obj.original_filename
-                result = result_by_name.get(fn, cls._empty_result(fn))
+                file_results = results_by_source.get(fn, [cls._empty_result(fn)])
 
-                receipt_obj.ocr_raw_text = json.dumps(result, default=str)
+                # Store ALL results from this file as raw JSON
+                receipt_obj.ocr_raw_text = json.dumps(file_results, default=str)
                 receipt_obj.ocr_status = OcrStatus.EXTRACTED
                 receipt_obj.save(update_fields=["ocr_raw_text", "ocr_status"])
 
                 ReceiptOcrResult.objects.create(
                     receipt_file=receipt_obj,
                     engine_name=f"openai-{model}",
-                    raw_text=json.dumps(result, default=str),
+                    raw_text=json.dumps(file_results, default=str),
                 )
+
+                # Primary extracted fields: use the first result (paper_bc if
+                # present, otherwise the first document)
+                primary = file_results[0]
+                for r in file_results:
+                    if r.get("document_type") == "paper_bc":
+                        primary = r
+                        break
 
                 ReceiptExtractedFields.objects.update_or_create(
                     receipt_file=receipt_obj,
                     defaults={
-                        "member_name_candidate": result.get("member_name", ""),
-                        "apartment_number_candidate": result.get("apartment_number", ""),
-                        "merchant_candidate": result.get("merchant", ""),
-                        "purchase_date_candidate": result.get("purchase_date"),
-                        "subtotal_candidate": result.get("subtotal"),
-                        "tps_candidate": result.get("tps"),
-                        "tvq_candidate": result.get("tvq"),
-                        "total_candidate": result.get("total"),
-                        "summary_candidate": result.get("summary", ""),
+                        "document_type_candidate": primary.get("document_type", "receipt"),
+                        "bc_number_candidate": primary.get("bc_number", ""),
+                        "associated_bc_number_candidate": primary.get("associated_bc_number", ""),
+                        "supplier_name_candidate": primary.get("supplier_name", ""),
+                        "supplier_address_candidate": primary.get("supplier_address", ""),
+                        "member_name_candidate": primary.get("member_name", ""),
+                        "apartment_number_candidate": primary.get("apartment_number", ""),
+                        "merchant_candidate": primary.get("merchant", ""),
+                        "purchase_date_candidate": primary.get("purchase_date"),
+                        "subtotal_candidate": primary.get("subtotal"),
+                        "tps_candidate": primary.get("tps"),
+                        "tvq_candidate": primary.get("tvq"),
+                        "total_candidate": primary.get("total"),
+                        "summary_candidate": primary.get("summary", ""),
                     },
                 )
 

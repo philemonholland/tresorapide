@@ -10,6 +10,7 @@ RUN apt-get update \
         build-essential \
         libcairo2-dev \
         pkg-config \
+        poppler-utils \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt /app/requirements.txt

@@ -6,6 +6,7 @@ from django.views.generic.edit import FormView
 from django.contrib import messages
 from django.template.response import TemplateResponse
 from collections import defaultdict
+import json
 
 from accounts.access import RoleRequiredMixin, TreasurerRequiredMixin, check_house_permission
 from .models import (
@@ -506,6 +507,37 @@ class ReceiptUploadWizardView(TreasurerRequiredMixin, FormView):
 # OCR Workflow — Step 2: Review receipts one at a time
 # ---------------------------------------------------------------------------
 
+def _get_mismatch_warning(receipt):
+    """Check if paper BC total matches invoice totals."""
+    try:
+        all_docs = json.loads(receipt.ocr_raw_text or "[]")
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+    if not isinstance(all_docs, list):
+        return None
+
+    paper_bcs = [d for d in all_docs if d.get("document_type") == "paper_bc"]
+    invoices = [d for d in all_docs if d.get("document_type") == "invoice"]
+
+    if not paper_bcs or not invoices:
+        return None
+
+    bc_total = paper_bcs[0].get("total") or 0
+    invoice_total = sum(d.get("total") or 0 for d in invoices)
+
+    try:
+        if abs(float(bc_total) - float(invoice_total)) > 0.01:
+            return {
+                "bc_total": bc_total,
+                "invoice_total": invoice_total,
+                "bc_number": paper_bcs[0].get("bc_number", "?"),
+            }
+    except (ValueError, TypeError):
+        return None
+    return None
+
+
 class OcrReviewView(TreasurerRequiredMixin, View):
     """Step 2: Review extracted data one receipt at a time with prev/next."""
     template_name = "bons/review.html"
@@ -538,29 +570,38 @@ class OcrReviewView(TreasurerRequiredMixin, View):
         initial = {}
         matched_member_name = ""
         name_mismatch = False
+        doc_type = "receipt"
 
         try:
             ef = receipt.extracted_fields
+            doc_type = ef.final_document_type or ef.document_type_candidate or "receipt"
+            initial["document_type"] = doc_type
+            initial["bc_number"] = ef.final_bc_number or ef.bc_number_candidate or ""
+            initial["associated_bc_number"] = ef.final_associated_bc_number or ef.associated_bc_number_candidate or ""
+            initial["supplier_name"] = ef.final_supplier_name or ef.supplier_name_candidate or ""
+            initial["supplier_address"] = ef.final_supplier_address or ef.supplier_address_candidate or ""
+
             apt_code = ef.final_apartment_number or ef.apartment_number_candidate
             member_name_raw = ef.final_member_name or ef.member_name_candidate
 
-            # Auto-match: apartment → member from DB
-            member = None
-            if apt_code:
-                apartment, member = _match_member_for_apartment(bon.house, apt_code)
-                if member:
-                    matched_member_name = member.display_name
-                    initial["matched_member_id"] = member.pk
-                    initial["purchaser_member"] = member.pk
+            # Only do member matching for receipts
+            if doc_type == "receipt":
+                member = None
+                if apt_code:
+                    apartment, member = _match_member_for_apartment(bon.house, apt_code)
+                    if member:
+                        matched_member_name = member.display_name
+                        initial["matched_member_id"] = member.pk
+                        initial["purchaser_member"] = member.pk
 
-            # Check name mismatch — if no member found from apartment, or name doesn't match
-            name_unreadable = not member_name_raw or member_name_raw.upper() == "ILLISIBLE"
-            if member and member_name_raw and not name_unreadable:
-                if member_name_raw.lower().strip() not in member.display_name.lower():
-                    name_mismatch = True
+                name_unreadable = not member_name_raw or member_name_raw.upper() == "ILLISIBLE"
+                if member and member_name_raw and not name_unreadable:
+                    if member_name_raw.lower().strip() not in member.display_name.lower():
+                        name_mismatch = True
+
+                initial["member_name_raw"] = member_name_raw if (member and not name_mismatch and not name_unreadable) else ""
 
             initial.update({
-                "member_name_raw": member_name_raw if (member and not name_mismatch and not name_unreadable) else "",
                 "apartment_number": apt_code,
                 "merchant_name": ef.final_merchant or ef.merchant_candidate,
                 "purchase_date": ef.final_purchase_date or ef.purchase_date_candidate,
@@ -571,7 +612,7 @@ class OcrReviewView(TreasurerRequiredMixin, View):
                 "summary": ef.final_summary or ef.summary_candidate or "",
             })
         except ReceiptExtractedFields.DoesNotExist:
-            pass
+            initial["document_type"] = "receipt"
 
         form = OcrReviewForm(data=post_data, prefix=prefix, initial=initial)
 
@@ -588,7 +629,7 @@ class OcrReviewView(TreasurerRequiredMixin, View):
             budget_year=bon.budget_year, is_active=True
         ).order_by("sort_order", "trace_code")
 
-        return form, matched_member_name, name_mismatch
+        return form, matched_member_name, name_mismatch, doc_type
 
     def get(self, request, pk):
         bon = self._get_bon(request, pk)
@@ -596,8 +637,8 @@ class OcrReviewView(TreasurerRequiredMixin, View):
         if not current:
             messages.warning(request, "Aucun reçu à vérifier.")
             return redirect(reverse("bons:list"))
-        form, matched_name, name_mismatch = self._build_form(current, bon)
-        return self._render(request, bon, current, form, idx, total, matched_name, name_mismatch)
+        form, matched_name, name_mismatch, doc_type = self._build_form(current, bon)
+        return self._render(request, bon, current, form, idx, total, matched_name, name_mismatch, doc_type)
 
     def post(self, request, pk):
         bon = self._get_bon(request, pk)
@@ -621,12 +662,18 @@ class OcrReviewView(TreasurerRequiredMixin, View):
         ).order_by("sort_order", "trace_code")
 
         if not form.is_valid():
+            doc_type = request.POST.get(f"{prefix}-document_type", "receipt")
             messages.error(request, "Veuillez corriger les erreurs ci-dessous.")
-            return self._render(request, bon, current, form, idx, total, "", False)
+            return self._render(request, bon, current, form, idx, total, "", False, doc_type)
 
         # Save confirmed values
         selected_member = form.cleaned_data.get("purchaser_member")
         ef, _ = ReceiptExtractedFields.objects.get_or_create(receipt_file=current)
+        ef.final_document_type = form.cleaned_data.get("document_type") or ""
+        ef.final_bc_number = form.cleaned_data.get("bc_number") or ""
+        ef.final_associated_bc_number = form.cleaned_data.get("associated_bc_number") or ""
+        ef.final_supplier_name = form.cleaned_data.get("supplier_name") or ""
+        ef.final_supplier_address = form.cleaned_data.get("supplier_address") or ""
         ef.final_member_name = selected_member.display_name if selected_member else ""
         ef.final_apartment_number = form.cleaned_data.get("apartment_number") or ""
         ef.final_merchant = form.cleaned_data.get("merchant_name") or ""
@@ -661,23 +708,103 @@ class OcrReviewView(TreasurerRequiredMixin, View):
         return self._finalize_bons(request, bon)
 
     def _finalize_bons(self, request, scan_session):
-        """Group reviewed receipts by member, create NEW bons, archive scan session."""
+        """Group reviewed receipts, create NEW bons, archive scan session.
+
+        Paper BCs are grouped by BC number with their associated invoices.
+        Regular receipts are grouped by apartment (member).
+        """
         receipts = list(scan_session.receipt_files.order_by("created_at", "pk"))
         house = scan_session.house
 
-        # Group receipts by apartment_number (= member)
-        groups = defaultdict(list)
+        # Separate documents by type
+        paper_bc_receipts = {}   # bc_number -> receipt
+        invoice_receipts = {}    # associated_bc_number -> [receipts]
+        regular_receipts = []
+
         for receipt in receipts:
+            try:
+                ef = receipt.extracted_fields
+                doc_type = ef.final_document_type or ef.document_type_candidate or "receipt"
+            except ReceiptExtractedFields.DoesNotExist:
+                doc_type = "receipt"
+                ef = None
+
+            if doc_type == "paper_bc" and ef:
+                bc_num = ef.final_bc_number or ef.bc_number_candidate
+                if bc_num:
+                    paper_bc_receipts[bc_num] = receipt
+                else:
+                    regular_receipts.append(receipt)
+            elif doc_type == "invoice" and ef:
+                assoc = ef.final_associated_bc_number or ef.associated_bc_number_candidate
+                if assoc:
+                    invoice_receipts.setdefault(assoc, []).append(receipt)
+                else:
+                    regular_receipts.append(receipt)
+            else:
+                regular_receipts.append(receipt)
+
+        created_bons = []
+
+        # --- Paper BC bons ---
+        for bc_number, bc_receipt in paper_bc_receipts.items():
+            matched_invoices = invoice_receipts.pop(bc_number, [])
+            all_docs = [bc_receipt] + matched_invoices
+
+            # Handle unique number constraint: reassign VOID bon number or add suffix
+            bon_number = bc_number
+            existing = BonDeCommande.objects.filter(number=bon_number).first()
+            if existing:
+                if existing.status == BonStatus.VOID:
+                    # NonDestructiveModel prevents delete — reassign its number
+                    BonDeCommande.objects.filter(pk=existing.pk).update(
+                        number=f"_VOID_{existing.pk}_{bon_number}"
+                    )
+                else:
+                    suffix = 2
+                    while BonDeCommande.objects.filter(number=f"{bc_number}-{suffix}").exists():
+                        suffix += 1
+                    bon_number = f"{bc_number}-{suffix}"
+
+            bon = BonDeCommande()
+            bon.house = house
+            bon.budget_year = scan_session.budget_year
+            bon.number = bon_number
+            bon.purchase_date = timezone.now().date()
+            bon.short_description = "(en cours de création)"
+            bon.total = 0
+            bon.sub_budget = scan_session.sub_budget
+            bon.purchaser_member = scan_session.purchaser_member
+            bon.created_by = scan_session.created_by
+            bon.status = BonStatus.READY_FOR_VALIDATION
+            bon.is_scan_session = False
+            bon.is_paper_bc = True
+            bon.paper_bc_number = bc_number
+            bon.entered_date = timezone.now().date()
+            super(BonDeCommande, bon).save()
+
+            for r in all_docs:
+                r.bon_de_commande = bon
+                r.save(update_fields=["bon_de_commande_id"])
+
+            self._fill_bon_from_receipts(bon, all_docs, is_paper_bc=True)
+            created_bons.append(bon)
+
+        # --- Orphan invoices (no matching paper BC) → treat as regular ---
+        for assoc_bc, inv_list in invoice_receipts.items():
+            regular_receipts.extend(inv_list)
+
+        # --- Regular receipt bons (group by apartment) ---
+        apt_groups = defaultdict(list)
+        for receipt in regular_receipts:
             try:
                 ef = receipt.extracted_fields
                 apt = ef.final_apartment_number or "unknown"
             except ReceiptExtractedFields.DoesNotExist:
                 apt = "unknown"
-            groups[apt].append(receipt)
+            apt_groups[apt].append(receipt)
 
-        created_bons = []
-
-        for apt_code, group_receipts in groups.items():
+        for apt_code, group_receipts in apt_groups.items():
             bon = BonDeCommande()
             bon.house = house
             bon.budget_year = scan_session.budget_year
@@ -693,7 +820,6 @@ class OcrReviewView(TreasurerRequiredMixin, View):
             bon.entered_date = timezone.now().date()
             super(BonDeCommande, bon).save()
 
-            # Move receipts to the new bon
             for r in group_receipts:
                 r.bon_de_commande = bon
                 r.save(update_fields=["bon_de_commande_id"])
@@ -701,14 +827,17 @@ class OcrReviewView(TreasurerRequiredMixin, View):
             self._fill_bon_from_receipts(bon, group_receipts)
             created_bons.append(bon)
 
-        # Archive the scan session (no more receipts attached)
+        # Archive the scan session
         BonDeCommande.objects.filter(pk=scan_session.pk).update(
             status=BonStatus.VOID,
             void_reason="Session de scan terminée — bons créés",
             voided_at=timezone.now(),
         )
 
-        if len(created_bons) == 1:
+        if len(created_bons) == 0:
+            messages.warning(request, "Aucun bon de commande créé.")
+            return redirect(reverse("bons:list"))
+        elif len(created_bons) == 1:
             messages.success(request, "Bon de commande créé. Vérifiez les détails avant validation.")
             return redirect(reverse("bons:detail", kwargs={"pk": created_bons[0].pk}))
         else:
@@ -720,7 +849,7 @@ class OcrReviewView(TreasurerRequiredMixin, View):
             )
             return redirect(reverse("bons:scan-complete") + "?bons=" + ",".join(str(b.pk) for b in created_bons))
 
-    def _fill_bon_from_receipts(self, bon, receipts):
+    def _fill_bon_from_receipts(self, bon, receipts, is_paper_bc=False):
         """Pre-fill bon fields from its confirmed receipt data."""
         update_fields = {}
         first_ef = None
@@ -731,7 +860,22 @@ class OcrReviewView(TreasurerRequiredMixin, View):
             except ReceiptExtractedFields.DoesNotExist:
                 continue
 
-        if first_ef:
+        if is_paper_bc:
+            # Extract supplier info from the paper_bc document
+            for r in receipts:
+                try:
+                    ef = r.extracted_fields
+                    if (ef.final_document_type or ef.document_type_candidate) == "paper_bc":
+                        if ef.final_supplier_name or ef.supplier_name_candidate:
+                            update_fields["supplier_name"] = ef.final_supplier_name or ef.supplier_name_candidate
+                        if ef.final_purchase_date or ef.purchase_date_candidate:
+                            update_fields["purchase_date"] = ef.final_purchase_date or ef.purchase_date_candidate
+                        if ef.sub_budget_id:
+                            update_fields["sub_budget_id"] = ef.sub_budget_id
+                        break
+                except ReceiptExtractedFields.DoesNotExist:
+                    continue
+        elif first_ef:
             if first_ef.final_merchant:
                 update_fields["merchant_name"] = first_ef.final_merchant
             if first_ef.final_purchase_date:
@@ -784,19 +928,21 @@ class OcrReviewView(TreasurerRequiredMixin, View):
             if total_tvq:
                 update_fields["tvq"] = total_tvq
 
-        # Auto-match apartment → member from first receipt
-        apt_code = first_ef.final_apartment_number if first_ef else ""
-        if apt_code:
-            apartment, member = _match_member_for_apartment(bon.house, apt_code)
-            if apartment:
-                update_fields["purchaser_apartment_id"] = apartment.pk
-            if member:
-                update_fields["purchaser_member_id"] = member.pk
+        # Auto-match apartment → member from first receipt (skip for paper BC)
+        if not is_paper_bc:
+            apt_code = first_ef.final_apartment_number if first_ef else ""
+            if apt_code:
+                apartment, member = _match_member_for_apartment(bon.house, apt_code)
+                if apartment:
+                    update_fields["purchaser_apartment_id"] = apartment.pk
+                if member:
+                    update_fields["purchaser_member_id"] = member.pk
 
         if update_fields:
             BonDeCommande.objects.filter(pk=bon.pk).update(**update_fields)
 
-    def _render(self, request, bon, receipt, form, idx, total, matched_member_name, name_mismatch=False):
+    def _render(self, request, bon, receipt, form, idx, total, matched_member_name, name_mismatch=False, document_type="receipt"):
+        mismatch_warning = _get_mismatch_warning(receipt)
         return TemplateResponse(request, self.template_name, {
             "bon": bon,
             "receipt": receipt,
@@ -806,6 +952,8 @@ class OcrReviewView(TreasurerRequiredMixin, View):
             "is_last": idx + 1 >= total,
             "matched_member_name": matched_member_name,
             "name_mismatch": name_mismatch,
+            "document_type": document_type,
+            "mismatch_warning": mismatch_warning,
             "prev_url": (
                 reverse("bons:review", kwargs={"pk": bon.pk}) + f"?idx={idx - 1}"
                 if idx > 0 else None

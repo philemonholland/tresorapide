@@ -210,3 +210,369 @@ class ReceiptOcrParseTests(TestCase):
         self.assertIsNone(ReceiptOcrService._safe_date(""))
         self.assertIsNone(ReceiptOcrService._safe_date("not-a-date"))
         self.assertIsNone(ReceiptOcrService._safe_date(None))
+
+    def test_parse_paper_bc(self):
+        """Paper BC detection: GPT returns document_type=paper_bc with bc_number."""
+        raw = json.dumps([
+            {
+                "filename": "BC16011.pdf - Page 1",
+                "document_type": "paper_bc",
+                "bc_number": "16011",
+                "associated_bc_number": "",
+                "supplier_name": "Gicleurs de l'Estrie",
+                "supplier_address": "1110 Bélanger, Sherbrooke",
+                "member_name": "",
+                "apartment_number": "",
+                "merchant": "",
+                "purchase_date": "2024-11-29",
+                "subtotal": 476.56,
+                "tps": 23.83,
+                "tvq": 47.54,
+                "total": 547.93,
+                "summary": "Plomberie - installation manomètre",
+            },
+            {
+                "filename": "BC16011.pdf - Page 2",
+                "document_type": "invoice",
+                "bc_number": "",
+                "associated_bc_number": "16011",
+                "supplier_name": "Gicleurs de l'Estrie inc.",
+                "supplier_address": "",
+                "member_name": "",
+                "apartment_number": "",
+                "merchant": "",
+                "purchase_date": "2024-11-29",
+                "subtotal": 476.56,
+                "tps": 23.83,
+                "tvq": 47.54,
+                "total": 547.93,
+                "summary": "Facture matériaux et main d'oeuvre",
+            },
+        ])
+        results = ReceiptOcrService._parse_batch_response(
+            raw, ["BC16011.pdf - Page 1", "BC16011.pdf - Page 2"]
+        )
+        self.assertEqual(len(results), 2)
+        # Paper BC
+        self.assertEqual(results[0]["document_type"], "paper_bc")
+        self.assertEqual(results[0]["bc_number"], "16011")
+        self.assertEqual(results[0]["supplier_name"], "Gicleurs de l'Estrie")
+        self.assertEqual(results[0]["total"], Decimal("547.93"))
+        # Invoice
+        self.assertEqual(results[1]["document_type"], "invoice")
+        self.assertEqual(results[1]["associated_bc_number"], "16011")
+        self.assertEqual(results[1]["supplier_name"], "Gicleurs de l'Estrie inc.")
+
+    def test_parse_mixed_upload(self):
+        """Mixed upload: receipt + paper BC in same batch."""
+        raw = json.dumps([
+            {
+                "filename": "receipt.png",
+                "document_type": "receipt",
+                "bc_number": "",
+                "associated_bc_number": "",
+                "supplier_name": "",
+                "supplier_address": "",
+                "member_name": "Jean Dupont",
+                "apartment_number": "305",
+                "merchant": "RONA",
+                "purchase_date": "2025-03-01",
+                "subtotal": 45.00,
+                "tps": 2.25,
+                "tvq": 4.49,
+                "total": 51.74,
+                "summary": "Vis et peinture",
+            },
+            {
+                "filename": "BC16739.pdf - Page 1",
+                "document_type": "paper_bc",
+                "bc_number": "16739",
+                "associated_bc_number": "",
+                "supplier_name": "Produits Sany",
+                "supplier_address": "",
+                "member_name": "",
+                "apartment_number": "",
+                "merchant": "",
+                "purchase_date": "2026-01-07",
+                "subtotal": 19.49,
+                "tps": None,
+                "tvq": None,
+                "total": 19.49,
+                "summary": "NUBIOCAL 900ML",
+            },
+        ])
+        results = ReceiptOcrService._parse_batch_response(
+            raw, ["receipt.png", "BC16739.pdf - Page 1"]
+        )
+        self.assertEqual(len(results), 2)
+        # Receipt
+        self.assertEqual(results[0]["document_type"], "receipt")
+        self.assertEqual(results[0]["member_name"], "Jean Dupont")
+        self.assertEqual(results[0]["apartment_number"], "305")
+        self.assertEqual(results[0]["merchant"], "RONA")
+        # Paper BC
+        self.assertEqual(results[1]["document_type"], "paper_bc")
+        self.assertEqual(results[1]["bc_number"], "16739")
+        self.assertEqual(results[1]["supplier_name"], "Produits Sany")
+
+    def test_parse_defaults_to_receipt(self):
+        """Old-format response without document_type defaults to receipt."""
+        raw = '[{"filename": "old.png", "merchant": "IGA", "total": 5.00}]'
+        results = ReceiptOcrService._parse_batch_response(raw, ["old.png"])
+        self.assertEqual(results[0]["document_type"], "receipt")
+        self.assertEqual(results[0]["bc_number"], "")
+        self.assertEqual(results[0]["associated_bc_number"], "")
+
+
+class PaperBcFinalizationTests(TestCase):
+    """Test that _finalize_bons correctly handles paper BC + invoice + receipt mixes."""
+
+    def setUp(self):
+        from bons.models import ReceiptFile, ReceiptExtractedFields
+        self.house = House.objects.create(code="BB", name="Maison BB", account_number="13-51200")
+        self.budget_year = BudgetYear.objects.create(
+            house=self.house, year=2026, annual_budget_total=Decimal("12237.00")
+        )
+        self.sub_budget = SubBudget.objects.create(
+            budget_year=self.budget_year, trace_code=7,
+            name="Produits ménager", planned_amount=Decimal("300.00")
+        )
+        self.member = Member.objects.create(first_name="Marylin", last_name="Lamarche")
+        self.apt = Apartment.objects.create(house=self.house, code="202")
+        Residency.objects.create(
+            member=self.member, apartment=self.apt, start_date=date(2020, 1, 1)
+        )
+        self.user = User.objects.create_user(
+            username="tresorier", password="test123", role=20,
+            member=self.member,
+        )
+
+        # Create a scan session bon
+        self.scan_session = BonDeCommande()
+        self.scan_session.house = self.house
+        self.scan_session.budget_year = self.budget_year
+        self.scan_session.number = "BB260099"
+        self.scan_session.purchase_date = date(2026, 1, 7)
+        self.scan_session.short_description = "(scan session)"
+        self.scan_session.total = 0
+        self.scan_session.sub_budget = self.sub_budget
+        self.scan_session.purchaser_member = self.member
+        self.scan_session.created_by = self.user
+        self.scan_session.status = BonStatus.READY_FOR_REVIEW
+        self.scan_session.is_scan_session = True
+        super(BonDeCommande, self.scan_session).save()
+
+        # Create receipt files attached to scan session
+        self.receipt_bc = ReceiptFile.objects.create(
+            bon_de_commande=self.scan_session,
+            original_filename="BC16011.pdf",
+            content_type="application/pdf",
+        )
+        self.receipt_inv = ReceiptFile.objects.create(
+            bon_de_commande=self.scan_session,
+            original_filename="facture.png",
+            content_type="image/png",
+        )
+        self.receipt_regular = ReceiptFile.objects.create(
+            bon_de_commande=self.scan_session,
+            original_filename="recu_rona.jpg",
+            content_type="image/jpeg",
+        )
+
+        # Extracted fields for paper BC
+        ReceiptExtractedFields.objects.create(
+            receipt_file=self.receipt_bc,
+            document_type_candidate="paper_bc",
+            final_document_type="paper_bc",
+            bc_number_candidate="16011",
+            final_bc_number="16011",
+            supplier_name_candidate="Gicleurs de l'Estrie",
+            final_supplier_name="Gicleurs de l'Estrie",
+            total_candidate=Decimal("547.93"),
+            final_total=Decimal("547.93"),
+            purchase_date_candidate=date(2024, 11, 29),
+            final_purchase_date=date(2024, 11, 29),
+            sub_budget=self.sub_budget,
+            summary_candidate="Installation purgeur",
+            final_summary="Installation purgeur",
+        )
+        # Extracted fields for invoice linked to paper BC
+        ReceiptExtractedFields.objects.create(
+            receipt_file=self.receipt_inv,
+            document_type_candidate="invoice",
+            final_document_type="invoice",
+            associated_bc_number_candidate="16011",
+            final_associated_bc_number="16011",
+            supplier_name_candidate="Gicleurs de l'Estrie inc.",
+            final_supplier_name="Gicleurs de l'Estrie inc.",
+            total_candidate=Decimal("547.93"),
+            final_total=Decimal("547.93"),
+            summary_candidate="Travaux plomberie",
+            final_summary="Travaux plomberie",
+            sub_budget=self.sub_budget,
+        )
+        # Extracted fields for regular receipt
+        ReceiptExtractedFields.objects.create(
+            receipt_file=self.receipt_regular,
+            document_type_candidate="receipt",
+            final_document_type="receipt",
+            member_name_candidate="Marylin Lamarche",
+            final_member_name="Marylin Lamarche",
+            apartment_number_candidate="202",
+            final_apartment_number="202",
+            merchant_candidate="RONA",
+            final_merchant="RONA",
+            total_candidate=Decimal("25.00"),
+            final_total=Decimal("25.00"),
+            summary_candidate="Vis et peinture",
+            final_summary="Vis et peinture",
+            sub_budget=self.sub_budget,
+        )
+
+    def test_finalize_creates_paper_bc_and_regular_bons(self):
+        """Mixed upload: paper BC with invoice + regular receipt → 2 bons."""
+        from django.test import RequestFactory
+        from bons.views import OcrReviewView
+
+        factory = RequestFactory()
+        request = factory.get("/")
+        request.user = self.user
+        # Attach message storage
+        from django.contrib.messages.storage.fallback import FallbackStorage
+        setattr(request, "session", "session")
+        setattr(request, "_messages", FallbackStorage(request))
+
+        view = OcrReviewView()
+        response = view._finalize_bons(request, self.scan_session)
+
+        # Should have created 2 bons: 1 paper BC + 1 regular
+        created_bons = BonDeCommande.objects.filter(
+            is_scan_session=False
+        ).exclude(status=BonStatus.VOID)
+        self.assertEqual(created_bons.count(), 2)
+
+        # Paper BC bon
+        paper_bon = created_bons.filter(is_paper_bc=True).first()
+        self.assertIsNotNone(paper_bon)
+        self.assertEqual(paper_bon.number, "16011")
+        self.assertEqual(paper_bon.paper_bc_number, "16011")
+        self.assertEqual(paper_bon.status, BonStatus.READY_FOR_VALIDATION)
+        # Paper BC bon should have 2 receipt files (BC + invoice)
+        self.assertEqual(paper_bon.receipt_files.count(), 2)
+
+        # Regular bon
+        regular_bon = created_bons.filter(is_paper_bc=False).first()
+        self.assertIsNotNone(regular_bon)
+        self.assertTrue(regular_bon.number.startswith("BB26"))
+        self.assertEqual(regular_bon.receipt_files.count(), 1)
+
+        # Scan session should be voided
+        self.scan_session.refresh_from_db()
+        self.assertEqual(self.scan_session.status, BonStatus.VOID)
+
+    def test_finalize_handles_duplicate_paper_bc_number(self):
+        """If a paper BC number already exists, append suffix."""
+        # Create an existing bon with number 16011
+        BonDeCommande.objects.create(
+            house=self.house, budget_year=self.budget_year,
+            number="16011", purchase_date=date(2026, 1, 1),
+            short_description="Existing", total=Decimal("100"),
+            sub_budget=self.sub_budget, purchaser_member=self.member,
+        )
+
+        from django.test import RequestFactory
+        from bons.views import OcrReviewView
+        from django.contrib.messages.storage.fallback import FallbackStorage
+
+        factory = RequestFactory()
+        request = factory.get("/")
+        request.user = self.user
+        setattr(request, "session", "session")
+        setattr(request, "_messages", FallbackStorage(request))
+
+        view = OcrReviewView()
+        view._finalize_bons(request, self.scan_session)
+
+        # Should use suffix since 16011 is taken
+        paper_bon = BonDeCommande.objects.filter(
+            is_paper_bc=True, is_scan_session=False
+        ).exclude(status=BonStatus.VOID).first()
+        self.assertIsNotNone(paper_bon)
+        self.assertEqual(paper_bon.number, "16011-2")
+        self.assertEqual(paper_bon.paper_bc_number, "16011")
+
+    def test_orphan_invoices_grouped_as_regular(self):
+        """Invoices with no matching paper BC are treated as regular receipts."""
+        from bons.models import ReceiptExtractedFields
+        # Change the invoice to point to a non-existent BC
+        ef = self.receipt_inv.extracted_fields
+        ef.final_associated_bc_number = "99999"
+        ef.associated_bc_number_candidate = "99999"
+        ef.save()
+
+        from django.test import RequestFactory
+        from bons.views import OcrReviewView
+        from django.contrib.messages.storage.fallback import FallbackStorage
+
+        factory = RequestFactory()
+        request = factory.get("/")
+        request.user = self.user
+        setattr(request, "session", "session")
+        setattr(request, "_messages", FallbackStorage(request))
+
+        view = OcrReviewView()
+        view._finalize_bons(request, self.scan_session)
+
+        # Paper BC bon (BC alone, no matched invoices)
+        paper_bon = BonDeCommande.objects.filter(
+            is_paper_bc=True, is_scan_session=False
+        ).exclude(status=BonStatus.VOID).first()
+        self.assertIsNotNone(paper_bon)
+        self.assertEqual(paper_bon.receipt_files.count(), 1)  # Just the BC
+
+        # Regular bons should have the orphan invoice + regular receipt
+        regular_bons = BonDeCommande.objects.filter(
+            is_paper_bc=False, is_scan_session=False
+        ).exclude(status=BonStatus.VOID)
+        total_receipts = sum(b.receipt_files.count() for b in regular_bons)
+        self.assertEqual(total_receipts, 2)  # invoice + receipt
+
+
+class MismatchWarningTests(TestCase):
+    """Test the _get_mismatch_warning helper."""
+
+    def test_matching_totals_no_warning(self):
+        from bons.views import _get_mismatch_warning
+        from unittest.mock import MagicMock
+
+        receipt = MagicMock()
+        receipt.ocr_raw_text = json.dumps([
+            {"document_type": "paper_bc", "bc_number": "16011", "total": 547.93},
+            {"document_type": "invoice", "associated_bc_number": "16011", "total": 547.93},
+        ])
+        self.assertIsNone(_get_mismatch_warning(receipt))
+
+    def test_mismatched_totals_returns_warning(self):
+        from bons.views import _get_mismatch_warning
+        from unittest.mock import MagicMock
+
+        receipt = MagicMock()
+        receipt.ocr_raw_text = json.dumps([
+            {"document_type": "paper_bc", "bc_number": "16739", "total": 19.49},
+            {"document_type": "invoice", "associated_bc_number": "16739", "total": 16.95},
+        ])
+        warning = _get_mismatch_warning(receipt)
+        self.assertIsNotNone(warning)
+        self.assertEqual(warning["bc_number"], "16739")
+        self.assertAlmostEqual(float(warning["bc_total"]), 19.49)
+        self.assertAlmostEqual(float(warning["invoice_total"]), 16.95)
+
+    def test_no_paper_bc_no_warning(self):
+        from bons.views import _get_mismatch_warning
+        from unittest.mock import MagicMock
+
+        receipt = MagicMock()
+        receipt.ocr_raw_text = json.dumps([
+            {"document_type": "receipt", "total": 25.00},
+        ])
+        self.assertIsNone(_get_mismatch_warning(receipt))

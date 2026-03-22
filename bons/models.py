@@ -55,8 +55,8 @@ class BonDeCommande(TimeStampedModel, NonDestructiveModel):
         "budget.BudgetYear", on_delete=models.PROTECT, related_name="bons_de_commande"
     )
     number = models.CharField(
-        max_length=8, unique=True,
-        help_text="Format 8 car. : HHYYNNNN (ex : BB260001)"
+        max_length=20, unique=True,
+        help_text="Format HHYYNNNN (digital) ou numéro papier (ex : 16011)"
     )
     purchase_date = models.DateField()
     entered_date = models.DateField(auto_now_add=True)
@@ -137,6 +137,14 @@ class BonDeCommande(TimeStampedModel, NonDestructiveModel):
     is_scan_session = models.BooleanField(
         default=False,
         help_text="True for temporary upload containers (hidden from normal views)"
+    )
+    is_paper_bc = models.BooleanField(
+        default=False,
+        help_text="True if this bon was digitized from a paper bon de commande"
+    )
+    paper_bc_number = models.CharField(
+        max_length=20, blank=True,
+        help_text="Original number from the paper bon de commande (e.g., 16011)"
     )
     notes = models.TextField(blank=True)
 
@@ -274,6 +282,20 @@ class ReceiptExtractedFields(TimeStampedModel):
         ReceiptFile, on_delete=models.PROTECT, related_name="extracted_fields"
     )
     # AI candidate values
+    document_type_candidate = models.CharField(
+        max_length=20, blank=True,
+        help_text="paper_bc, invoice, or receipt"
+    )
+    bc_number_candidate = models.CharField(
+        max_length=20, blank=True,
+        help_text="BC number from paper bon de commande"
+    )
+    associated_bc_number_candidate = models.CharField(
+        max_length=20, blank=True,
+        help_text="BC number this invoice is associated with"
+    )
+    supplier_name_candidate = models.CharField(max_length=200, blank=True)
+    supplier_address_candidate = models.CharField(max_length=300, blank=True)
     member_name_candidate = models.CharField(max_length=200, blank=True)
     apartment_number_candidate = models.CharField(max_length=10, blank=True)
     merchant_candidate = models.CharField(max_length=200, blank=True)
@@ -284,6 +306,11 @@ class ReceiptExtractedFields(TimeStampedModel):
     tvq_candidate = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     total_candidate = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     # Treasurer-confirmed final values
+    final_document_type = models.CharField(max_length=20, blank=True)
+    final_bc_number = models.CharField(max_length=20, blank=True)
+    final_associated_bc_number = models.CharField(max_length=20, blank=True)
+    final_supplier_name = models.CharField(max_length=200, blank=True)
+    final_supplier_address = models.CharField(max_length=300, blank=True)
     final_member_name = models.CharField(max_length=200, blank=True)
     final_apartment_number = models.CharField(max_length=10, blank=True)
     final_merchant = models.CharField(max_length=200, blank=True)

@@ -172,6 +172,32 @@ class MultiReceiptUploadForm(forms.Form):
 
 class OcrReviewForm(forms.Form):
     """Review/correct GPT-extracted data for a single receipt."""
+
+    DOCUMENT_TYPE_CHOICES = [
+        ("receipt", "Reçu"),
+        ("paper_bc", "Bon de commande papier"),
+        ("invoice", "Facture"),
+    ]
+
+    document_type = forms.ChoiceField(
+        choices=DOCUMENT_TYPE_CHOICES,
+        required=True,
+        label="Type de document",
+        widget=forms.Select(attrs={"id": "id_document_type"}),
+    )
+    bc_number = forms.CharField(
+        max_length=20, required=False, label="N° bon de commande",
+    )
+    associated_bc_number = forms.CharField(
+        max_length=20, required=False, label="N° BC associé",
+    )
+    supplier_name = forms.CharField(
+        max_length=200, required=False, label="Fournisseur",
+    )
+    supplier_address = forms.CharField(
+        max_length=300, required=False, label="Adresse du fournisseur",
+    )
+
     member_name_raw = forms.CharField(
         max_length=200, required=False,
         label="Nom extrait (IA)",
@@ -185,7 +211,7 @@ class OcrReviewForm(forms.Form):
     )
     purchaser_member = forms.ModelChoiceField(
         queryset=Member.objects.none(),
-        required=True,
+        required=False,
         label="Membre (acheteur)",
         empty_label="-- Choisir un membre --",
     )
@@ -235,6 +261,31 @@ class OcrReviewForm(forms.Form):
         widget=forms.TextInput(attrs={"placeholder": "Ex: Quincaillerie - vis et peinture"}),
         help_text="Résumé généré par l'IA, modifiable par le trésorier.",
     )
+
+    def clean(self):
+        cleaned = super().clean()
+        doc_type = cleaned.get("document_type", "receipt")
+
+        if doc_type == "receipt":
+            if not cleaned.get("purchaser_member"):
+                self.add_error("purchaser_member", "Le membre est requis pour un reçu.")
+        else:
+            # paper_bc / invoice: member is optional
+            if "purchaser_member" in self.errors:
+                del self.errors["purchaser_member"]
+
+        if doc_type == "paper_bc":
+            if not cleaned.get("bc_number"):
+                self.add_error("bc_number", "Le numéro de BC est requis pour un bon de commande papier.")
+
+        if doc_type == "invoice":
+            if not cleaned.get("associated_bc_number"):
+                self.add_error(
+                    "associated_bc_number",
+                    "Le numéro de BC associé est recommandé pour une facture.",
+                )
+
+        return cleaned
 
 
 # ---------------------------------------------------------------------------
