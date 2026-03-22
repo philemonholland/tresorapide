@@ -5,7 +5,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{% block title %}Tresorapide{% endblock %}</title>
-    <link rel="stylesheet" href="{% static 'css/site.css' %}">
+    <link rel="stylesheet" href="{% static 'css/site.css' %}?v=2">
     {% block extra_head %}{% endblock %}
 </head>
 <body>
@@ -62,7 +62,7 @@
         {% endif %}
         {% block content %}{% endblock %}
     </main>
-    <script src="{% static 'js/tables.js' %}"></script>
+    <script src="{% static 'js/tables.js' %}?v=2"></script>
     <script>
     document.addEventListener("DOMContentLoaded", function () {
         document.querySelectorAll(".collapsible-toggle").forEach(function (btn) {

@@ -32,6 +32,9 @@
                 var text = row.textContent.toLowerCase();
                 row.style.display = text.indexOf(term) !== -1 ? "" : "none";
             });
+            if (table.getAttribute("data-running-balance") === "true") {
+                recalcRunningBalances(table, tbody);
+            }
         });
 
         // --- Sortable headers ---
