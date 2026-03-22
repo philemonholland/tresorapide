@@ -103,54 +103,143 @@ class BudgetYearCreateView(TreasurerRequiredMixin, CreateView):
     form_class = BudgetYearForm
     template_name = "budget/year_form.html"
 
+    def _get_house(self):
+        """Resolve the house from the user or from POST data."""
+        user = self.request.user
+        if not user.is_gestionnaire:
+            return user.house
+        # For gestionnaires, try to get from POST or GET
+        house_pk = self.request.POST.get("house") or self.request.GET.get("house")
+        if house_pk:
+            from houses.models import House
+            try:
+                return House.objects.get(pk=house_pk)
+            except House.DoesNotExist:
+                pass
+        return None
+
+    def _get_previous_sub_budgets(self, house):
+        """Return list of dicts with previous year's sub-budget data, or seed defaults."""
+        if house:
+            previous_year = BudgetYear.objects.filter(
+                house=house
+            ).order_by("-year").first()
+            if previous_year:
+                prev_subs = SubBudget.objects.filter(
+                    budget_year=previous_year, is_active=True, is_contingency=False
+                ).order_by("sort_order", "trace_code")
+                return [
+                    {
+                        "trace_code": sb.trace_code,
+                        "name": sb.name,
+                        "repeat_type": sb.repeat_type,
+                        "planned_amount": sb.planned_amount,
+                        "sort_order": sb.sort_order,
+                        "is_active": True,
+                        "notes": sb.notes or "",
+                    }
+                    for sb in prev_subs
+                ]
+        # No previous year — use seed defaults
+        return [
+            {
+                "trace_code": code,
+                "name": name,
+                "repeat_type": repeat,
+                "planned_amount": Decimal("0.00"),
+                "sort_order": order,
+                "is_active": True,
+                "notes": "",
+            }
+            for code, name, repeat, order in SEED_CATEGORIES
+        ]
+
     def get_form(self, form_class=None):
         form = super().get_form(form_class)
         if not self.request.user.is_gestionnaire:
             form.fields["house"].initial = self.request.user.house
             form.fields["house"].widget = form.fields["house"].hidden_widget()
+        # Remove seed checkbox — replaced by visible editable formset
+        if "seed_default_categories" in form.fields:
+            del form.fields["seed_default_categories"]
         return form
+
+    def get_context_data(self, **kwargs):
+        ctx = super().get_context_data(**kwargs)
+        house = self._get_house()
+        prev_subs = self._get_previous_sub_budgets(house)
+
+        if self.request.POST:
+            ctx["subbudget_formset"] = SubBudgetFormSet(
+                self.request.POST,
+                instance=BudgetYear(),  # unsaved placeholder
+            )
+        else:
+            initial_data = prev_subs
+            # Create formset with initial data (no instance yet)
+            formset = SubBudgetFormSet(
+                instance=BudgetYear(),  # unsaved placeholder
+                initial=initial_data,
+            )
+            # Override TOTAL_FORMS to show all initial rows + 2 extras
+            formset.extra = len(initial_data) + 2
+            ctx["subbudget_formset"] = formset
+
+        ctx["subbudget_usage"] = {}
+        ctx["subbudget_usage_json"] = {}
+        ctx["is_create"] = True
+        ctx["prev_sub_count"] = len(prev_subs)
+        return ctx
 
     def form_valid(self, form):
         if not self.request.user.is_gestionnaire:
             form.instance.house = self.request.user.house
         check_house_permission(self.request.user, form.instance.house)
+
+        # Save the BudgetYear first (triggers contingency sub-budget creation)
         response = super().form_valid(form)
 
-        house = self.object.house
-        seed = form.cleaned_data.get("seed_default_categories")
+        # Now process the sub-budget formset
+        formset = SubBudgetFormSet(
+            self.request.POST,
+            instance=self.object,
+        )
+        if formset.is_valid():
+            formset.save()
+        else:
+            # If formset is invalid, the sub-budgets from the form are lost.
+            # Fall back to previous year copy as before.
+            house = self.object.house
+            previous_year = BudgetYear.objects.filter(
+                house=house, year__lt=self.object.year
+            ).order_by("-year").first()
+            if previous_year:
+                prev_subs = SubBudget.objects.filter(
+                    budget_year=previous_year, is_active=True, is_contingency=False
+                ).order_by("sort_order", "trace_code")
+                for sb in prev_subs:
+                    SubBudget.objects.get_or_create(
+                        budget_year=self.object,
+                        trace_code=sb.trace_code,
+                        defaults={
+                            "name": sb.name,
+                            "repeat_type": sb.repeat_type,
+                            "planned_amount": sb.planned_amount,
+                            "sort_order": sb.sort_order,
+                        },
+                    )
+            else:
+                for code, name, repeat, order in SEED_CATEGORIES:
+                    SubBudget.objects.get_or_create(
+                        budget_year=self.object,
+                        trace_code=code,
+                        defaults={
+                            "name": name,
+                            "repeat_type": repeat,
+                            "sort_order": order,
+                        },
+                    )
 
-        # Try to carry over sub-budgets from the most recent previous year
-        previous_year = BudgetYear.objects.filter(
-            house=house, year__lt=self.object.year
-        ).order_by("-year").first()
-
-        if previous_year:
-            prev_subs = SubBudget.objects.filter(
-                budget_year=previous_year, is_active=True, is_contingency=False
-            ).order_by("sort_order", "trace_code")
-            for sb in prev_subs:
-                SubBudget.objects.get_or_create(
-                    budget_year=self.object,
-                    trace_code=sb.trace_code,
-                    defaults={
-                        "name": sb.name,
-                        "repeat_type": sb.repeat_type,
-                        "planned_amount": sb.planned_amount,
-                        "sort_order": sb.sort_order,
-                    },
-                )
-        elif seed:
-            # No previous year — use seed defaults
-            for code, name, repeat, order in SEED_CATEGORIES:
-                SubBudget.objects.get_or_create(
-                    budget_year=self.object,
-                    trace_code=code,
-                    defaults={
-                        "name": name,
-                        "repeat_type": repeat,
-                        "sort_order": order,
-                    },
-                )
         return response
 
     def get_success_url(self):

@@ -102,9 +102,19 @@
             {% if subbudget_formset %}
             <hr style="margin:1rem 0; border:0; border-top:2px solid #d4e1ee;">
             <h2 style="margin:0 0 0.5rem;">Sous-budgets</h2>
+            {% if is_create and prev_sub_count > 0 %}
+            <p class="text-muted" style="margin:0 0 0.75rem;">
+                📋 Sous-budgets pré-remplis à partir de l'année précédente. Vous pouvez les modifier, supprimer ou en ajouter avant de créer.
+            </p>
+            {% elif is_create %}
+            <p class="text-muted" style="margin:0 0 0.75rem;">
+                Aucune année précédente trouvée — catégories par défaut pré-remplies. Vous pouvez les modifier.
+            </p>
+            {% else %}
             <p class="text-muted" style="margin:0 0 0.75rem;">
                 Glissez ☰ pour réordonner. Le sous-budget « Imprévues » est géré automatiquement.
             </p>
+            {% endif %}
 
             {{ subbudget_formset.management_form }}
             {% if subbudget_formset.non_form_errors %}

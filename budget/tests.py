@@ -1,10 +1,12 @@
 from datetime import date
 from decimal import Decimal
-from django.test import TestCase
+from django.test import TestCase, RequestFactory
+from django.contrib.sessions.middleware import SessionMiddleware
 
 from houses.models import House
 from budget.models import BudgetYear, SubBudget, Expense
 from budget.services import BudgetCalculationService
+from budget.views import BudgetYearCreateView
 
 
 class BudgetYearAutoContingencyTests(TestCase):
@@ -138,3 +140,55 @@ class BudgetCalculationTests(TestCase):
         imprevues = Decimal("12237.00") * Decimal("0.15")
         expected_minus_15 = Decimal("12237.00") - imprevues - Decimal("3300.00")
         self.assertEqual(vals["unbudgeted_available_minus_15"], expected_minus_15)
+
+
+class BudgetYearCreatePrefillTests(TestCase):
+    """Test that creating a new budget year pre-fills sub-budgets from previous year."""
+
+    def setUp(self):
+        self.house = House.objects.create(code="BB", name="Maison BB", account_number="13-51200")
+        self.prev_by = BudgetYear.objects.create(
+            house=self.house, year=2025,
+            annual_budget_total=Decimal("10000.00"),
+        )
+        # Add sub-budgets to previous year
+        SubBudget.objects.create(
+            budget_year=self.prev_by, trace_code=1,
+            name="Réparations apt", planned_amount=Decimal("2000.00"), sort_order=1,
+        )
+        SubBudget.objects.create(
+            budget_year=self.prev_by, trace_code=7,
+            name="Produits ménager", planned_amount=Decimal("500.00"), sort_order=7,
+        )
+
+    def test_previous_sub_budgets_returned(self):
+        """_get_previous_sub_budgets should return previous year's active non-contingency subs."""
+        view = BudgetYearCreateView()
+        view.request = RequestFactory().get("/budget/create/")
+        subs = view._get_previous_sub_budgets(self.house)
+        names = [s["name"] for s in subs]
+        self.assertIn("Réparations apt", names)
+        self.assertIn("Produits ménager", names)
+        # Contingency (trace_code=0) should NOT be included
+        codes = [s["trace_code"] for s in subs]
+        self.assertNotIn(0, codes)
+
+    def test_seed_defaults_when_no_previous_year(self):
+        """Without a previous year, seed defaults should be returned."""
+        other_house = House.objects.create(code="CC", name="Maison CC", account_number="13-51300")
+        view = BudgetYearCreateView()
+        view.request = RequestFactory().get("/budget/create/")
+        subs = view._get_previous_sub_budgets(other_house)
+        # Should have SEED_CATEGORIES (13 items)
+        self.assertEqual(len(subs), 13)
+        names = [s["name"] for s in subs]
+        self.assertIn("Réparations par appartement", names)
+        self.assertIn("Corvées", names)
+
+    def test_amounts_carried_over(self):
+        """Previous year's planned_amount should be carried over."""
+        view = BudgetYearCreateView()
+        view.request = RequestFactory().get("/budget/create/")
+        subs = view._get_previous_sub_budgets(self.house)
+        repairs = [s for s in subs if s["trace_code"] == 1][0]
+        self.assertEqual(repairs["planned_amount"], Decimal("2000.00"))
