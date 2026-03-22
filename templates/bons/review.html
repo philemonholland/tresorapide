@@ -133,6 +133,32 @@
                             {{ form.supplier_address }}
                             {% for error in form.supplier_address.errors %}<p class="error-text">{{ error }}</p>{% endfor %}
                         </div>
+
+                        <hr style="margin: 1rem 0; border-top: 1px solid #ddd;">
+                        <p style="font-weight: bold; margin-bottom: 0.5rem;">Dépense effectuée par</p>
+
+                        {% if expense_member_mismatch %}
+                        <div class="message warning" style="margin-bottom: 0.5rem;">
+                            ⚠️ Le nom du signataire n'a pas pu être associé à un membre de la maison. Veuillez sélectionner le membre manuellement.
+                        </div>
+                        {% endif %}
+
+                        {% if form.expense_member_name.value %}
+                        <div class="form-group">
+                            <label for="{{ form.expense_member_name.id_for_label }}">{{ form.expense_member_name.label }}</label>
+                            {{ form.expense_member_name }}
+                            <small class="text-muted">{{ form.expense_member_name.help_text }}</small>
+                        </div>
+                        {% endif %}
+                        <div class="form-group">
+                            <label for="{{ form.expense_apartment.id_for_label }}">{{ form.expense_apartment.label }}</label>
+                            {{ form.expense_apartment }}
+                        </div>
+                        <div class="form-group {% if form.expense_member.errors %}has-error{% endif %}">
+                            <label for="{{ form.expense_member.id_for_label }}">{{ form.expense_member.label }}</label>
+                            {{ form.expense_member }}
+                            {% for error in form.expense_member.errors %}<p class="error-text">{{ error }}</p>{% endfor %}
+                        </div>
                     </fieldset>
 
                     {# INVOICE: Linked BC fields #}

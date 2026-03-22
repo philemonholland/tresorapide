@@ -197,6 +197,22 @@ class OcrReviewForm(forms.Form):
     supplier_address = forms.CharField(
         max_length=300, required=False, label="Adresse du fournisseur",
     )
+    expense_member_name = forms.CharField(
+        max_length=200, required=False,
+        label="Dépense effectuée par",
+        widget=forms.TextInput(attrs={"readonly": "readonly", "class": "text-muted"}),
+        help_text="Nom extrait du signataire (lecture seule)",
+    )
+    expense_apartment = forms.CharField(
+        max_length=10, required=False,
+        label="Appartement du signataire",
+    )
+    expense_member = forms.ModelChoiceField(
+        queryset=Member.objects.none(),
+        required=False,
+        label="Membre ayant effectué la dépense",
+        empty_label="-- Choisir un membre --",
+    )
 
     member_name_raw = forms.CharField(
         max_length=200, required=False,

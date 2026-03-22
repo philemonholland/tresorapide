@@ -36,6 +36,8 @@ except ImportError:
 
 # ── Prompt for batch analysis (multiple receipts in one composite image) ─────
 
+MAX_PAGES_PER_BATCH = 4  # Max pages per API call to preserve accuracy
+
 RECEIPT_BATCH_PROMPT = """\
 Tu es un assistant spécialisé dans l'extraction de données de documents \
 financiers pour une coopérative d'habitation au Québec.
@@ -63,15 +65,17 @@ nom manuscrit et un numéro d'appartement.
 Retourne UNIQUEMENT un tableau JSON. Chaque élément = un document distinct:
 [
   {
-    "filename": "TestRecu1.png",
-    "document_type": "receipt",
-    "bc_number": "",
+    "filename": "BC16011.pdf - Page 1",
+    "document_type": "paper_bc",
+    "bc_number": "16011",
     "associated_bc_number": "",
-    "supplier_name": "",
-    "supplier_address": "",
-    "member_name": "Nom manuscrit du membre",
-    "apartment_number": "207",
-    "merchant": "Nom du marchand",
+    "supplier_name": "Nom du fournisseur",
+    "supplier_address": "Adresse du fournisseur",
+    "expense_member_name": "Nom de la personne ayant effectué la dépense",
+    "expense_apartment": "202",
+    "member_name": "",
+    "apartment_number": "",
+    "merchant": "",
     "purchase_date": "YYYY-MM-DD",
     "subtotal": 0.00,
     "tps": 0.00,
@@ -93,6 +97,12 @@ description) pour associer. Laisser "" si pas de BC associé.
 - supplier_name: pour "paper_bc" et "invoice" — le nom du fournisseur ou la \
 personne à rembourser tel qu'inscrit sur le document.
 - supplier_address: adresse du fournisseur si visible.
+- expense_member_name: pour "paper_bc" — le NOM de la personne qui a signé \
+le bon de commande, inscrit au-dessus de "NOM EN LETTRES MOULÉES" dans la \
+section signature. C'est la personne qui a effectué la dépense. Laisser "" si \
+non visible ou pour les autres types.
+- expense_apartment: pour "paper_bc" — le numéro d'appartement de la personne \
+ayant effectué la dépense, s'il est visible sur le bon. Laisser "" si absent.
 - member_name: pour "receipt" seulement — le nom écrit à la main par le membre. \
 Si complètement illisible, utilise "ILLISIBLE".
 - apartment_number: pour "receipt" seulement — le numéro d'appartement manuscrit \
@@ -102,7 +112,8 @@ Si complètement illisible, utilise "ILLISIBLE".
 - subtotal: sous-total AVANT taxes. Si absent, null (NE PAS calculer).
 - tps: TPS (taxe fédérale, ~5%). Si absente, null.
 - tvq: TVQ (taxe provinciale, ~9.975%). Si absente, null.
-- total: montant TOTAL. Si absent, null.
+- total: montant TOTAL TTC. Si absent, null. ATTENTION: extraire le montant \
+EXACT tel qu'affiché sur le document, ne pas recalculer.
 - summary: courte description du contenu du document.
 - Les montants en nombre décimal (pas de $).
 - Retourne UNIQUEMENT le JSON, sans texte additionnel.
@@ -205,14 +216,50 @@ class ReceiptOcrService:
     # ── API call ─────────────────────────────────────────────────────────
 
     @classmethod
-    def analyze_batch(cls, file_map: dict[str, str]) -> list[dict]:
-        """
-        Send a composite image of all receipts/PDFs to OpenAI in a single call.
-        Returns a list of result dicts, one per document detected.
-        """
-        if not cls.is_available():
-            raise RuntimeError("OpenAI API non configurée.")
+    def _count_pages(cls, file_map: dict[str, str]) -> dict[str, int]:
+        """Count how many composite pages each file will produce."""
+        counts = {}
+        for label, file_path in file_map.items():
+            lower_path = file_path.lower()
+            if lower_path.endswith(".pdf") and PDF2IMAGE_AVAILABLE:
+                try:
+                    pdf_pages = convert_from_path(file_path, dpi=72, first_page=1, last_page=1)
+                    # Quick count via pdfinfo
+                    from pdf2image.pdf2image import pdfinfo_from_path
+                    info = pdfinfo_from_path(file_path)
+                    counts[label] = info.get("Pages", 1)
+                except Exception:
+                    counts[label] = 1
+            else:
+                counts[label] = 1
+        return counts
 
+    @classmethod
+    def _split_file_map(cls, file_map: dict[str, str]) -> list[dict[str, str]]:
+        """Split file_map into sub-batches of at most MAX_PAGES_PER_BATCH pages."""
+        page_counts = cls._count_pages(file_map)
+        batches = []
+        current_batch = {}
+        current_pages = 0
+
+        for label, path in file_map.items():
+            file_pages = page_counts.get(label, 1)
+            # If a single file exceeds the limit, give it its own batch
+            if current_pages + file_pages > MAX_PAGES_PER_BATCH and current_batch:
+                batches.append(current_batch)
+                current_batch = {}
+                current_pages = 0
+            current_batch[label] = path
+            current_pages += file_pages
+
+        if current_batch:
+            batches.append(current_batch)
+
+        return batches
+
+    @classmethod
+    def _analyze_single_batch(cls, file_map: dict[str, str]) -> list[dict]:
+        """Send one composite image to OpenAI and return parsed results."""
         composite_bytes, page_labels = cls._build_composite_image(file_map)
         image_b64 = base64.b64encode(composite_bytes).decode("utf-8")
         num_pages = len(page_labels)
@@ -254,6 +301,33 @@ class ReceiptOcrService:
                      model, num_pages, raw)
         return cls._parse_batch_response(raw, list(file_map.keys()))
 
+    @classmethod
+    def analyze_batch(cls, file_map: dict[str, str]) -> list[dict]:
+        """
+        Analyze receipts/PDFs via OpenAI Vision API.
+        Automatically splits into sub-batches of MAX_PAGES_PER_BATCH pages
+        to preserve extraction accuracy.
+        """
+        if not cls.is_available():
+            raise RuntimeError("OpenAI API non configurée.")
+
+        batches = cls._split_file_map(file_map)
+        all_results = []
+
+        for sub_map in batches:
+            results = cls._analyze_single_batch(sub_map)
+            all_results.extend(results)
+
+        # Ensure every input filename has at least one result
+        seen_sources = {r.get("source_filename", r["filename"]) for r in all_results}
+        for fn in file_map:
+            if fn not in seen_sources:
+                empty = cls._empty_result(fn)
+                empty["source_filename"] = fn
+                all_results.append(empty)
+
+        return all_results
+
     # ── Parsing helpers ──────────────────────────────────────────────────
 
     @staticmethod
@@ -285,6 +359,8 @@ class ReceiptOcrService:
             "associated_bc_number": str(data.get("associated_bc_number") or "").strip(),
             "supplier_name": str(data.get("supplier_name") or "").strip(),
             "supplier_address": str(data.get("supplier_address") or "").strip(),
+            "expense_member_name": str(data.get("expense_member_name") or "").strip(),
+            "expense_apartment": str(data.get("expense_apartment") or "").strip(),
             "member_name": str(data.get("member_name") or "").strip(),
             "apartment_number": str(data.get("apartment_number") or "").strip(),
             "merchant": str(data.get("merchant") or ""),
@@ -367,6 +443,8 @@ class ReceiptOcrService:
             "associated_bc_number": "",
             "supplier_name": "",
             "supplier_address": "",
+            "expense_member_name": "",
+            "expense_apartment": "",
             "member_name": "",
             "apartment_number": "",
             "merchant": "",
@@ -458,6 +536,8 @@ class ReceiptOcrService:
                         "associated_bc_number_candidate": primary.get("associated_bc_number", ""),
                         "supplier_name_candidate": primary.get("supplier_name", ""),
                         "supplier_address_candidate": primary.get("supplier_address", ""),
+                        "expense_member_name_candidate": primary.get("expense_member_name", ""),
+                        "expense_apartment_candidate": primary.get("expense_apartment", ""),
                         "member_name_candidate": primary.get("member_name", ""),
                         "apartment_number_candidate": primary.get("apartment_number", ""),
                         "merchant_candidate": primary.get("merchant", ""),

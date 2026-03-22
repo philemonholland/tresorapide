@@ -263,9 +263,12 @@ class ReceiptReviewSingleView(TreasurerRequiredMixin, View):
         initial = {}
         matched_member_name = ""
         name_mismatch = False
+        expense_member_mismatch = False
+        doc_type = "receipt"
 
         try:
             ef = receipt.extracted_fields
+            doc_type = ef.final_document_type or ef.document_type_candidate or "receipt"
             apt_code = ef.final_apartment_number or ef.apartment_number_candidate
             member_name_raw = ef.final_member_name or ef.member_name_candidate
 
@@ -283,6 +286,11 @@ class ReceiptReviewSingleView(TreasurerRequiredMixin, View):
                     name_mismatch = True
 
             initial.update({
+                "document_type": doc_type,
+                "bc_number": ef.final_bc_number or ef.bc_number_candidate or "",
+                "associated_bc_number": ef.final_associated_bc_number or ef.associated_bc_number_candidate or "",
+                "supplier_name": ef.final_supplier_name or ef.supplier_name_candidate or "",
+                "supplier_address": ef.final_supplier_address or ef.supplier_address_candidate or "",
                 "member_name_raw": member_name_raw if (member and not name_mismatch and not name_unreadable) else "",
                 "apartment_number": apt_code,
                 "merchant_name": ef.final_merchant or ef.merchant_candidate,
@@ -293,6 +301,35 @@ class ReceiptReviewSingleView(TreasurerRequiredMixin, View):
                 "total": ef.final_total if ef.final_total is not None else ef.total_candidate,
                 "summary": ef.final_summary or ef.summary_candidate or "",
             })
+
+            # Expense member fields (paper BC)
+            if doc_type == "paper_bc":
+                exp_name = ef.final_expense_member_name or ef.expense_member_name_candidate or ""
+                exp_apt = ef.final_expense_apartment or ef.expense_apartment_candidate or ""
+                initial["expense_member_name"] = exp_name
+                initial["expense_apartment"] = exp_apt
+
+                # Try to auto-match expense member
+                if exp_apt:
+                    _, exp_member = _match_member_for_apartment(bon.house, exp_apt)
+                    if exp_member:
+                        initial["expense_member"] = exp_member.pk
+                        if exp_name and exp_name.lower().strip() not in exp_member.display_name.lower():
+                            expense_member_mismatch = True
+                    else:
+                        expense_member_mismatch = True
+                elif exp_name:
+                    # Try fuzzy name match
+                    house_member_ids = Residency.objects.filter(
+                        apartment__house=bon.house, end_date__isnull=True,
+                    ).values_list("member_id", flat=True)
+                    for m in Member.objects.filter(pk__in=house_member_ids, is_active=True):
+                        if exp_name.lower().strip() in m.display_name.lower():
+                            initial["expense_member"] = m.pk
+                            break
+                    else:
+                        expense_member_mismatch = True
+
             # Pre-select existing bon's sub_budget if not set in extracted data
             if ef.sub_budget_id:
                 initial["sub_budget"] = ef.sub_budget_id
@@ -308,12 +345,16 @@ class ReceiptReviewSingleView(TreasurerRequiredMixin, View):
         house_member_ids = Residency.objects.filter(
             apartment__house=bon.house, end_date__isnull=True,
         ).values_list("member_id", flat=True)
-        form.fields["purchaser_member"].queryset = Member.objects.filter(
+        members_qs = Member.objects.filter(
             pk__in=house_member_ids, is_active=True,
         ).order_by("last_name", "first_name")
+        form.fields["purchaser_member"].queryset = members_qs
+        form.fields["expense_member"].queryset = members_qs
         form.fields["sub_budget"].queryset = SubBudget.objects.filter(
             budget_year=bon.budget_year, is_active=True,
         ).order_by("sort_order", "trace_code")
+
+        mismatch_warning = _get_mismatch_warning(receipt)
 
         return {
             "bon": bon,
@@ -321,6 +362,9 @@ class ReceiptReviewSingleView(TreasurerRequiredMixin, View):
             "form": form,
             "matched_member_name": matched_member_name,
             "name_mismatch": name_mismatch,
+            "expense_member_mismatch": expense_member_mismatch,
+            "document_type": doc_type,
+            "mismatch_warning": mismatch_warning,
         }
 
     def get(self, request, bon_pk, receipt_pk):
@@ -345,9 +389,11 @@ class ReceiptReviewSingleView(TreasurerRequiredMixin, View):
         house_member_ids = Residency.objects.filter(
             apartment__house=bon.house, end_date__isnull=True,
         ).values_list("member_id", flat=True)
-        form.fields["purchaser_member"].queryset = Member.objects.filter(
+        members_qs = Member.objects.filter(
             pk__in=house_member_ids, is_active=True,
         ).order_by("last_name", "first_name")
+        form.fields["purchaser_member"].queryset = members_qs
+        form.fields["expense_member"].queryset = members_qs
         form.fields["sub_budget"].queryset = SubBudget.objects.filter(
             budget_year=bon.budget_year, is_active=True,
         ).order_by("sort_order", "trace_code")
@@ -360,7 +406,15 @@ class ReceiptReviewSingleView(TreasurerRequiredMixin, View):
 
         # Save confirmed fields
         selected_member = form.cleaned_data.get("purchaser_member")
+        expense_member = form.cleaned_data.get("expense_member")
         ef, _ = ReceiptExtractedFields.objects.get_or_create(receipt_file=receipt)
+        ef.final_document_type = form.cleaned_data.get("document_type") or ""
+        ef.final_bc_number = form.cleaned_data.get("bc_number") or ""
+        ef.final_associated_bc_number = form.cleaned_data.get("associated_bc_number") or ""
+        ef.final_supplier_name = form.cleaned_data.get("supplier_name") or ""
+        ef.final_supplier_address = form.cleaned_data.get("supplier_address") or ""
+        ef.final_expense_member_name = expense_member.display_name if expense_member else (form.cleaned_data.get("expense_member_name") or "")
+        ef.final_expense_apartment = form.cleaned_data.get("expense_apartment") or ""
         ef.final_member_name = selected_member.display_name if selected_member else ""
         ef.final_apartment_number = form.cleaned_data.get("apartment_number") or ""
         ef.final_merchant = form.cleaned_data.get("merchant_name") or ""
@@ -524,13 +578,13 @@ def _get_mismatch_warning(receipt):
         return None
 
     try:
-        bc_total = float(paper_bcs[0].get("total") or 0)
-        invoice_total = sum(float(d.get("total") or 0) for d in invoices)
+        bc_total = round(float(paper_bcs[0].get("total") or 0), 2)
+        invoice_total = round(sum(float(d.get("total") or 0) for d in invoices), 2)
 
         if abs(bc_total - invoice_total) > 0.01:
             return {
-                "bc_total": bc_total,
-                "invoice_total": invoice_total,
+                "bc_total": f"{bc_total:.2f}",
+                "invoice_total": f"{invoice_total:.2f}",
                 "bc_number": paper_bcs[0].get("bc_number", "?"),
             }
     except (ValueError, TypeError):
@@ -570,6 +624,7 @@ class OcrReviewView(TreasurerRequiredMixin, View):
         initial = {}
         matched_member_name = ""
         name_mismatch = False
+        expense_member_mismatch = False
         doc_type = "receipt"
 
         try:
@@ -580,6 +635,35 @@ class OcrReviewView(TreasurerRequiredMixin, View):
             initial["associated_bc_number"] = ef.final_associated_bc_number or ef.associated_bc_number_candidate or ""
             initial["supplier_name"] = ef.final_supplier_name or ef.supplier_name_candidate or ""
             initial["supplier_address"] = ef.final_supplier_address or ef.supplier_address_candidate or ""
+
+            # Expense member fields (paper_bc)
+            expense_name = ef.final_expense_member_name or ef.expense_member_name_candidate or ""
+            expense_apt = ef.final_expense_apartment or ef.expense_apartment_candidate or ""
+            initial["expense_member_name"] = expense_name
+            initial["expense_apartment"] = expense_apt
+
+            # Auto-match expense member for paper_bc
+            if doc_type == "paper_bc" and expense_apt:
+                apartment, exp_member = _match_member_for_apartment(bon.house, expense_apt)
+                if exp_member:
+                    initial["expense_member"] = exp_member.pk
+                    # Check name match
+                    if expense_name and expense_name.upper() != "ILLISIBLE":
+                        if expense_name.lower().strip() not in exp_member.display_name.lower():
+                            expense_member_mismatch = True
+                elif expense_name and expense_name.upper() != "ILLISIBLE":
+                    expense_member_mismatch = True
+            elif doc_type == "paper_bc" and expense_name and expense_name.upper() != "ILLISIBLE":
+                # Try to match by name across all house members
+                house_member_ids = Residency.objects.filter(
+                    apartment__house=bon.house, end_date__isnull=True
+                ).values_list("member_id", flat=True)
+                for m in Member.objects.filter(pk__in=house_member_ids, is_active=True):
+                    if expense_name.lower().strip() in m.display_name.lower():
+                        initial["expense_member"] = m.pk
+                        break
+                else:
+                    expense_member_mismatch = True
 
             apt_code = ef.final_apartment_number or ef.apartment_number_candidate
             member_name_raw = ef.final_member_name or ef.member_name_candidate
@@ -620,16 +704,18 @@ class OcrReviewView(TreasurerRequiredMixin, View):
         house_member_ids = Residency.objects.filter(
             apartment__house=bon.house, end_date__isnull=True
         ).values_list("member_id", flat=True)
-        form.fields["purchaser_member"].queryset = Member.objects.filter(
+        members_qs = Member.objects.filter(
             pk__in=house_member_ids, is_active=True
         ).order_by("last_name", "first_name")
+        form.fields["purchaser_member"].queryset = members_qs
+        form.fields["expense_member"].queryset = members_qs
 
         # Populate sub_budget choices
         form.fields["sub_budget"].queryset = SubBudget.objects.filter(
             budget_year=bon.budget_year, is_active=True
         ).order_by("sort_order", "trace_code")
 
-        return form, matched_member_name, name_mismatch, doc_type
+        return form, matched_member_name, name_mismatch, doc_type, expense_member_mismatch
 
     def get(self, request, pk):
         bon = self._get_bon(request, pk)
@@ -637,8 +723,8 @@ class OcrReviewView(TreasurerRequiredMixin, View):
         if not current:
             messages.warning(request, "Aucun reçu à vérifier.")
             return redirect(reverse("bons:list"))
-        form, matched_name, name_mismatch, doc_type = self._build_form(current, bon)
-        return self._render(request, bon, current, form, idx, total, matched_name, name_mismatch, doc_type)
+        form, matched_name, name_mismatch, doc_type, expense_mismatch = self._build_form(current, bon)
+        return self._render(request, bon, current, form, idx, total, matched_name, name_mismatch, doc_type, expense_mismatch)
 
     def post(self, request, pk):
         bon = self._get_bon(request, pk)
@@ -654,9 +740,11 @@ class OcrReviewView(TreasurerRequiredMixin, View):
         house_member_ids = Residency.objects.filter(
             apartment__house=bon.house, end_date__isnull=True
         ).values_list("member_id", flat=True)
-        form.fields["purchaser_member"].queryset = Member.objects.filter(
+        members_qs = Member.objects.filter(
             pk__in=house_member_ids, is_active=True
         ).order_by("last_name", "first_name")
+        form.fields["purchaser_member"].queryset = members_qs
+        form.fields["expense_member"].queryset = members_qs
         form.fields["sub_budget"].queryset = SubBudget.objects.filter(
             budget_year=bon.budget_year, is_active=True
         ).order_by("sort_order", "trace_code")
@@ -668,12 +756,15 @@ class OcrReviewView(TreasurerRequiredMixin, View):
 
         # Save confirmed values
         selected_member = form.cleaned_data.get("purchaser_member")
+        expense_member = form.cleaned_data.get("expense_member")
         ef, _ = ReceiptExtractedFields.objects.get_or_create(receipt_file=current)
         ef.final_document_type = form.cleaned_data.get("document_type") or ""
         ef.final_bc_number = form.cleaned_data.get("bc_number") or ""
         ef.final_associated_bc_number = form.cleaned_data.get("associated_bc_number") or ""
         ef.final_supplier_name = form.cleaned_data.get("supplier_name") or ""
         ef.final_supplier_address = form.cleaned_data.get("supplier_address") or ""
+        ef.final_expense_member_name = expense_member.display_name if expense_member else (form.cleaned_data.get("expense_member_name") or "")
+        ef.final_expense_apartment = form.cleaned_data.get("expense_apartment") or ""
         ef.final_member_name = selected_member.display_name if selected_member else ""
         ef.final_apartment_number = form.cleaned_data.get("apartment_number") or ""
         ef.final_merchant = form.cleaned_data.get("merchant_name") or ""
@@ -941,7 +1032,7 @@ class OcrReviewView(TreasurerRequiredMixin, View):
         if update_fields:
             BonDeCommande.objects.filter(pk=bon.pk).update(**update_fields)
 
-    def _render(self, request, bon, receipt, form, idx, total, matched_member_name, name_mismatch=False, document_type="receipt"):
+    def _render(self, request, bon, receipt, form, idx, total, matched_member_name, name_mismatch=False, document_type="receipt", expense_member_mismatch=False):
         mismatch_warning = _get_mismatch_warning(receipt)
         return TemplateResponse(request, self.template_name, {
             "bon": bon,
@@ -952,6 +1043,7 @@ class OcrReviewView(TreasurerRequiredMixin, View):
             "is_last": idx + 1 >= total,
             "matched_member_name": matched_member_name,
             "name_mismatch": name_mismatch,
+            "expense_member_mismatch": expense_member_mismatch,
             "document_type": document_type,
             "mismatch_warning": mismatch_warning,
             "prev_url": (

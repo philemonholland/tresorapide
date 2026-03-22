@@ -296,6 +296,14 @@ class ReceiptExtractedFields(TimeStampedModel):
     )
     supplier_name_candidate = models.CharField(max_length=200, blank=True)
     supplier_address_candidate = models.CharField(max_length=300, blank=True)
+    expense_member_name_candidate = models.CharField(
+        max_length=200, blank=True,
+        help_text="Nom de la personne ayant effectué la dépense (signataire du BC papier)"
+    )
+    expense_apartment_candidate = models.CharField(
+        max_length=10, blank=True,
+        help_text="Appartement de la personne ayant effectué la dépense"
+    )
     member_name_candidate = models.CharField(max_length=200, blank=True)
     apartment_number_candidate = models.CharField(max_length=10, blank=True)
     merchant_candidate = models.CharField(max_length=200, blank=True)
@@ -311,6 +319,8 @@ class ReceiptExtractedFields(TimeStampedModel):
     final_associated_bc_number = models.CharField(max_length=20, blank=True)
     final_supplier_name = models.CharField(max_length=200, blank=True)
     final_supplier_address = models.CharField(max_length=300, blank=True)
+    final_expense_member_name = models.CharField(max_length=200, blank=True)
+    final_expense_apartment = models.CharField(max_length=10, blank=True)
     final_member_name = models.CharField(max_length=200, blank=True)
     final_apartment_number = models.CharField(max_length=10, blank=True)
     final_merchant = models.CharField(max_length=200, blank=True)

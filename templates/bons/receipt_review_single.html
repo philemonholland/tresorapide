@@ -18,6 +18,27 @@
     <section class="card">
         <h2>{{ receipt.original_filename }}</h2>
 
+        {# Document type badge #}
+        <div style="margin-bottom: 1rem;">
+            {% if document_type == "paper_bc" %}
+                <span style="display:inline-block;padding:0.3rem 0.8rem;border-radius:4px;background:#fff3cd;color:#856404;font-weight:bold;">📄 Bon de commande papier</span>
+            {% elif document_type == "invoice" %}
+                <span style="display:inline-block;padding:0.3rem 0.8rem;border-radius:4px;background:#d4edda;color:#155724;font-weight:bold;">🧾 Facture</span>
+            {% else %}
+                <span style="display:inline-block;padding:0.3rem 0.8rem;border-radius:4px;background:#cce5ff;color:#004085;font-weight:bold;">📋 Reçu</span>
+            {% endif %}
+        </div>
+
+        {# Mismatch warning #}
+        {% if mismatch_warning %}
+        <div class="message" style="margin-bottom: 1rem; background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; border-radius: 4px; padding: 0.75rem 1rem;">
+            ⚠️ <strong>Écart détecté !</strong>
+            Le total du BC n°{{ mismatch_warning.bc_number }} (<strong>{{ mismatch_warning.bc_total }} $</strong>)
+            ne correspond pas à la somme des factures associées (<strong>{{ mismatch_warning.invoice_total }} $</strong>).
+            Veuillez vérifier les montants.
+        </div>
+        {% endif %}
+
         {% if receipt.ocr_status == "FAILED" and receipt.ocr_raw_text %}
             <div class="message warning" style="margin-bottom: 1rem;">
                 ⚠️ {{ receipt.ocr_raw_text }}
@@ -48,14 +69,81 @@
                 <div style="flex: 1; min-width: 300px;">
                     {{ form.non_field_errors }}
 
-                    {% if matched_member_name %}
-                    <div class="message success" style="margin-bottom: 1rem;">
-                        ✅ Membre identifié : <strong>{{ matched_member_name }}</strong>
-                    </div>
-                    {% endif %}
+                    {# Hidden document_type field #}
+                    <div style="display:none;">{{ form.document_type }}</div>
 
-                    <fieldset style="border: 1px solid #ddd; border-radius: 4px; padding: 1rem; margin-bottom: 1rem;">
+                    {# PAPER BC section #}
+                    <fieldset id="paper-bc-section" style="border: 1px solid #ddd; border-radius: 4px; padding: 1rem; margin-bottom: 1rem;{% if document_type != 'paper_bc' %} display:none;{% endif %}">
+                        <legend style="font-weight: bold; padding: 0 0.5rem;">Bon de commande papier</legend>
+
+                        <div class="form-group {% if form.bc_number.errors %}has-error{% endif %}">
+                            <label for="{{ form.bc_number.id_for_label }}">{{ form.bc_number.label }} <span style="color:red">*</span></label>
+                            {{ form.bc_number }}
+                            {% for error in form.bc_number.errors %}<p class="error-text">{{ error }}</p>{% endfor %}
+                        </div>
+                        <div class="form-group {% if form.supplier_name.errors %}has-error{% endif %}">
+                            <label for="{{ form.supplier_name.id_for_label }}">{{ form.supplier_name.label }}</label>
+                            {{ form.supplier_name }}
+                            {% for error in form.supplier_name.errors %}<p class="error-text">{{ error }}</p>{% endfor %}
+                        </div>
+                        <div class="form-group {% if form.supplier_address.errors %}has-error{% endif %}">
+                            <label for="{{ form.supplier_address.id_for_label }}">{{ form.supplier_address.label }}</label>
+                            {{ form.supplier_address }}
+                            {% for error in form.supplier_address.errors %}<p class="error-text">{{ error }}</p>{% endfor %}
+                        </div>
+
+                        <hr style="margin: 1rem 0; border-top: 1px solid #ddd;">
+                        <p style="font-weight: bold; margin-bottom: 0.5rem;">Dépense effectuée par</p>
+
+                        {% if expense_member_mismatch %}
+                        <div class="message warning" style="margin-bottom: 0.5rem;">
+                            ⚠️ Le nom du signataire n'a pas pu être associé à un membre de la maison. Veuillez sélectionner le membre manuellement.
+                        </div>
+                        {% endif %}
+
+                        {% if form.expense_member_name.value %}
+                        <div class="form-group">
+                            <label for="{{ form.expense_member_name.id_for_label }}">{{ form.expense_member_name.label }}</label>
+                            {{ form.expense_member_name }}
+                            <small class="text-muted">{{ form.expense_member_name.help_text }}</small>
+                        </div>
+                        {% endif %}
+                        <div class="form-group">
+                            <label for="{{ form.expense_apartment.id_for_label }}">{{ form.expense_apartment.label }}</label>
+                            {{ form.expense_apartment }}
+                        </div>
+                        <div class="form-group {% if form.expense_member.errors %}has-error{% endif %}">
+                            <label for="{{ form.expense_member.id_for_label }}">{{ form.expense_member.label }}</label>
+                            {{ form.expense_member }}
+                            {% for error in form.expense_member.errors %}<p class="error-text">{{ error }}</p>{% endfor %}
+                        </div>
+                    </fieldset>
+
+                    {# INVOICE section #}
+                    <fieldset id="invoice-section" style="border: 1px solid #ddd; border-radius: 4px; padding: 1rem; margin-bottom: 1rem;{% if document_type != 'invoice' %} display:none;{% endif %}">
+                        <legend style="font-weight: bold; padding: 0 0.5rem;">Facture liée</legend>
+
+                        <div class="form-group {% if form.associated_bc_number.errors %}has-error{% endif %}">
+                            <label for="{{ form.associated_bc_number.id_for_label }}">{{ form.associated_bc_number.label }}</label>
+                            {{ form.associated_bc_number }}
+                            {% for error in form.associated_bc_number.errors %}<p class="error-text">{{ error }}</p>{% endfor %}
+                        </div>
+                        <div class="form-group">
+                            <label>{{ form.supplier_name.label }}</label>
+                            <input type="text" value="{{ form.supplier_name.value|default_if_none:'' }}" readonly class="text-muted"
+                                   style="background:#f8f9fa;border:1px solid #ddd;padding:0.4rem;border-radius:4px;width:100%;">
+                        </div>
+                    </fieldset>
+
+                    {# RECEIPT member identification (only for receipt type) #}
+                    <fieldset id="member-section" style="border: 1px solid #ddd; border-radius: 4px; padding: 1rem; margin-bottom: 1rem;{% if document_type == 'invoice' %} display:none;{% endif %}">
                         <legend style="font-weight: bold; padding: 0 0.5rem;">Identification du membre</legend>
+
+                        {% if matched_member_name %}
+                        <div class="message success" style="margin-bottom: 1rem;">
+                            ✅ Membre identifié : <strong>{{ matched_member_name }}</strong>
+                        </div>
+                        {% endif %}
 
                         <div class="form-group {% if form.apartment_number.errors %}has-error{% endif %}">
                             <label for="{{ form.apartment_number.id_for_label }}">{{ form.apartment_number.label }}</label>
@@ -81,6 +169,7 @@
                         {{ form.matched_member_id }}
                     </fieldset>
 
+                    {# Purchase details #}
                     <fieldset style="border: 1px solid #ddd; border-radius: 4px; padding: 1rem; margin-bottom: 1rem;">
                         <legend style="font-weight: bold; padding: 0 0.5rem;">Détails de l'achat</legend>
 
@@ -107,6 +196,7 @@
                         </div>
                     </fieldset>
 
+                    {# Amounts #}
                     <fieldset style="border: 1px solid #ddd; border-radius: 4px; padding: 1rem; margin-bottom: 1rem;">
                         <legend style="font-weight: bold; padding: 0 0.5rem;">Montants</legend>
 
@@ -141,4 +231,23 @@
             </div>
         </form>
     </section>
+
+    <script>
+    (function() {
+        var prefix = "{{ form.prefix }}";
+        var dtField = document.getElementById("id_" + prefix + "-document_type");
+        if (!dtField) return;
+
+        function toggle() {
+            var val = dtField.value;
+            var paper = document.getElementById("paper-bc-section");
+            var inv = document.getElementById("invoice-section");
+            var member = document.getElementById("member-section");
+            if (paper) paper.style.display = val === "paper_bc" ? "" : "none";
+            if (inv) inv.style.display = val === "invoice" ? "" : "none";
+            if (member) member.style.display = val === "invoice" ? "none" : "";
+        }
+        dtField.addEventListener("change", toggle);
+    })();
+    </script>
 {% endblock %}
