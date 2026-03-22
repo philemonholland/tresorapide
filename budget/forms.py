@@ -1,4 +1,5 @@
 from django import forms
+from django.forms import inlineformset_factory
 from django.utils import timezone
 
 from .models import BudgetYear, SubBudget, Expense
@@ -124,3 +125,45 @@ class ExpenseForm(forms.ModelForm):
     ESSENTIAL_FIELDS = ("entry_date", "description", "amount", "sub_budget",
                         "bon_number", "supplier_name", "spent_by_label")
     DETAIL_FIELDS = ("validated_gl", "source_type", "notes")
+
+
+# ---------------------------------------------------------------------------
+# Inline sub-budget formset for the budget-year edit page
+# ---------------------------------------------------------------------------
+
+class SubBudgetInlineForm(forms.ModelForm):
+    """Compact form used inside the inline formset on the budget-year edit page."""
+
+    class Meta:
+        model = SubBudget
+        fields = [
+            "trace_code", "name", "repeat_type", "planned_amount",
+            "sort_order", "is_active", "notes",
+        ]
+        labels = {
+            "trace_code": "Code",
+            "name": "Nom",
+            "repeat_type": "Récurrence",
+            "planned_amount": "Montant prévu",
+            "sort_order": "Ordre",
+            "is_active": "Actif",
+            "notes": "Notes",
+        }
+        widgets = {
+            "trace_code": forms.NumberInput(attrs={"style": "width:5rem"}),
+            "name": forms.TextInput(attrs={"style": "min-width:10rem"}),
+            "planned_amount": forms.NumberInput(attrs={"step": "0.01", "style": "width:8rem"}),
+            "sort_order": forms.NumberInput(attrs={"style": "width:4.5rem"}),
+            "notes": forms.TextInput(attrs={"placeholder": "—", "style": "min-width:6rem"}),
+        }
+
+
+SubBudgetFormSet = inlineformset_factory(
+    BudgetYear,
+    SubBudget,
+    form=SubBudgetInlineForm,
+    extra=2,
+    can_delete=True,
+    # Never allow deleting the contingency row from inline
+    exclude=[],
+)

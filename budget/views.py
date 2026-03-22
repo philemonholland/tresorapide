@@ -1,13 +1,14 @@
 from decimal import Decimal
 
 from django.core.exceptions import PermissionDenied
+from django.http import HttpResponseRedirect
 from django.urls import reverse_lazy, reverse
 from django.views.generic import ListView, DetailView, CreateView, UpdateView
 from django.shortcuts import get_object_or_404
 
 from accounts.access import RoleRequiredMixin, TreasurerRequiredMixin, check_house_permission
 from .models import BudgetYear, SubBudget, Expense
-from .forms import BudgetYearForm, SubBudgetForm, ExpenseForm
+from .forms import BudgetYearForm, SubBudgetForm, SubBudgetFormSet, ExpenseForm
 from .services import BudgetCalculationService
 
 SEED_CATEGORIES = [
@@ -164,12 +165,86 @@ class BudgetYearUpdateView(TreasurerRequiredMixin, UpdateView):
 
     def get_form(self, form_class=None):
         form = super().get_form(form_class)
-        # Hide seed checkbox on edit — categories already exist
         if "seed_default_categories" in form.fields:
             del form.fields["seed_default_categories"]
         if not self.request.user.is_gestionnaire:
             form.fields["house"].widget = form.fields["house"].hidden_widget()
         return form
+
+    def _subbudget_usage(self):
+        """Return {subbudget_pk: {'expenses': N, 'bons': N}} for this budget year."""
+        from django.db.models import Count
+        subs = SubBudget.objects.filter(budget_year=self.object)
+        expense_counts = dict(
+            subs.annotate(c=Count("expenses")).values_list("pk", "c")
+        )
+        bon_counts = dict(
+            subs.annotate(c=Count("bons_de_commande")).values_list("pk", "c")
+        )
+        return {
+            pk: {
+                "expenses": expense_counts.get(pk, 0),
+                "bons": bon_counts.get(pk, 0),
+            }
+            for pk in subs.values_list("pk", flat=True)
+        }
+
+    def get_context_data(self, **kwargs):
+        ctx = super().get_context_data(**kwargs)
+        qs = SubBudget.objects.filter(
+            budget_year=self.object
+        ).order_by("sort_order", "trace_code")
+        if self.request.POST:
+            ctx["subbudget_formset"] = SubBudgetFormSet(
+                self.request.POST, instance=self.object, queryset=qs,
+            )
+        else:
+            ctx["subbudget_formset"] = SubBudgetFormSet(
+                instance=self.object, queryset=qs,
+            )
+        usage = self._subbudget_usage()
+        ctx["subbudget_usage"] = usage
+        # json_script needs the raw dict — use string keys for JS compatibility
+        ctx["subbudget_usage_json"] = {str(k): v for k, v in usage.items()}
+        return ctx
+
+    def form_valid(self, form):
+        ctx = self.get_context_data()
+        formset = ctx["subbudget_formset"]
+        if not formset.is_valid():
+            return self.render_to_response(self.get_context_data(form=form))
+
+        self.object = form.save()
+        formset.instance = self.object
+
+        # Reassign expenses/bons from sub-budgets marked for deletion
+        from bons.models import BonDeCommande
+        for del_form in formset.deleted_forms:
+            sb = del_form.instance
+            if not sb.pk:
+                continue
+            has_expenses = sb.expenses.exists()
+            has_bons = sb.bons_de_commande.exists()
+            if has_expenses or has_bons:
+                target_pk = self.request.POST.get(f"reassign_{sb.pk}")
+                if not target_pk:
+                    form.add_error(None,
+                        f"Le sous-budget « {sb} » a des dépenses/bons liés. "
+                        f"Choisissez un sous-budget de remplacement."
+                    )
+                    return self.render_to_response(self.get_context_data(form=form))
+                try:
+                    target = SubBudget.objects.get(
+                        pk=target_pk, budget_year=self.object
+                    )
+                except SubBudget.DoesNotExist:
+                    form.add_error(None, "Sous-budget de remplacement invalide.")
+                    return self.render_to_response(self.get_context_data(form=form))
+                sb.expenses.update(sub_budget=target)
+                sb.bons_de_commande.update(sub_budget=target)
+
+        formset.save()
+        return HttpResponseRedirect(self.get_success_url())
 
     def get_success_url(self):
         return reverse("budget:year-detail", kwargs={"pk": self.object.pk})

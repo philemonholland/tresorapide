@@ -2,6 +2,58 @@
 
 {% block title %}{% if object %}Modifier l'année budgétaire{% else %}Créer une année budgétaire{% endif %} | Tresorapide{% endblock %}
 
+{% block extra_head %}
+<style>
+.subbudget-inline-table input[type="number"],
+.subbudget-inline-table input[type="text"],
+.subbudget-inline-table select {
+    border: 1px solid #c6d2df;
+    border-radius: 0.3rem;
+    padding: 0.4rem 0.5rem;
+    font: inherit;
+    font-size: 0.88rem;
+}
+.subbudget-inline-table input[type="checkbox"] {
+    width: 1.1rem;
+    height: 1.1rem;
+}
+.subbudget-inline-table td {
+    padding: 0.35rem 0.4rem;
+    vertical-align: middle;
+}
+.subbudget-inline-table th {
+    font-size: 0.85rem;
+    padding: 0.45rem 0.4rem;
+    white-space: nowrap;
+}
+.drag-handle {
+    cursor: grab;
+    user-select: none;
+    font-size: 1.2rem;
+    color: #8a9bb0;
+    padding: 0 0.3rem;
+}
+.drag-handle:active { cursor: grabbing; }
+.subbudget-row.dragging { opacity: 0.4; background: #e8eef6; }
+.subbudget-row.drag-over { border-top: 2px solid #123c66; }
+.subbudget-row.marked-delete td { text-decoration: line-through; opacity: 0.45; }
+.subbudget-row.marked-delete .reassign-cell { text-decoration: none; opacity: 1; }
+.reassign-warning {
+    background: #fff6df;
+    border: 1px solid #f0c977;
+    border-radius: 0.4rem;
+    padding: 0.5rem 0.75rem;
+    margin-top: 0.25rem;
+    font-size: 0.85rem;
+    color: #7a5200;
+}
+.reassign-warning select {
+    margin-top: 0.3rem;
+    width: 100%;
+}
+</style>
+{% endblock %}
+
 {% block content %}
     <section class="card">
         <div class="section-heading">
@@ -11,7 +63,7 @@
             </div>
             <a class="button-link" href="{% url 'budget:year-list' %}">Retour aux budgets</a>
         </div>
-        <form method="post" class="stack">
+        <form method="post" class="stack" id="budget-year-form">
             {% csrf_token %}
             {{ form.non_field_errors }}
             {% for field in form %}
@@ -46,7 +98,273 @@
                     {% endif %}
                 {% endfor %}
             </div>
-            <button type="submit" class="btn btn-primary">{% if object %}Enregistrer{% else %}Créer{% endif %}</button>
+
+            {% if subbudget_formset %}
+            <hr style="margin:1rem 0; border:0; border-top:2px solid #d4e1ee;">
+            <h2 style="margin:0 0 0.5rem;">Sous-budgets</h2>
+            <p class="text-muted" style="margin:0 0 0.75rem;">
+                Glissez ☰ pour réordonner. Le sous-budget « Imprévues » est géré automatiquement.
+            </p>
+
+            {{ subbudget_formset.management_form }}
+            {% if subbudget_formset.non_form_errors %}
+                {% for error in subbudget_formset.non_form_errors %}
+                    <p class="error-text">{{ error }}</p>
+                {% endfor %}
+            {% endif %}
+
+            <div class="table-responsive">
+                <table class="data-table subbudget-inline-table">
+                    <thead>
+                        <tr>
+                            <th style="width:2.5rem;"></th>
+                            <th>Code</th>
+                            <th>Nom</th>
+                            <th>Récurrence</th>
+                            <th class="text-right">Montant prévu</th>
+                            <th>Actif</th>
+                            <th>Notes</th>
+                            <th>Suppr.</th>
+                        </tr>
+                    </thead>
+                    <tbody id="subbudget-rows">
+                        {% for sf in subbudget_formset %}
+                        <tr class="subbudget-row {% if sf.instance.is_contingency %}row-contingency{% endif %}"
+                            draggable="{% if sf.instance.is_contingency %}false{% else %}true{% endif %}"
+                            data-sb-pk="{{ sf.instance.pk|default:'' }}"
+                            data-sb-name="{{ sf.instance.trace_code|default:'?' }} – {{ sf.instance.name|default:'Nouveau' }}">
+                            {{ sf.id }}
+                            <input type="hidden" name="{{ sf.sort_order.html_name }}"
+                                   value="{{ sf.sort_order.value|default:sf.instance.sort_order }}"
+                                   class="sort-order-input">
+                            {% if sf.instance.is_contingency %}
+                                <td><span style="color:#ccc;">—</span></td>
+                                <td>
+                                    <span style="color:#5f7081;">{{ sf.instance.trace_code }}</span>
+                                    <input type="hidden" name="{{ sf.trace_code.html_name }}" value="{{ sf.instance.trace_code }}">
+                                </td>
+                                <td>
+                                    <span style="color:#5f7081;">{{ sf.instance.name }}</span>
+                                    <input type="hidden" name="{{ sf.name.html_name }}" value="{{ sf.instance.name }}">
+                                </td>
+                                <td>
+                                    <span style="color:#5f7081;">{{ sf.instance.get_repeat_type_display }}</span>
+                                    <input type="hidden" name="{{ sf.repeat_type.html_name }}" value="{{ sf.instance.repeat_type }}">
+                                </td>
+                                <td class="text-right">
+                                    <span style="color:#5f7081;">Auto ({{ sf.instance.planned_amount|default:"—" }})</span>
+                                    <input type="hidden" name="{{ sf.planned_amount.html_name }}" value="{{ sf.instance.planned_amount }}">
+                                </td>
+                                <td>
+                                    <input type="hidden" name="{{ sf.is_active.html_name }}" value="{{ sf.instance.is_active|yesno:'True,False' }}">
+                                    <span style="color:#5f7081;">✓</span>
+                                </td>
+                                <td>
+                                    <input type="hidden" name="{{ sf.notes.html_name }}" value="{{ sf.instance.notes|default:'' }}">
+                                    <span style="color:#5f7081;">{{ sf.instance.notes|default:"—" }}</span>
+                                </td>
+                                <td><span style="color:#ccc;">—</span></td>
+                            {% else %}
+                                <td class="drag-handle" title="Glisser pour réordonner">☰</td>
+                                <td>{{ sf.trace_code }}</td>
+                                <td>{{ sf.name }}</td>
+                                <td>{{ sf.repeat_type }}</td>
+                                <td class="text-right">{{ sf.planned_amount }}</td>
+                                <td style="text-align:center;">{{ sf.is_active }}</td>
+                                <td>{{ sf.notes }}</td>
+                                <td style="text-align:center;">{{ sf.DELETE }}</td>
+                            {% endif %}
+                        </tr>
+                        {% if sf.errors %}
+                        <tr><td colspan="9">
+                            {% for field, errors in sf.errors.items %}
+                                {% for err in errors %}<p class="error-text">{{ field }}: {{ err }}</p>{% endfor %}
+                            {% endfor %}
+                        </td></tr>
+                        {% endif %}
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            <button type="button" class="btn btn-secondary" id="add-subbudget-row" style="margin-top:0.5rem;">
+                + Ajouter un sous-budget
+            </button>
+            {% endif %}
+
+            <button type="submit" class="btn btn-primary" style="margin-top:1rem;">{% if object %}Enregistrer{% else %}Créer{% endif %}</button>
         </form>
     </section>
+
+    {% if subbudget_formset %}
+    {# Usage data as JSON for client-side warnings #}
+    {{ subbudget_usage_json|json_script:"subbudget-usage-data" }}
+
+    <script>
+    (function () {
+        var PREFIX = "{{ subbudget_formset.prefix }}";
+        var totalInput = document.getElementById("id_" + PREFIX + "-TOTAL_FORMS");
+        var tbody = document.getElementById("subbudget-rows");
+        var usageData = {};
+        try {
+            usageData = JSON.parse(document.getElementById("subbudget-usage-data").textContent);
+        } catch(e) {}
+
+        /* ── Recompute sort_order hidden inputs based on visual row order ── */
+        function recalcOrder() {
+            var rows = tbody.querySelectorAll("tr.subbudget-row");
+            for (var i = 0; i < rows.length; i++) {
+                var inp = rows[i].querySelector(".sort-order-input");
+                if (inp) inp.value = i;
+            }
+        }
+
+        /* ── Build replacement <select> options from visible non-deleted rows ── */
+        function buildReassignOptions(excludePk) {
+            var opts = '<option value="">— Choisir un sous-budget —</option>';
+            tbody.querySelectorAll("tr.subbudget-row").forEach(function (row) {
+                var pk = row.getAttribute("data-sb-pk");
+                if (!pk || pk === excludePk) return;
+                if (row.classList.contains("row-contingency")) return;
+                var delCb = row.querySelector("input[name$='-DELETE']");
+                if (delCb && delCb.checked) return;
+                var name = row.getAttribute("data-sb-name") || pk;
+                opts += '<option value="' + pk + '">' + name + '</option>';
+            });
+            return opts;
+        }
+
+        /* ── Handle DELETE checkbox — show/hide reassignment warning ── */
+        function handleDeleteToggle(row, checked) {
+            row.classList.toggle("marked-delete", checked);
+            // Remove any existing warning row for this sub-budget
+            var next = row.nextElementSibling;
+            if (next && next.classList.contains("reassign-row")) next.remove();
+
+            if (!checked) return;
+
+            var pk = row.getAttribute("data-sb-pk");
+            if (!pk) return;
+            var usage = usageData[pk];
+            if (!usage) return;
+            var total = (usage.expenses || 0) + (usage.bons || 0);
+            if (total === 0) return;
+
+            var parts = [];
+            if (usage.expenses) parts.push(usage.expenses + " dépense(s)");
+            if (usage.bons) parts.push(usage.bons + " bon(s) de commande");
+
+            var warningRow = document.createElement("tr");
+            warningRow.className = "reassign-row";
+            var td = document.createElement("td");
+            td.colSpan = 9;
+            td.className = "reassign-cell";
+            td.innerHTML = '<div class="reassign-warning">'
+                + '<strong>⚠️ Ce sous-budget a ' + parts.join(" et ") + ' lié(s).</strong><br>'
+                + 'Transférer vers :'
+                + '<select name="reassign_' + pk + '">' + buildReassignOptions(pk) + '</select>'
+                + '</div>';
+            warningRow.appendChild(td);
+            row.after(warningRow);
+        }
+
+        tbody.addEventListener("change", function (e) {
+            if (e.target.type === "checkbox" && e.target.name && e.target.name.endsWith("-DELETE")) {
+                var row = e.target.closest("tr.subbudget-row");
+                if (row) handleDeleteToggle(row, e.target.checked);
+            }
+        });
+
+        /* ── Block submit if reassignment needed but not chosen ── */
+        document.getElementById("budget-year-form").addEventListener("submit", function (e) {
+            recalcOrder();
+            var missing = [];
+            document.querySelectorAll(".reassign-row select").forEach(function (sel) {
+                if (!sel.value) {
+                    missing.push(sel);
+                    sel.style.borderColor = "#c0392b";
+                }
+            });
+            if (missing.length > 0) {
+                e.preventDefault();
+                missing[0].focus();
+                alert("Veuillez choisir un sous-budget de remplacement pour chaque sous-budget supprimé ayant des dépenses ou bons liés.");
+            }
+        });
+
+        /* ── Drag-and-drop reordering ── */
+        var dragRow = null;
+
+        tbody.addEventListener("dragstart", function (e) {
+            var row = e.target.closest("tr.subbudget-row");
+            if (!row || row.classList.contains("row-contingency")) return;
+            dragRow = row;
+            row.classList.add("dragging");
+            e.dataTransfer.effectAllowed = "move";
+        });
+
+        tbody.addEventListener("dragover", function (e) {
+            e.preventDefault();
+            var row = e.target.closest("tr.subbudget-row");
+            if (!row || row === dragRow) return;
+            tbody.querySelectorAll(".drag-over").forEach(function (r) { r.classList.remove("drag-over"); });
+            row.classList.add("drag-over");
+        });
+
+        tbody.addEventListener("drop", function (e) {
+            e.preventDefault();
+            var target = e.target.closest("tr.subbudget-row");
+            tbody.querySelectorAll(".drag-over").forEach(function (r) { r.classList.remove("drag-over"); });
+            if (!target || !dragRow || target === dragRow) return;
+            // Move any reassign-row that follows dragRow along with it
+            var dragReassign = dragRow.nextElementSibling;
+            if (dragReassign && dragReassign.classList.contains("reassign-row")) {
+                dragReassign.remove();
+            }
+            var rows = Array.from(tbody.querySelectorAll("tr.subbudget-row"));
+            var dragIdx = rows.indexOf(dragRow);
+            var targetIdx = rows.indexOf(target);
+            if (dragIdx < targetIdx) {
+                tbody.insertBefore(dragRow, target.nextSibling);
+            } else {
+                tbody.insertBefore(dragRow, target);
+            }
+            recalcOrder();
+        });
+
+        tbody.addEventListener("dragend", function () {
+            if (dragRow) dragRow.classList.remove("dragging");
+            tbody.querySelectorAll(".drag-over").forEach(function (r) { r.classList.remove("drag-over"); });
+            dragRow = null;
+        });
+
+        /* ── Add new sub-budget row ── */
+        var addBtn = document.getElementById("add-subbudget-row");
+        if (addBtn) {
+            addBtn.addEventListener("click", function () {
+                var idx = parseInt(totalInput.value);
+                var row = document.createElement("tr");
+                row.className = "subbudget-row";
+                row.draggable = true;
+                row.setAttribute("data-sb-pk", "");
+                row.setAttribute("data-sb-name", "Nouveau");
+                row.innerHTML =
+                    '<input type="hidden" name="' + PREFIX + '-' + idx + '-sort_order" value="' + idx + '" class="sort-order-input">'
+                    + '<input type="hidden" name="' + PREFIX + '-' + idx + '-id" value="">'
+                    + '<input type="hidden" name="' + PREFIX + '-' + idx + '-budget_year" value="{{ object.pk }}">'
+                    + '<td class="drag-handle" title="Glisser pour réordonner">☰</td>'
+                    + '<td><input type="number" name="' + PREFIX + '-' + idx + '-trace_code" style="width:5rem"></td>'
+                    + '<td><input type="text" name="' + PREFIX + '-' + idx + '-name" style="min-width:10rem"></td>'
+                    + '<td><select name="' + PREFIX + '-' + idx + '-repeat_type"><option value="annual">Annuel</option><option value="unique">Unique</option></select></td>'
+                    + '<td class="text-right"><input type="number" name="' + PREFIX + '-' + idx + '-planned_amount" step="0.01" style="width:8rem"></td>'
+                    + '<td style="text-align:center;"><input type="checkbox" name="' + PREFIX + '-' + idx + '-is_active" checked></td>'
+                    + '<td><input type="text" name="' + PREFIX + '-' + idx + '-notes" style="min-width:6rem" placeholder="—"></td>'
+                    + '<td style="text-align:center;"><input type="checkbox" name="' + PREFIX + '-' + idx + '-DELETE"></td>';
+                tbody.appendChild(row);
+                totalInput.value = idx + 1;
+                recalcOrder();
+            });
+        }
+    })();
+    </script>
+    {% endif %}
 {% endblock %}

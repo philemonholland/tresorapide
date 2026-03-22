@@ -2,6 +2,7 @@
  * Tresorapide — Lightweight table enhancements
  * Click column headers to sort. Type in filter input to search rows.
  * Add class "enhanced-table" to any <table> to activate.
+ * Tables with data-running-balance="true" recalculate Balance columns after sort.
  */
 (function () {
     "use strict";
@@ -120,6 +121,56 @@
         rows.forEach(function (row) {
             tbody.appendChild(row);
         });
+
+        // Recalculate running balances if applicable
+        if (table.getAttribute("data-running-balance") === "true") {
+            recalcRunningBalances(table, tbody);
+        }
+    }
+
+    /**
+     * Recompute Balance and Balance-15% columns based on current row order.
+     * Reads per-row data-amount and data-trace attributes and writes into
+     * .balance-cell and .balance-15-cell elements.
+     */
+    function recalcRunningBalances(table, tbody) {
+        var budgetTotal = parseFloat(table.getAttribute("data-budget-total"));
+        var budgetMinus = parseFloat(table.getAttribute("data-budget-minus-imprevues"));
+        if (isNaN(budgetTotal) || isNaN(budgetMinus)) return;
+
+        var cumulative = 0;
+        var cumulativeNonImprevues = 0;
+        var rows = tbody.querySelectorAll("tr");
+
+        rows.forEach(function (row) {
+            if (row.style.display === "none") return; // skip filtered rows
+            var amount = parseFloat(row.getAttribute("data-amount"));
+            var trace = row.getAttribute("data-trace");
+            if (isNaN(amount)) return;
+
+            cumulative += amount;
+            if (trace !== "0") {
+                cumulativeNonImprevues += amount;
+            }
+
+            var balance = budgetTotal - cumulative;
+            var balance15 = budgetMinus - cumulativeNonImprevues;
+
+            var balCell = row.querySelector(".balance-cell");
+            var bal15Cell = row.querySelector(".balance-15-cell");
+            if (balCell) {
+                balCell.textContent = formatMoney(balance);
+                balCell.classList.toggle("text-negative", balance < 0);
+            }
+            if (bal15Cell) {
+                bal15Cell.textContent = formatMoney(balance15);
+                bal15Cell.classList.toggle("text-negative", balance15 < 0);
+            }
+        });
+    }
+
+    function formatMoney(val) {
+        return val.toFixed(2) + " $";
     }
 
     function getCellText(row, idx) {
