@@ -16,7 +16,7 @@
                     (BC {{ flag.suspected_duplicate_receipt.bon_de_commande.number }})
                 </p>
                 <p class="text-muted">
-                    Confiance : {{ flag.confidence|floatformat:0 }}% —
+                    Confiance : {{ flag.confidence_percent|floatformat:0 }}% —
                     {{ flag.gpt_comparison_result }}
                 </p>
                 {% if flag.status == "PENDING" and can_manage %}
@@ -66,6 +66,12 @@
                 {% endif %}
                 {% if can_manage and bon.status == "READY_FOR_VALIDATION" %}
                     <a class="button-link" href="{% url 'bons:validate' bon.pk %}">Valider</a>
+                {% endif %}
+                {% if can_manage and bon.approver_member %}
+                    <form method="post" action="{% url 'bons:swap-signers' bon.pk %}" style="display:inline;">
+                        {% csrf_token %}
+                        <button type="submit" class="button-link">⇄ Inverser acheteur / validateur</button>
+                    </form>
                 {% endif %}
                 {% if can_manage and bon.status != "REIMBURSED" and bon.status != "VOID" %}
                     <form method="post" action="{% url 'bons:delete' bon.pk %}" style="display:inline;"
@@ -130,21 +136,27 @@
         </div>
     </section>
 
+    {% if signer_roles_ambiguous or bon.approver_member %}
+    <section class="card" style="background: #fff3cd; border: 1px solid #ffe08a;">
+        <p style="margin:0;">
+            ⚠️ L'attribution entre la personne qui a effectué la dépense et celle qui l'a validée doit être confirmée.
+            {% if can_manage and bon.approver_member %}
+                Utilisez <strong>Inverser acheteur / validateur</strong> si les rôles sont inversés.
+            {% endif %}
+        </p>
+    </section>
+    {% endif %}
+
     <section class="card">
         <h2>Personnes</h2>
         <div class="detail-grid">
             <div>
                 <strong>Acheteur</strong>
-                <p>
-                    {{ bon.purchaser_member.display_name }}
-                    {% if bon.purchaser_apartment %}
-                        ({{ bon.purchaser_apartment.code }})
-                    {% endif %}
-                </p>
+                <p>{{ bon.purchaser_display_label }}</p>
             </div>
             <div>
                 <strong>Approbateur</strong>
-                <p>{{ bon.approver_member.display_name|default:"—" }}</p>
+                <p>{{ bon.approver_display_label }}</p>
             </div>
             <div>
                 <strong>Créé par</strong>
@@ -154,7 +166,7 @@
                 <strong>Validé par</strong>
                 <p>
                     {% if bon.validated_by %}
-                        {{ bon.validated_by.get_full_name|default:bon.validated_by.username }} — {{ bon.validated_at|date:"Y-m-d H:i" }}
+                        {{ bon.effective_validator_display_label }} — {{ bon.validated_at|date:"Y-m-d H:i" }}
                     {% else %}
                         —
                     {% endif %}

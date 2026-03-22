@@ -262,9 +262,9 @@ def generate_bon_pdf(bon) -> bytes:
     from .models import DuplicateFlag
     receipt_ids = list(bon.receipt_files.values_list("pk", flat=True))
     active_dup_flags = list(
-        DuplicateFlag.objects.filter(
+        DuplicateFlag.objects.actionable().filter(
             receipt_file_id__in=receipt_ids,
-        ).exclude(status="DISMISSED")
+        )
         .select_related("receipt_file", "suspected_duplicate_receipt",
                         "suspected_duplicate_receipt__bon_de_commande")
     )
@@ -286,7 +286,7 @@ def generate_bon_pdf(bon) -> bytes:
                 f"correspond possiblement à "
                 f"« {flag.suspected_duplicate_receipt.original_filename} » "
                 f"(BC {flag.suspected_duplicate_receipt.bon_de_commande.number}) — "
-                f"Confiance : {flag.confidence:.0f}%"
+                f"Confiance : {flag.confidence_percent:.0f}%"
             )
             elements.append(Paragraph(
                 f"<font size='9' color='red'><b>{dup_text}</b></font>",
@@ -480,9 +480,9 @@ def generate_bon_xlsx(bon) -> bytes:
     from .models import DuplicateFlag
     receipt_ids = list(bon.receipt_files.values_list("pk", flat=True))
     active_dup_flags = list(
-        DuplicateFlag.objects.filter(
+        DuplicateFlag.objects.actionable().filter(
             receipt_file_id__in=receipt_ids,
-        ).exclude(status="DISMISSED")
+        )
         .select_related("receipt_file", "suspected_duplicate_receipt",
                         "suspected_duplicate_receipt__bon_de_commande")
     )
@@ -503,7 +503,7 @@ def generate_bon_xlsx(bon) -> bytes:
                 f"« {flag.receipt_file.original_filename} » ↔ "
                 f"« {flag.suspected_duplicate_receipt.original_filename} » "
                 f"(BC {flag.suspected_duplicate_receipt.bon_de_commande.number}) — "
-                f"Confiance : {flag.confidence:.0f}%"
+                f"Confiance : {flag.confidence_percent:.0f}%"
             )
             ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=4)
             cell = ws.cell(row=row, column=1, value=dup_text)

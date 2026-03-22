@@ -142,6 +142,11 @@
                             ⚠️ Le nom du signataire n'a pas pu être associé à un membre de la maison. Veuillez sélectionner le membre manuellement.
                         </div>
                         {% endif %}
+                        {% if signer_roles_ambiguous %}
+                        <div class="message warning" style="margin-bottom: 0.75rem;">
+                            ⚠️ L'attribution acheteur / validateur semble ambiguë. Vérifiez les deux signataires avant de confirmer.
+                        </div>
+                        {% endif %}
 
                         {% if form.expense_member_name.value %}
                         <div class="form-group">
@@ -159,6 +164,45 @@
                             {{ form.expense_member }}
                             {% for error in form.expense_member.errors %}<p class="error-text">{{ error }}</p>{% endfor %}
                         </div>
+
+                        <hr style="margin: 1rem 0; border-top: 1px solid #ddd;">
+                        <div style="display:flex; justify-content:space-between; align-items:center; gap:1rem; flex-wrap:wrap;">
+                            <p style="font-weight: bold; margin-bottom: 0.5rem;">Validé par</p>
+                            {% if form.validator_member_name.value or form.validator_apartment.value or form.validator_member.value or signer_roles_ambiguous %}
+                            <button type="button" id="swap-signers-button" class="btn">
+                                ⇄ Inverser acheteur / validateur
+                            </button>
+                            {% endif %}
+                        </div>
+
+                        {% if validator_member_mismatch %}
+                        <div class="message warning" style="margin-bottom: 0.5rem;">
+                            ⚠️ Le 2e signataire n'a pas pu être associé clairement à un membre de la maison. Veuillez valider la sélection.
+                        </div>
+                        {% endif %}
+
+                        {% if form.validator_member_name.value %}
+                        <div class="form-group">
+                            <label for="{{ form.validator_member_name.id_for_label }}">{{ form.validator_member_name.label }}</label>
+                            {{ form.validator_member_name }}
+                            <small class="text-muted">{{ form.validator_member_name.help_text }}</small>
+                        </div>
+                        {% endif %}
+                        <div class="form-group">
+                            <label for="{{ form.validator_apartment.id_for_label }}">{{ form.validator_apartment.label }}</label>
+                            {{ form.validator_apartment }}
+                        </div>
+                        <div class="form-group {% if form.validator_member.errors %}has-error{% endif %}">
+                            <label for="{{ form.validator_member.id_for_label }}">{{ form.validator_member.label }}</label>
+                            {{ form.validator_member }}
+                            {% for error in form.validator_member.errors %}<p class="error-text">{{ error }}</p>{% endfor %}
+                        </div>
+                        <div class="form-group">
+                            <label for="{{ form.signer_roles_ambiguous.id_for_label }}">{{ form.signer_roles_ambiguous.label }}</label>
+                            {{ form.signer_roles_ambiguous }}
+                            {% if form.signer_roles_ambiguous.help_text %}<small class="text-muted">{{ form.signer_roles_ambiguous.help_text }}</small>{% endif %}
+                        </div>
+                        <p class="text-muted" style="margin-top:0.5rem;">S'il n'y a pas de 2e signataire, la validation sera attribuée au trésorier qui valide le bon.</p>
                     </fieldset>
 
                     {# INVOICE: Linked BC fields #}
@@ -258,16 +302,55 @@
         // Find the document_type select — field name uses the form prefix: receipt_<pk>-document_type
         var docType = document.querySelector('select[name$="-document_type"]');
         if (!docType) return;
+        var prefix = docType.name.replace(/-document_type$/, '');
 
         var memberSection = document.getElementById('member-section');
         var paperBcSection = document.getElementById('paper-bc-section');
         var invoiceSection = document.getElementById('invoice-section');
+        var swapButton = document.getElementById('swap-signers-button');
 
         function toggleSections() {
             var val = docType.value;
             if (memberSection) memberSection.style.display = val === 'receipt' ? '' : 'none';
             if (paperBcSection) paperBcSection.style.display = val === 'paper_bc' ? '' : 'none';
             if (invoiceSection) invoiceSection.style.display = val === 'invoice' ? '' : 'none';
+            if (swapButton) swapButton.style.display = val === 'paper_bc' ? '' : 'none';
+        }
+
+        function fieldBySuffix(suffix) {
+            return document.querySelector('[name="' + prefix + '-' + suffix + '"]');
+        }
+
+        if (swapButton) {
+            swapButton.addEventListener('click', function() {
+                var purchaserName = fieldBySuffix('expense_member_name');
+                var purchaserApartment = fieldBySuffix('expense_apartment');
+                var purchaserMember = fieldBySuffix('expense_member');
+                var validatorName = fieldBySuffix('validator_member_name');
+                var validatorApartment = fieldBySuffix('validator_apartment');
+                var validatorMember = fieldBySuffix('validator_member');
+                var ambiguous = fieldBySuffix('signer_roles_ambiguous');
+
+                if (!purchaserName || !validatorName || !purchaserApartment || !validatorApartment || !purchaserMember || !validatorMember) {
+                    return;
+                }
+
+                var tempValue = purchaserName.value;
+                purchaserName.value = validatorName.value;
+                validatorName.value = tempValue;
+
+                tempValue = purchaserApartment.value;
+                purchaserApartment.value = validatorApartment.value;
+                validatorApartment.value = tempValue;
+
+                tempValue = purchaserMember.value;
+                purchaserMember.value = validatorMember.value;
+                validatorMember.value = tempValue;
+
+                if (ambiguous) {
+                    ambiguous.checked = true;
+                }
+            });
         }
 
         docType.addEventListener('change', toggleSections);

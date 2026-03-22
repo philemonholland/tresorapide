@@ -12,4 +12,5 @@ urlpatterns = [
     path('<int:budget_year_pk>/expenses/', views.ExpenseLedgerView.as_view(), name='expense-ledger'),
     path('<int:budget_year_pk>/expenses/add/', views.ExpenseCreateView.as_view(), name='expense-create'),
     path('expenses/<int:pk>/edit/', views.ExpenseUpdateView.as_view(), name='expense-edit'),
+    path('expenses/<int:pk>/cancel/', views.ExpenseCancelView.as_view(), name='expense-cancel'),
 ]

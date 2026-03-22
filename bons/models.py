@@ -179,6 +179,9 @@ class BonDeCommande(TimeStampedModel, NonDestructiveModel):
             self.approver_name_snapshot = self.approver_member.display_name
             apt = self.approver_apartment
             self.approver_unit_snapshot = apt.code if apt else ""
+        else:
+            self.approver_name_snapshot = ""
+            self.approver_unit_snapshot = ""
         if self.budget_year:
             self.budget_year_label_snapshot = self.budget_year.label
         if self.sub_budget:
@@ -197,6 +200,75 @@ class BonDeCommande(TimeStampedModel, NonDestructiveModel):
         return self.receipt_files.filter(
             ocr_status__in=["CORRECTED"],
         ).count()
+
+    @staticmethod
+    def format_person_label(
+        member=None,
+        apartment=None,
+        *,
+        fallback_name: str = "",
+        fallback_apartment: str = "",
+    ) -> str:
+        """Return a consistent apartment/name label for display."""
+        name = member.display_name if member else (fallback_name or "").strip()
+        apartment_code = apartment.code if apartment else (fallback_apartment or "").strip()
+        if apartment_code and name:
+            return f"{apartment_code} / {name}"
+        return apartment_code or name or "—"
+
+    @property
+    def purchaser_display_label(self) -> str:
+        """Display purchaser as 'apt / name' when possible."""
+        return self.format_person_label(
+            self.purchaser_member,
+            self.purchaser_apartment,
+            fallback_name=self.purchaser_name_snapshot,
+            fallback_apartment=self.purchaser_unit_snapshot,
+        )
+
+    @property
+    def approver_display_label(self) -> str:
+        """Display explicit approver if one is stored on the bon."""
+        return self.format_person_label(
+            self.approver_member,
+            self.approver_apartment,
+            fallback_name=self.approver_name_snapshot,
+            fallback_apartment=self.approver_unit_snapshot,
+        )
+
+    @property
+    def validating_treasurer_display_label(self) -> str:
+        """Display the validating treasurer, using apartment/member when available."""
+        if not self.validated_by:
+            return "—"
+        member = getattr(self.validated_by, "member", None)
+        apartment = member.current_apartment() if member else None
+        fallback_name = (
+            self.validated_by.get_full_name()
+            or getattr(self.validated_by, "username", "")
+        )
+        return self.format_person_label(
+            member,
+            apartment,
+            fallback_name=fallback_name,
+        )
+
+    @property
+    def effective_validator_display_label(self) -> str:
+        """Display approver, or the validating treasurer when no second signer exists."""
+        explicit_label = self.approver_display_label
+        return explicit_label if explicit_label != "—" else self.validating_treasurer_display_label
+
+    @property
+    def signer_roles_ambiguous(self) -> bool:
+        """Whether any linked paper BC extraction flagged purchaser/validator ambiguity."""
+        return self.receipt_files.filter(
+            extracted_fields__final_document_type="paper_bc",
+            extracted_fields__signer_roles_ambiguous_final=True,
+        ).exists() or self.receipt_files.filter(
+            extracted_fields__document_type_candidate="paper_bc",
+            extracted_fields__signer_roles_ambiguous_candidate=True,
+        ).exists()
 
 
 class ReceiptFile(ArchivableModel, NonDestructiveModel):
@@ -304,6 +376,18 @@ class ReceiptExtractedFields(TimeStampedModel):
         max_length=10, blank=True,
         help_text="Appartement de la personne ayant effectué la dépense"
     )
+    validator_member_name_candidate = models.CharField(
+        max_length=200, blank=True,
+        help_text="Nom du 2e signataire qui a validé le BC papier"
+    )
+    validator_apartment_candidate = models.CharField(
+        max_length=10, blank=True,
+        help_text="Appartement du 2e signataire"
+    )
+    signer_roles_ambiguous_candidate = models.BooleanField(
+        default=False,
+        help_text="True si les deux signatures sont ambiguës et doivent être validées manuellement",
+    )
     member_name_candidate = models.CharField(max_length=200, blank=True)
     apartment_number_candidate = models.CharField(max_length=10, blank=True)
     merchant_candidate = models.CharField(max_length=200, blank=True)
@@ -321,6 +405,9 @@ class ReceiptExtractedFields(TimeStampedModel):
     final_supplier_address = models.CharField(max_length=300, blank=True)
     final_expense_member_name = models.CharField(max_length=200, blank=True)
     final_expense_apartment = models.CharField(max_length=10, blank=True)
+    final_validator_member_name = models.CharField(max_length=200, blank=True)
+    final_validator_apartment = models.CharField(max_length=10, blank=True)
+    signer_roles_ambiguous_final = models.BooleanField(default=False)
     final_member_name = models.CharField(max_length=200, blank=True)
     final_apartment_number = models.CharField(max_length=10, blank=True)
     final_merchant = models.CharField(max_length=200, blank=True)
@@ -357,8 +444,22 @@ class DuplicateFlagStatus(models.TextChoices):
     DISMISSED = "DISMISSED", "Rejeté"
 
 
+class DuplicateFlagQuerySet(models.QuerySet):
+    """Query helpers for actionable duplicate warnings."""
+
+    def actionable(self):
+        return self.exclude(status=DuplicateFlagStatus.DISMISSED).exclude(
+            models.Q(receipt_file__bon_de_commande__is_scan_session=True)
+            | models.Q(suspected_duplicate_receipt__bon_de_commande__is_scan_session=True)
+            | models.Q(receipt_file__bon_de_commande__status=BonStatus.VOID)
+            | models.Q(suspected_duplicate_receipt__bon_de_commande__status=BonStatus.VOID)
+        )
+
+
 class DuplicateFlag(TimeStampedModel):
     """Tracks detected duplicate invoices/receipts for audit and export warnings."""
+
+    objects = DuplicateFlagQuerySet.as_manager()
 
     receipt_file = models.ForeignKey(
         ReceiptFile, on_delete=models.PROTECT,
@@ -404,3 +505,9 @@ class DuplicateFlag(TimeStampedModel):
             f"↔ #{self.suspected_duplicate_receipt_id} "
             f"({self.get_status_display()})"
         )
+
+    @property
+    def confidence_percent(self):
+        if self.confidence is None:
+            return None
+        return self.confidence * 100

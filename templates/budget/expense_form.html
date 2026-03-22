@@ -48,5 +48,19 @@
             </div>
             <button type="submit" class="btn btn-primary">{% if object %}Enregistrer{% else %}Ajouter{% endif %}</button>
         </form>
+        {% if object and not object.is_cancellation and not object.is_cancelled and can_manage %}
+            <form method="post" action="{% url 'budget:expense-cancel' object.pk %}" style="margin-top: 1rem;"
+                  onsubmit="return confirm('Êtes-vous sûr de vouloir annuler cette dépense ?\n\nUne entrée d\'annulation sera créée avec un montant négatif de -{{ object.amount|floatformat:2 }} $.');">
+                {% csrf_token %}
+                <button type="submit" class="btn" style="background: var(--negative, #c0392b); color: white;">
+                    🗑 Annuler cette dépense
+                </button>
+            </form>
+        {% endif %}
+        {% if object and object.is_cancelled %}
+            <p style="margin-top: 1rem; color: var(--negative, #c0392b); font-weight: bold;">
+                ⚠ Cette dépense a été annulée.
+            </p>
+        {% endif %}
     </section>
 {% endblock %}

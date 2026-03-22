@@ -73,6 +73,9 @@ Retourne UNIQUEMENT un tableau JSON. Chaque élément = un document distinct:
     "supplier_address": "Adresse du fournisseur",
     "expense_member_name": "Nom de la personne ayant effectué la dépense",
     "expense_apartment": "202",
+    "validator_member_name": "Nom du 2e signataire",
+    "validator_apartment": "203",
+    "signer_roles_ambiguous": false,
     "member_name": "",
     "apartment_number": "",
     "merchant": "",
@@ -103,6 +106,12 @@ section signature. C'est la personne qui a effectué la dépense. Laisser "" si 
 non visible ou pour les autres types.
 - expense_apartment: pour "paper_bc" — le numéro d'appartement de la personne \
 ayant effectué la dépense, s'il est visible sur le bon. Laisser "" si absent.
+- validator_member_name: pour "paper_bc" — s'il y a une DEUXIÈME signature qui \
+valide l'achat, le nom de cette personne. Sinon "".
+- validator_apartment: pour "paper_bc" — l'appartement du 2e signataire si \
+visible. Sinon "".
+- signer_roles_ambiguous: pour "paper_bc" — true s'il y a deux signatures mais \
+qu'il est ambigu lequel est l'acheteur vs lequel valide l'achat; false sinon.
 - member_name: pour "receipt" seulement — le nom écrit à la main par le membre. \
 Si complètement illisible, utilise "ILLISIBLE".
 - apartment_number: pour "receipt" seulement — le numéro d'appartement manuscrit \
@@ -133,6 +142,69 @@ class ReceiptOcrService:
         if not OPENAI_AVAILABLE:
             return False
         return bool(getattr(settings, "OPENAI_API_KEY", ""))
+
+    @staticmethod
+    def _build_member_directory(house) -> list[str]:
+        """Return canonical member/apartment lines for the OCR prompt."""
+        if not house:
+            return []
+
+        from members.models import Residency
+
+        residencies = (
+            Residency.objects
+            .filter(
+                apartment__house=house,
+                apartment__is_active=True,
+                end_date__isnull=True,
+                member__is_active=True,
+            )
+            .select_related("member", "apartment")
+            .order_by("apartment__code", "member__last_name", "member__first_name")
+        )
+
+        lines = []
+        seen = set()
+        for residency in residencies:
+            member_name = (residency.member.display_name or "").strip()
+            apartment_code = (residency.apartment.code or "").strip()
+            if not member_name:
+                continue
+            key = (member_name.casefold(), apartment_code)
+            if key in seen:
+                continue
+            seen.add(key)
+            if apartment_code:
+                lines.append(f"Appartement {apartment_code}: {member_name}")
+            else:
+                lines.append(member_name)
+        return lines
+
+    @classmethod
+    def _build_batch_prompt(cls, house=None) -> str:
+        """Build the OCR prompt, optionally enriched with the house member directory."""
+        prompt = RECEIPT_BATCH_PROMPT.rstrip()
+        member_lines = cls._build_member_directory(house)
+        if not member_lines:
+            return prompt
+
+        member_directory = "\n".join(f"- {line}" for line in member_lines)
+        return (
+            f"{prompt}\n\n"
+            "RÉPERTOIRE OFFICIEL DES MEMBRES ACTIFS DE LA MAISON:\n"
+            f"{member_directory}\n\n"
+            "Normalisation des noms de membres:\n"
+            "- Quand un document mentionne un membre (member_name, expense_member_name, "
+            "validator_member_name), compare avec ce répertoire.\n"
+            "- Si le nom OCR ressemble clairement à un membre du répertoire malgré une "
+            "variation mineure (accent manquant, lettre en moins/en trop, OCR approximatif), "
+            "retourne EXACTEMENT le nom officiel du répertoire dans le JSON.\n"
+            "- Si un appartement du document permet d'identifier un membre du répertoire, "
+            "retourne aussi l'appartement officiel du répertoire dans apartment_number, "
+            "expense_apartment ou validator_apartment.\n"
+            "- N'invente jamais un membre absent du répertoire. Si aucun match crédible "
+            "n'existe, conserve le texte lu tel quel.\n"
+        )
 
     # ── Composite image builder ──────────────────────────────────────────
 
@@ -258,7 +330,7 @@ class ReceiptOcrService:
         return batches
 
     @classmethod
-    def _analyze_single_batch(cls, file_map: dict[str, str]) -> list[dict]:
+    def _analyze_single_batch(cls, file_map: dict[str, str], house=None) -> list[dict]:
         """Send one composite image to OpenAI and return parsed results."""
         composite_bytes, page_labels = cls._build_composite_image(file_map)
         image_b64 = base64.b64encode(composite_bytes).decode("utf-8")
@@ -266,11 +338,12 @@ class ReceiptOcrService:
 
         client = OpenAI(api_key=settings.OPENAI_API_KEY)
         model = _get_openai_model()
+        prompt = cls._build_batch_prompt(house)
 
         response = client.chat.completions.create(
             model=model,
             messages=[
-                {"role": "system", "content": RECEIPT_BATCH_PROMPT},
+                {"role": "system", "content": prompt},
                 {
                     "role": "user",
                     "content": [
@@ -302,7 +375,7 @@ class ReceiptOcrService:
         return cls._parse_batch_response(raw, list(file_map.keys()))
 
     @classmethod
-    def analyze_batch(cls, file_map: dict[str, str]) -> list[dict]:
+    def analyze_batch(cls, file_map: dict[str, str], house=None) -> list[dict]:
         """
         Analyze receipts/PDFs via OpenAI Vision API.
         Automatically splits into sub-batches of MAX_PAGES_PER_BATCH pages
@@ -315,7 +388,7 @@ class ReceiptOcrService:
         all_results = []
 
         for sub_map in batches:
-            results = cls._analyze_single_batch(sub_map)
+            results = cls._analyze_single_batch(sub_map, house=house)
             all_results.extend(results)
 
         # Ensure every input filename has at least one result
@@ -349,6 +422,14 @@ class ReceiptOcrService:
         except (ValueError, TypeError):
             return None
 
+    @staticmethod
+    def _safe_bool(value) -> bool:
+        if isinstance(value, bool):
+            return value
+        if value is None:
+            return False
+        return str(value).strip().lower() in {"1", "true", "yes", "oui"}
+
     @classmethod
     def _parse_one(cls, data: dict) -> dict:
         """Parse a single document entry from the GPT JSON response."""
@@ -361,6 +442,9 @@ class ReceiptOcrService:
             "supplier_address": str(data.get("supplier_address") or "").strip(),
             "expense_member_name": str(data.get("expense_member_name") or "").strip(),
             "expense_apartment": str(data.get("expense_apartment") or "").strip(),
+            "validator_member_name": str(data.get("validator_member_name") or "").strip(),
+            "validator_apartment": str(data.get("validator_apartment") or "").strip(),
+            "signer_roles_ambiguous": cls._safe_bool(data.get("signer_roles_ambiguous", False)),
             "member_name": str(data.get("member_name") or "").strip(),
             "apartment_number": str(data.get("apartment_number") or "").strip(),
             "merchant": str(data.get("merchant") or ""),
@@ -445,6 +529,9 @@ class ReceiptOcrService:
             "supplier_address": "",
             "expense_member_name": "",
             "expense_apartment": "",
+            "validator_member_name": "",
+            "validator_apartment": "",
+            "signer_roles_ambiguous": False,
             "member_name": "",
             "apartment_number": "",
             "merchant": "",
@@ -459,7 +546,7 @@ class ReceiptOcrService:
     # ── Batch processing pipeline ────────────────────────────────────────
 
     @classmethod
-    def process_receipts_batch(cls, receipt_file_objs: list) -> tuple[list[dict], str]:
+    def process_receipts_batch(cls, receipt_file_objs: list, house=None) -> tuple[list[dict], str]:
         """
         Process multiple ReceiptFile objects in a single API call.
         Returns (list_of_results, error_message).
@@ -494,8 +581,15 @@ class ReceiptOcrService:
                 r.save(update_fields=["ocr_status", "ocr_raw_text"])
             return empties, msg
 
+        if house is None:
+            for receipt_obj in receipt_file_objs:
+                bon = getattr(receipt_obj, "bon_de_commande", None)
+                if bon and getattr(bon, "house", None):
+                    house = bon.house
+                    break
+
         try:
-            results = cls.analyze_batch(file_map)
+            results = cls.analyze_batch(file_map, house=house)
 
             # Group results by source_filename (one file may produce multiple docs)
             from collections import defaultdict
@@ -538,6 +632,9 @@ class ReceiptOcrService:
                         "supplier_address_candidate": primary.get("supplier_address", ""),
                         "expense_member_name_candidate": primary.get("expense_member_name", ""),
                         "expense_apartment_candidate": primary.get("expense_apartment", ""),
+                        "validator_member_name_candidate": primary.get("validator_member_name", ""),
+                        "validator_apartment_candidate": primary.get("validator_apartment", ""),
+                        "signer_roles_ambiguous_candidate": primary.get("signer_roles_ambiguous", False),
                         "member_name_candidate": primary.get("member_name", ""),
                         "apartment_number_candidate": primary.get("apartment_number", ""),
                         "merchant_candidate": primary.get("merchant", ""),
@@ -607,6 +704,26 @@ class DuplicateDetectionService:
     """Detect duplicate invoices/receipts using totals comparison and GPT Vision."""
 
     @staticmethod
+    def _normalize_confidence(value) -> float:
+        """Normalize GPT confidence to a 0.0-1.0 float."""
+        if value is None:
+            return 0.0
+        try:
+            if isinstance(value, str):
+                value = value.strip().rstrip("%")
+            confidence = float(value)
+        except (TypeError, ValueError):
+            return 0.0
+
+        if confidence > 1.0 and confidence <= 100.0:
+            confidence = confidence / 100.0
+        if confidence < 0.0:
+            return 0.0
+        if confidence > 1.0:
+            return 1.0
+        return confidence
+
+    @staticmethod
     def find_matching_totals(receipt_file, house, lookback_years=2):
         """
         Find existing receipts in the same house with matching final_total.
@@ -615,7 +732,7 @@ class DuplicateDetectionService:
         from django.db import models as db_models
         from django.utils import timezone as tz
         from datetime import timedelta
-        from .models import ReceiptExtractedFields, OcrStatus as OS
+        from .models import ReceiptExtractedFields, OcrStatus as OS, BonStatus
 
         try:
             ef = receipt_file.extracted_fields
@@ -634,8 +751,10 @@ class DuplicateDetectionService:
                 receipt_file__bon_de_commande__house=house,
                 receipt_file__created_at__gte=cutoff,
                 receipt_file__ocr_status__in=[OS.EXTRACTED, OS.CORRECTED],
+                receipt_file__bon_de_commande__is_scan_session=False,
             )
             .exclude(receipt_file_id=receipt_file.pk)
+            .exclude(receipt_file__bon_de_commande__status=BonStatus.VOID)
             .filter(
                 db_models.Q(final_total=target_total)
                 | db_models.Q(total_candidate=target_total)
@@ -761,9 +880,10 @@ class DuplicateDetectionService:
                 raw = raw.split("```")[1].split("```")[0].strip()
 
             result = json.loads(raw)
+            confidence = cls._normalize_confidence(result.get("confidence", 0.0))
             return {
                 "is_same_purchase": bool(result.get("is_same_purchase", False)),
-                "confidence": float(result.get("confidence", 0.0)),
+                "confidence": confidence,
                 "reasoning": str(result.get("reasoning", "")),
             }
 

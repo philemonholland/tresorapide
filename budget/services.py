@@ -101,7 +101,16 @@ class BudgetCalculationService:
 
         expenses = Expense.objects.filter(
             budget_year=budget_year
-        ).select_related("sub_budget").order_by("entry_date", "created_at", "id")
+        ).select_related(
+            "sub_budget",
+            "bon_de_commande",
+            "bon_de_commande__purchaser_member",
+            "bon_de_commande__purchaser_apartment",
+            "bon_de_commande__approver_member",
+            "bon_de_commande__approver_apartment",
+            "bon_de_commande__validated_by",
+            "bon_de_commande__validated_by__member",
+        ).order_by("entry_date", "created_at", "id")
 
         result = []
         cumulative = Decimal("0")

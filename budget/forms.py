@@ -103,7 +103,7 @@ class ExpenseForm(forms.ModelForm):
             "notes": "Notes",
         }
         widgets = {
-            "entry_date": forms.DateInput(attrs={"type": "date"}),
+            "entry_date": forms.DateInput(format="%Y-%m-%d", attrs={"type": "date"}),
             "description": forms.TextInput(attrs={"placeholder": "ex : Achat de sel de déglaçage"}),
             "amount": forms.NumberInput(attrs={"step": "0.01", "placeholder": "0.00"}),
             "bon_number": forms.TextInput(attrs={"placeholder": "Optionnel"}),

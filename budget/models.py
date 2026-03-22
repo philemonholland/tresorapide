@@ -1,4 +1,3 @@
-from django.core.validators import MinValueValidator
 from django.db import models
 from django.core.exceptions import ValidationError
 from core.models import TimeStampedModel
@@ -152,6 +151,7 @@ class Expense(TimeStampedModel):
     """
     A single entry in the budget ledger. Can be linked to a BonDeCommande
     (member purchase) or standalone (gestionnaire direct expense / GL import).
+    Cancellations are stored as reversal rows with a negative amount.
     """
     budget_year = models.ForeignKey(
         BudgetYear, on_delete=models.PROTECT, related_name="expenses"
@@ -178,10 +178,7 @@ class Expense(TimeStampedModel):
         max_length=200,
         help_text="ex : '202 / Marylin' ou 'BB' ou nom du fournisseur"
     )
-    amount = models.DecimalField(
-        max_digits=10, decimal_places=2,
-        validators=[MinValueValidator(0, message="Le montant ne peut pas être négatif.")],
-    )
+    amount = models.DecimalField(max_digits=10, decimal_places=2)
     source_type = models.CharField(
         max_length=20, choices=ExpenseSourceType.choices,
         default=ExpenseSourceType.BON_DE_COMMANDE
@@ -189,6 +186,15 @@ class Expense(TimeStampedModel):
     entered_by = models.ForeignKey(
         "accounts.User", on_delete=models.SET_NULL,
         null=True, blank=True, related_name="entered_expenses"
+    )
+    is_cancellation = models.BooleanField(
+        default=False,
+        help_text="Vrai si cette entrée est une annulation d'une dépense précédente"
+    )
+    reversal_of = models.ForeignKey(
+        "self", on_delete=models.SET_NULL,
+        null=True, blank=True, related_name="reversals",
+        help_text="La dépense originale que cette entrée annule"
     )
     notes = models.TextField(blank=True)
 
@@ -205,10 +211,33 @@ class Expense(TimeStampedModel):
                 raise ValidationError(
                     "Le sous-budget doit appartenir à la même année budgétaire."
                 )
+        if not self.is_cancellation and self.amount is not None and self.amount < 0:
+            raise ValidationError(
+                "Le montant ne peut pas être négatif (sauf pour les annulations)."
+            )
 
     def save(self, *args, **kwargs):
         self.full_clean()
         super().save(*args, **kwargs)
+
+    @property
+    def is_cancelled(self):
+        """True if a reversal entry exists for this expense."""
+        return self.reversals.exists()
+
+    @property
+    def display_spent_by_label(self) -> str:
+        """Show bon purchaser label when available, otherwise stored label."""
+        if self.bon_de_commande_id:
+            return self.bon_de_commande.purchaser_display_label
+        return self.spent_by_label or "—"
+
+    @property
+    def display_approved_by_label(self) -> str:
+        """Show bon approver/treasurer label when available."""
+        if self.bon_de_commande_id:
+            return self.bon_de_commande.effective_validator_display_label
+        return "—"
 
     def __str__(self):
         return f"{self.entry_date} · {self.description[:50]} · ${self.amount}"

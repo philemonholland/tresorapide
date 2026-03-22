@@ -28,7 +28,8 @@ class BonDeCommandeForm(forms.ModelForm):
             "budget_year", "purchase_date", "short_description",
             "merchant_name", "supplier_name", "work_or_delivery_location",
             "sub_budget", "subtotal", "tps", "tvq", "total",
-            "purchaser_member", "purchaser_apartment", "approver_member",
+            "purchaser_member", "purchaser_apartment",
+            "approver_member", "approver_apartment",
             "notes",
         ]
         labels = {
@@ -46,6 +47,7 @@ class BonDeCommandeForm(forms.ModelForm):
             "purchaser_member": "Acheteur (membre)",
             "purchaser_apartment": "Appartement de l'acheteur",
             "approver_member": "Approbateur",
+            "approver_apartment": "Appartement du validateur",
             "notes": "Notes",
         }
         widgets = {
@@ -66,7 +68,7 @@ class BonDeCommandeForm(forms.ModelForm):
                         "sub_budget", "purchaser_member", "budget_year")
     DETAIL_FIELDS = ("merchant_name", "supplier_name", "work_or_delivery_location",
                      "subtotal", "tps", "tvq",
-                     "purchaser_apartment", "approver_member", "notes")
+                     "purchaser_apartment", "approver_member", "approver_apartment", "notes")
 
     def __init__(self, *args, house=None, **kwargs):
         self.house = house
@@ -83,6 +85,9 @@ class BonDeCommandeForm(forms.ModelForm):
                 budget_year__house=house, is_active=True
             ).order_by("budget_year", "sort_order", "trace_code")
             self.fields["purchaser_apartment"].queryset = house.apartments.filter(
+                is_active=True
+            )
+            self.fields["approver_apartment"].queryset = house.apartments.filter(
                 is_active=True
             )
         else:
@@ -213,6 +218,27 @@ class OcrReviewForm(forms.Form):
         label="Membre ayant effectué la dépense",
         empty_label="-- Choisir un membre --",
     )
+    validator_member_name = forms.CharField(
+        max_length=200, required=False,
+        label="Validé par (signataire)",
+        widget=forms.TextInput(attrs={"readonly": "readonly", "class": "text-muted"}),
+        help_text="Nom extrait du 2e signataire (lecture seule)",
+    )
+    validator_apartment = forms.CharField(
+        max_length=10, required=False,
+        label="Appartement du validateur",
+    )
+    validator_member = forms.ModelChoiceField(
+        queryset=Member.objects.none(),
+        required=False,
+        label="Membre ayant validé",
+        empty_label="-- Choisir un membre --",
+    )
+    signer_roles_ambiguous = forms.BooleanField(
+        required=False,
+        label="Attribution acheteur / validateur ambiguë",
+        help_text="Cochez si les deux signatures doivent être validées manuellement.",
+    )
 
     member_name_raw = forms.CharField(
         max_length=200, required=False,
@@ -293,6 +319,18 @@ class OcrReviewForm(forms.Form):
         if doc_type == "paper_bc":
             if not cleaned.get("bc_number"):
                 self.add_error("bc_number", "Le numéro de BC est requis pour un bon de commande papier.")
+            if not cleaned.get("expense_member"):
+                self.add_error(
+                    "expense_member",
+                    "Le membre ayant effectué la dépense est requis pour un bon de commande papier.",
+                )
+            expense_member = cleaned.get("expense_member")
+            validator_member = cleaned.get("validator_member")
+            if expense_member and validator_member and expense_member == validator_member:
+                self.add_error(
+                    "validator_member",
+                    "Le validateur doit être différent de la personne qui a effectué la dépense.",
+                )
 
         if doc_type == "invoice":
             if not cleaned.get("associated_bc_number"):

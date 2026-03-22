@@ -1,10 +1,13 @@
 from decimal import Decimal
 
+from django.contrib import messages
 from django.core.exceptions import PermissionDenied
 from django.http import HttpResponseRedirect
 from django.urls import reverse_lazy, reverse
+from django.utils import timezone
+from django.views import View
 from django.views.generic import ListView, DetailView, CreateView, UpdateView
-from django.shortcuts import get_object_or_404
+from django.shortcuts import get_object_or_404, redirect
 
 from accounts.access import RoleRequiredMixin, TreasurerRequiredMixin, check_house_permission
 from .models import BudgetYear, SubBudget, Expense
@@ -96,6 +99,9 @@ class BudgetYearDetailView(RoleRequiredMixin, DetailView):
                 ReceiptFile.objects.filter(
                     bon_de_commande_id__in=bon_ids_with_dup,
                     duplicate_flags__status__in=["PENDING", "CONFIRMED_DUPLICATE"],
+                    duplicate_flags__suspected_duplicate_receipt__bon_de_commande__is_scan_session=False,
+                ).exclude(
+                    duplicate_flags__suspected_duplicate_receipt__bon_de_commande__status="VOID",
                 ).values_list("bon_de_commande_id", flat=True).distinct()
             )
         else:
@@ -494,7 +500,59 @@ class ExpenseUpdateView(TreasurerRequiredMixin, UpdateView):
     def get_context_data(self, **kwargs):
         ctx = super().get_context_data(**kwargs)
         ctx["budget_year"] = self.object.budget_year
+        ctx["can_manage"] = (
+            self.request.user.is_authenticated
+            and self.request.user.can_manage_financials
+        )
         return ctx
 
     def get_success_url(self):
         return reverse("budget:expense-ledger", kwargs={"budget_year_pk": self.object.budget_year.pk})
+
+
+class ExpenseCancelView(TreasurerRequiredMixin, View):
+    """Cancel an expense by creating a reversal entry with negative amount."""
+
+    def post(self, request, pk):
+        expense = get_object_or_404(Expense, pk=pk)
+        check_house_permission(request.user, expense.budget_year.house)
+
+        # Cannot cancel a cancellation entry itself
+        if expense.is_cancellation:
+            messages.error(request, "Impossible d'annuler une entrée d'annulation.")
+            return redirect(
+                reverse("budget:expense-ledger", kwargs={"budget_year_pk": expense.budget_year.pk})
+            )
+
+        # Cannot cancel if already cancelled
+        if expense.is_cancelled:
+            messages.warning(request, "Cette dépense a déjà été annulée.")
+            return redirect(
+                reverse("budget:expense-ledger", kwargs={"budget_year_pk": expense.budget_year.pk})
+            )
+
+        # Create the reversal entry
+        Expense.objects.create(
+            budget_year=expense.budget_year,
+            sub_budget=expense.sub_budget,
+            bon_de_commande=expense.bon_de_commande,
+            entry_date=timezone.now().date(),
+            description=f"[ANNULATION] {expense.description}",
+            bon_number=expense.bon_number,
+            supplier_name=expense.supplier_name,
+            spent_by_label=expense.spent_by_label,
+            amount=-expense.amount,
+            source_type=expense.source_type,
+            entered_by=request.user,
+            is_cancellation=True,
+            reversal_of=expense,
+            notes=f"Annulation de la dépense #{expense.pk} par {request.user.get_full_name() or request.user.username}",
+        )
+
+        messages.success(
+            request,
+            f"La dépense « {expense.description} » ({expense.amount:.2f} $) a été annulée."
+        )
+        return redirect(
+            reverse("budget:expense-ledger", kwargs={"budget_year_pk": expense.budget_year.pk})
+        )

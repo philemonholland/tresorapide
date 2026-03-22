@@ -6,6 +6,7 @@ from django.views.generic.edit import FormView
 from django.contrib import messages
 from django.template.response import TemplateResponse
 from collections import defaultdict
+from decimal import Decimal, InvalidOperation
 from difflib import SequenceMatcher
 import json
 import unicodedata
@@ -19,6 +20,10 @@ from .forms import (
     MultiReceiptUploadForm, OcrReviewForm, BonSearchForm,
 )
 from .services import generate_bon_number
+
+MONEY_EPSILON = Decimal("0.01")
+STANDARD_TPS_RATE = Decimal("0.05")
+STANDARD_TVQ_RATE = Decimal("0.09975")
 
 
 def _normalize_name(name: str) -> str:
@@ -47,6 +52,28 @@ def _names_match(ocr_name: str, member_name: str, threshold: float = 0.80) -> bo
         return True
     # Fuzzy ratio
     return SequenceMatcher(None, a, b).ratio() >= threshold
+
+
+def _get_house_members_queryset(house):
+    """Return active members currently residing in the given house."""
+    from members.models import Member, Residency
+
+    house_member_ids = Residency.objects.filter(
+        apartment__house=house, end_date__isnull=True,
+    ).values_list("member_id", flat=True)
+    return Member.objects.filter(
+        pk__in=house_member_ids, is_active=True,
+    ).order_by("last_name", "first_name")
+
+
+def _match_member_by_name(house, signer_name: str):
+    """Match a signer name against active house members, accent-insensitively."""
+    if not signer_name or signer_name.upper() == "ILLISIBLE":
+        return None
+    for member in _get_house_members_queryset(house):
+        if _names_match(signer_name, member.display_name):
+            return member
+    return None
 
 
 def _filter_by_house(qs, user):
@@ -103,7 +130,8 @@ class BonDetailView(RoleRequiredMixin, DetailView):
         ).select_related(
             "house", "budget_year", "sub_budget",
             "purchaser_member", "purchaser_apartment",
-            "approver_member", "created_by", "validated_by",
+            "approver_member", "approver_apartment",
+            "created_by", "validated_by", "validated_by__member",
         )
 
     def get_context_data(self, **kwargs):
@@ -119,13 +147,14 @@ class BonDetailView(RoleRequiredMixin, DetailView):
         )
         ctx["upload_form"] = ReceiptUploadForm()
         ctx["export_ready"] = _bon_is_export_ready(bon)
+        ctx["signer_roles_ambiguous"] = bon.signer_roles_ambiguous
 
         # Duplicate flags for any receipt on this bon
         receipt_ids = list(bon.receipt_files.values_list("pk", flat=True))
         ctx["duplicate_flags"] = list(
-            DuplicateFlag.objects.filter(
+            DuplicateFlag.objects.actionable().filter(
                 receipt_file_id__in=receipt_ids,
-            ).exclude(status="DISMISSED")
+            )
             .select_related(
                 "receipt_file", "suspected_duplicate_receipt",
                 "suspected_duplicate_receipt__bon_de_commande",
@@ -257,6 +286,42 @@ class BonUpdateView(TreasurerRequiredMixin, UpdateView):
         return reverse("bons:detail", kwargs={"pk": self.object.pk})
 
 
+class BonSwapSignersView(TreasurerRequiredMixin, View):
+    """Swap purchaser and approver roles on an existing bon in one click."""
+
+    def post(self, request, pk):
+        bon = get_object_or_404(
+            _filter_by_house(BonDeCommande.objects.all(), request.user),
+            pk=pk,
+        )
+        if not bon.approver_member_id:
+            messages.error(request, "Aucun 2e signataire à échanger pour ce bon.")
+            return redirect(reverse("bons:detail", kwargs={"pk": bon.pk}))
+
+        (
+            bon.purchaser_member_id,
+            bon.approver_member_id,
+        ) = (
+            bon.approver_member_id,
+            bon.purchaser_member_id,
+        )
+        (
+            bon.purchaser_apartment_id,
+            bon.approver_apartment_id,
+        ) = (
+            bon.approver_apartment_id,
+            bon.purchaser_apartment_id,
+        )
+        bon.refresh_snapshot_fields()
+        bon.save()
+        bon.expenses.update(spent_by_label=bon.purchaser_display_label)
+        messages.warning(
+            request,
+            "Les rôles acheteur / validateur ont été échangés. Veuillez confirmer l'attribution.",
+        )
+        return redirect(reverse("bons:detail", kwargs={"pk": bon.pk}))
+
+
 class BonValidateView(TreasurerRequiredMixin, FormView):
     template_name = "bons/validate_confirm.html"
     form_class = BonValidateForm
@@ -271,6 +336,24 @@ class BonValidateView(TreasurerRequiredMixin, FormView):
     def get_context_data(self, **kwargs):
         ctx = super().get_context_data(**kwargs)
         ctx["bon"] = self.bon
+        return ctx
+
+    def get_context_data(self, **kwargs):
+        ctx = super().get_context_data(**kwargs)
+        ctx["bon"] = self.bon
+        # Show how many bons still need validation in the same house/year
+        pending_count = (
+            BonDeCommande.objects
+            .filter(
+                house=self.bon.house,
+                budget_year=self.bon.budget_year,
+                is_scan_session=False,
+                status__in=[BonStatus.READY_FOR_VALIDATION, BonStatus.READY_FOR_REVIEW],
+            )
+            .exclude(pk=self.bon.pk)
+            .count()
+        )
+        ctx["pending_validation_count"] = pending_count
         return ctx
 
     def form_valid(self, form):
@@ -298,21 +381,38 @@ class BonValidateView(TreasurerRequiredMixin, FormView):
                 entry_date=bon.purchase_date or timezone.now().date(),
                 description=bon.short_description or f"BC {bon.number}",
                 bon_number=bon.number,
-                supplier_name=bon.merchant_name or "",
-                spent_by_label=(
-                    f"{bon.purchaser_member.display_name}"
-                    if bon.purchaser_member else bon.purchaser_name_snapshot or "—"
-                ),
+                supplier_name=bon.supplier_name or bon.merchant_name or "",
+                spent_by_label=bon.purchaser_display_label,
                 amount=bon.total,
                 source_type=ExpenseSourceType.BON_DE_COMMANDE,
                 entered_by=self.request.user,
             )
 
-        messages.success(self.request, f"Le bon {bon.number} a été validé.")
+        messages.success(self.request, f"Le bon {bon.number} a été validé et ajouté à la grille de dépenses.")
+
+        # Redirect to the next bon awaiting validation in the same house/year
+        next_bon = (
+            BonDeCommande.objects
+            .filter(
+                house=bon.house,
+                budget_year=bon.budget_year,
+                is_scan_session=False,
+                status__in=[BonStatus.READY_FOR_VALIDATION, BonStatus.READY_FOR_REVIEW],
+            )
+            .order_by("created_at", "pk")
+            .first()
+        )
+        if next_bon:
+            messages.info(
+                self.request,
+                f"Prochain bon à valider : BC {next_bon.number}."
+            )
+            return redirect(reverse("bons:detail", kwargs={"pk": next_bon.pk}))
+
         return redirect(self.get_success_url())
 
     def get_success_url(self):
-        return reverse("bons:detail", kwargs={"pk": self.bon.pk})
+        return reverse("bons:list")
 
 
 class ReceiptUploadToExistingView(TreasurerRequiredMixin, View):
@@ -340,7 +440,7 @@ class ReceiptUploadToExistingView(TreasurerRequiredMixin, View):
         # Run GPT Vision OCR (same as scan session flow)
         from .ocr_service import ReceiptOcrService
         if ReceiptOcrService.is_available():
-            _, err = ReceiptOcrService.process_receipts_batch([receipt])
+            _, err = ReceiptOcrService.process_receipts_batch([receipt], house=bon.house)
             if err:
                 messages.warning(request, err)
         else:
@@ -364,13 +464,13 @@ class ReceiptReviewSingleView(TreasurerRequiredMixin, View):
     template_name = "bons/receipt_review_single.html"
 
     def _get_context(self, request, bon, receipt):
-        from members.models import Member, Residency
         from budget.models import SubBudget
 
         initial = {}
         matched_member_name = ""
         name_mismatch = False
         expense_member_mismatch = False
+        validator_member_mismatch = False
         doc_type = "receipt"
 
         try:
@@ -379,13 +479,15 @@ class ReceiptReviewSingleView(TreasurerRequiredMixin, View):
             apt_code = ef.final_apartment_number or ef.apartment_number_candidate
             member_name_raw = ef.final_member_name or ef.member_name_candidate
 
-            member = None
-            if apt_code:
-                _, member = _match_member_for_apartment(bon.house, apt_code)
-                if member:
-                    matched_member_name = member.display_name
-                    initial["matched_member_id"] = member.pk
-                    initial["purchaser_member"] = member.pk
+            apartment, member = _resolve_member_assignment(
+                bon.house, apt_code, member_name_raw,
+            )
+            if apartment:
+                apt_code = apartment.code
+            if member:
+                matched_member_name = member.display_name
+                initial["matched_member_id"] = member.pk
+                initial["purchaser_member"] = member.pk
 
             name_unreadable = not member_name_raw or member_name_raw.upper() == "ILLISIBLE"
             if member and member_name_raw and not name_unreadable:
@@ -411,31 +513,10 @@ class ReceiptReviewSingleView(TreasurerRequiredMixin, View):
 
             # Expense member fields (paper BC)
             if doc_type == "paper_bc":
-                exp_name = ef.final_expense_member_name or ef.expense_member_name_candidate or ""
-                exp_apt = ef.final_expense_apartment or ef.expense_apartment_candidate or ""
-                initial["expense_member_name"] = exp_name
-                initial["expense_apartment"] = exp_apt
-
-                # Try to auto-match expense member
-                if exp_apt:
-                    _, exp_member = _match_member_for_apartment(bon.house, exp_apt)
-                    if exp_member:
-                        initial["expense_member"] = exp_member.pk
-                        if exp_name and not _names_match(exp_name, exp_member.display_name):
-                            expense_member_mismatch = True
-                    else:
-                        expense_member_mismatch = True
-                elif exp_name:
-                    # Try fuzzy name match
-                    house_member_ids = Residency.objects.filter(
-                        apartment__house=bon.house, end_date__isnull=True,
-                    ).values_list("member_id", flat=True)
-                    for m in Member.objects.filter(pk__in=house_member_ids, is_active=True):
-                        if _names_match(exp_name, m.display_name):
-                            initial["expense_member"] = m.pk
-                            break
-                    else:
-                        expense_member_mismatch = True
+                signer_initials, expense_member_mismatch, validator_member_mismatch, _, _ = (
+                    _paper_bc_signer_initials(bon.house, ef)
+                )
+                initial.update(signer_initials)
 
             # Pre-select existing bon's sub_budget if not set in extracted data
             if ef.sub_budget_id:
@@ -449,14 +530,10 @@ class ReceiptReviewSingleView(TreasurerRequiredMixin, View):
         prefix = f"receipt_{receipt.pk}"
         form = OcrReviewForm(prefix=prefix, initial=initial)
 
-        house_member_ids = Residency.objects.filter(
-            apartment__house=bon.house, end_date__isnull=True,
-        ).values_list("member_id", flat=True)
-        members_qs = Member.objects.filter(
-            pk__in=house_member_ids, is_active=True,
-        ).order_by("last_name", "first_name")
+        members_qs = _get_house_members_queryset(bon.house)
         form.fields["purchaser_member"].queryset = members_qs
         form.fields["expense_member"].queryset = members_qs
+        form.fields["validator_member"].queryset = members_qs
         form.fields["sub_budget"].queryset = SubBudget.objects.filter(
             budget_year=bon.budget_year, is_active=True,
         ).order_by("sort_order", "trace_code")
@@ -470,8 +547,10 @@ class ReceiptReviewSingleView(TreasurerRequiredMixin, View):
             "matched_member_name": matched_member_name,
             "name_mismatch": name_mismatch,
             "expense_member_mismatch": expense_member_mismatch,
+            "validator_member_mismatch": validator_member_mismatch,
             "document_type": doc_type,
             "mismatch_warning": mismatch_warning,
+            "signer_roles_ambiguous": bool(initial.get("signer_roles_ambiguous")),
         }
 
     def get(self, request, bon_pk, receipt_pk):
@@ -483,7 +562,6 @@ class ReceiptReviewSingleView(TreasurerRequiredMixin, View):
         return TemplateResponse(request, self.template_name, ctx)
 
     def post(self, request, bon_pk, receipt_pk):
-        from members.models import Member, Residency
         from budget.models import SubBudget
 
         bon = get_object_or_404(
@@ -493,14 +571,10 @@ class ReceiptReviewSingleView(TreasurerRequiredMixin, View):
 
         prefix = f"receipt_{receipt.pk}"
         form = OcrReviewForm(data=request.POST, prefix=prefix)
-        house_member_ids = Residency.objects.filter(
-            apartment__house=bon.house, end_date__isnull=True,
-        ).values_list("member_id", flat=True)
-        members_qs = Member.objects.filter(
-            pk__in=house_member_ids, is_active=True,
-        ).order_by("last_name", "first_name")
+        members_qs = _get_house_members_queryset(bon.house)
         form.fields["purchaser_member"].queryset = members_qs
         form.fields["expense_member"].queryset = members_qs
+        form.fields["validator_member"].queryset = members_qs
         form.fields["sub_budget"].queryset = SubBudget.objects.filter(
             budget_year=bon.budget_year, is_active=True,
         ).order_by("sort_order", "trace_code")
@@ -513,15 +587,13 @@ class ReceiptReviewSingleView(TreasurerRequiredMixin, View):
 
         # Save confirmed fields
         selected_member = form.cleaned_data.get("purchaser_member")
-        expense_member = form.cleaned_data.get("expense_member")
         ef, _ = ReceiptExtractedFields.objects.get_or_create(receipt_file=receipt)
         ef.final_document_type = form.cleaned_data.get("document_type") or ""
         ef.final_bc_number = form.cleaned_data.get("bc_number") or ""
         ef.final_associated_bc_number = form.cleaned_data.get("associated_bc_number") or ""
         ef.final_supplier_name = form.cleaned_data.get("supplier_name") or ""
         ef.final_supplier_address = form.cleaned_data.get("supplier_address") or ""
-        ef.final_expense_member_name = expense_member.display_name if expense_member else (form.cleaned_data.get("expense_member_name") or "")
-        ef.final_expense_apartment = form.cleaned_data.get("expense_apartment") or ""
+        _save_paper_bc_extracted_fields(ef, form, bon.house)
         ef.final_member_name = selected_member.display_name if selected_member else ""
         ef.final_apartment_number = form.cleaned_data.get("apartment_number") or ""
         ef.final_merchant = form.cleaned_data.get("merchant_name") or ""
@@ -546,6 +618,9 @@ class ReceiptReviewSingleView(TreasurerRequiredMixin, View):
             from .models import Merchant
             Merchant.objects.get_or_create(name=merchant_name)
 
+        if ef.final_document_type == "paper_bc":
+            OcrReviewView()._sync_existing_bon_paper_bc_data(bon)
+
         messages.success(request, "Données du reçu confirmées.")
         return redirect(reverse("bons:detail", kwargs={"pk": bon.pk}))
 
@@ -568,6 +643,330 @@ def _match_member_for_apartment(house, apartment_code):
     if residency:
         return apartment, residency.member
     return apartment, None
+
+
+def _resolve_member_assignment(house, apartment_code: str, member_name: str):
+    """Resolve a member using apartment first, but let a strong name match override a bad apartment."""
+    apartment = None
+    member = None
+    if apartment_code:
+        apartment, member = _match_member_for_apartment(house, apartment_code)
+    if member_name and member_name.upper() != "ILLISIBLE":
+        matched_by_name = _match_member_by_name(house, member_name)
+        if matched_by_name and (not member or not _names_match(member_name, member.display_name)):
+            member = matched_by_name
+            apartment = matched_by_name.current_apartment() or apartment
+    elif not member and member_name:
+        member = _match_member_by_name(house, member_name)
+        if member:
+            apartment = member.current_apartment() or apartment
+    return apartment, member
+
+
+def _resolve_signer_assignment(house, apartment_code: str, signer_name: str):
+    """Backward-compatible wrapper for signer assignment."""
+    return _resolve_member_assignment(house, apartment_code, signer_name)
+
+
+def _money(value):
+    if value in (None, ""):
+        return None
+    try:
+        return Decimal(str(value)).quantize(MONEY_EPSILON)
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+
+
+def _normalize_document_amounts(subtotal=None, tps=None, tvq=None, total=None):
+    """Normalize one document's financials and derive missing taxes/totals when possible.
+
+    Québec tax rates used for derivation:
+      TPS = 5 %  (federal GST)
+      TVQ = 9.975 %  (provincial QST)
+      Combined factor = 1 + 0.05 + 0.09975 = 1.14975
+    """
+    subtotal = _money(subtotal)
+    tps = _money(tps)
+    tvq = _money(tvq)
+    total = _money(total)
+
+    # Case: subtotal + taxes known → derive total
+    if subtotal is not None and total is None and tps is not None and tvq is not None:
+        total = (subtotal + tps + tvq).quantize(MONEY_EPSILON)
+
+    # Case: total + taxes known → derive subtotal
+    if total is not None and subtotal is None and tps is not None and tvq is not None:
+        subtotal = (total - tps - tvq).quantize(MONEY_EPSILON)
+
+    # Case: only total known → derive subtotal and taxes from standard rates
+    if total is not None and subtotal is None and tps is None and tvq is None:
+        combined = Decimal("1") + STANDARD_TPS_RATE + STANDARD_TVQ_RATE
+        subtotal = (total / combined).quantize(MONEY_EPSILON)
+        tps = (subtotal * STANDARD_TPS_RATE).quantize(MONEY_EPSILON)
+        tvq = (total - subtotal - tps).quantize(MONEY_EPSILON)
+
+    # Case: subtotal + total known but no taxes → derive taxes
+    if total is not None and subtotal is not None:
+        if tps is None and tvq is None and total >= subtotal:
+            tps = (subtotal * STANDARD_TPS_RATE).quantize(MONEY_EPSILON)
+            tvq = (total - subtotal - tps).quantize(MONEY_EPSILON)
+            if tvq < Decimal("0.00"):
+                tps = None
+                tvq = None
+        elif tps is None and tvq is not None:
+            derived_tps = (total - subtotal - tvq).quantize(MONEY_EPSILON)
+            if derived_tps >= Decimal("0.00"):
+                tps = derived_tps
+        elif tvq is None and tps is not None:
+            derived_tvq = (total - subtotal - tps).quantize(MONEY_EPSILON)
+            if derived_tvq >= Decimal("0.00"):
+                tvq = derived_tvq
+
+    # Case: subtotal + taxes known → derive total (re-check after derivation)
+    if total is None and subtotal is not None and tps is not None and tvq is not None:
+        total = (subtotal + tps + tvq).quantize(MONEY_EPSILON)
+
+    return {
+        "subtotal": subtotal,
+        "tps": tps,
+        "tvq": tvq,
+        "total": total,
+    }
+
+
+def _extracted_document_type(ef) -> str:
+    return (ef.final_document_type or ef.document_type_candidate or "receipt").strip()
+
+
+def _extracted_document_amounts(ef):
+    return _normalize_document_amounts(
+        ef.final_subtotal if ef.final_subtotal is not None else ef.subtotal_candidate,
+        ef.final_tps if ef.final_tps is not None else ef.tps_candidate,
+        ef.final_tvq if ef.final_tvq is not None else ef.tvq_candidate,
+        ef.final_total if ef.final_total is not None else ef.total_candidate,
+    )
+
+
+def _aggregate_extracted_amounts(extracted_fields, *, prefer_invoice_totals=False):
+    """Aggregate totals from extracted fields, optionally preferring invoices over the paper BC."""
+    documents = []
+    paper_bc_documents = []
+    invoice_documents = []
+
+    for ef in extracted_fields:
+        doc = {
+            "document_type": _extracted_document_type(ef),
+            **_extracted_document_amounts(ef),
+        }
+        documents.append(doc)
+        if doc["document_type"] == "paper_bc":
+            paper_bc_documents.append(doc)
+        elif doc["document_type"] == "invoice":
+            invoice_documents.append(doc)
+
+    chosen_documents = documents
+    using_invoices = False
+    if prefer_invoice_totals:
+        if invoice_documents and all(doc["total"] is not None for doc in invoice_documents):
+            chosen_documents = invoice_documents
+            using_invoices = True
+        elif paper_bc_documents:
+            chosen_documents = paper_bc_documents
+
+    subtotal = Decimal("0.00")
+    tps = Decimal("0.00")
+    tvq = Decimal("0.00")
+    total = Decimal("0.00")
+    has_any_total = False
+    all_subtotals_known = bool(chosen_documents)
+    all_tps_known = bool(chosen_documents)
+    all_tvq_known = bool(chosen_documents)
+    all_totals_known = bool(chosen_documents)
+
+    for doc in chosen_documents:
+        if doc["total"] is None:
+            all_totals_known = False
+        else:
+            total += doc["total"]
+            has_any_total = True
+
+        if doc["subtotal"] is None:
+            all_subtotals_known = False
+        else:
+            subtotal += doc["subtotal"]
+
+        if doc["tps"] is None:
+            all_tps_known = False
+        else:
+            tps += doc["tps"]
+
+        if doc["tvq"] is None:
+            all_tvq_known = False
+        else:
+            tvq += doc["tvq"]
+
+    return {
+        "documents": chosen_documents,
+        "using_invoices": using_invoices,
+        "subtotal": subtotal.quantize(MONEY_EPSILON) if all_subtotals_known else None,
+        "tps": tps.quantize(MONEY_EPSILON) if all_tps_known else None,
+        "tvq": tvq.quantize(MONEY_EPSILON) if all_tvq_known else None,
+        "total": total.quantize(MONEY_EPSILON) if has_any_total and all_totals_known else None,
+    }
+
+
+def _aggregate_receipt_amounts(receipts, *, prefer_invoice_totals=False):
+    extracted_fields = []
+    for receipt in receipts:
+        try:
+            extracted_fields.append(receipt.extracted_fields)
+        except ReceiptExtractedFields.DoesNotExist:
+            continue
+    return _aggregate_extracted_amounts(
+        extracted_fields,
+        prefer_invoice_totals=prefer_invoice_totals,
+    )
+
+
+def _aggregate_json_document_amounts(documents, *, prefer_invoice_totals=False):
+    normalized_documents = []
+    paper_bc_documents = []
+    invoice_documents = []
+
+    for doc in documents:
+        normalized = {
+            "document_type": (doc.get("document_type") or "receipt").strip(),
+            **_normalize_document_amounts(
+                doc.get("subtotal"),
+                doc.get("tps"),
+                doc.get("tvq"),
+                doc.get("total"),
+            ),
+        }
+        normalized_documents.append(normalized)
+        if normalized["document_type"] == "paper_bc":
+            paper_bc_documents.append(normalized)
+        elif normalized["document_type"] == "invoice":
+            invoice_documents.append(normalized)
+
+    chosen_documents = normalized_documents
+    if prefer_invoice_totals:
+        if invoice_documents and all(doc["total"] is not None for doc in invoice_documents):
+            chosen_documents = invoice_documents
+        elif paper_bc_documents:
+            chosen_documents = paper_bc_documents
+
+    subtotal = Decimal("0.00")
+    tps = Decimal("0.00")
+    tvq = Decimal("0.00")
+    total = Decimal("0.00")
+    all_subtotals_known = bool(chosen_documents)
+    all_tps_known = bool(chosen_documents)
+    all_tvq_known = bool(chosen_documents)
+    all_totals_known = bool(chosen_documents)
+
+    for doc in chosen_documents:
+        if doc["subtotal"] is None:
+            all_subtotals_known = False
+        else:
+            subtotal += doc["subtotal"]
+        if doc["tps"] is None:
+            all_tps_known = False
+        else:
+            tps += doc["tps"]
+        if doc["tvq"] is None:
+            all_tvq_known = False
+        else:
+            tvq += doc["tvq"]
+        if doc["total"] is None:
+            all_totals_known = False
+        else:
+            total += doc["total"]
+
+    return {
+        "subtotal": subtotal.quantize(MONEY_EPSILON) if all_subtotals_known else None,
+        "tps": tps.quantize(MONEY_EPSILON) if all_tps_known else None,
+        "tvq": tvq.quantize(MONEY_EPSILON) if all_tvq_known else None,
+        "total": total.quantize(MONEY_EPSILON) if all_totals_known else None,
+    }
+
+
+def _paper_bc_signer_initials(house, ef):
+    """Build review-form initials and mismatch flags for paper BC signer fields."""
+    purchaser_name = ef.final_expense_member_name or ef.expense_member_name_candidate or ""
+    purchaser_apt = ef.final_expense_apartment or ef.expense_apartment_candidate or ""
+    validator_name = ef.final_validator_member_name or ef.validator_member_name_candidate or ""
+    validator_apt = ef.final_validator_apartment or ef.validator_apartment_candidate or ""
+    roles_ambiguous = (
+        ef.signer_roles_ambiguous_final
+        or ef.signer_roles_ambiguous_candidate
+    )
+
+    initial = {
+        "expense_member_name": purchaser_name,
+        "expense_apartment": purchaser_apt,
+        "validator_member_name": validator_name,
+        "validator_apartment": validator_apt,
+        "signer_roles_ambiguous": roles_ambiguous,
+    }
+    purchaser_mismatch = False
+    validator_mismatch = False
+
+    purchaser_apartment, purchaser_member = _resolve_signer_assignment(
+        house, purchaser_apt, purchaser_name,
+    )
+    if purchaser_apartment:
+        initial["expense_apartment"] = purchaser_apartment.code
+    if purchaser_member:
+        initial["expense_member"] = purchaser_member.pk
+        if purchaser_name and purchaser_name.upper() != "ILLISIBLE":
+            purchaser_mismatch = not _names_match(purchaser_name, purchaser_member.display_name)
+    elif purchaser_name and purchaser_name.upper() != "ILLISIBLE":
+        purchaser_mismatch = True
+
+    validator_apartment, validator_member = _resolve_signer_assignment(
+        house, validator_apt, validator_name,
+    )
+    if validator_apartment:
+        initial["validator_apartment"] = validator_apartment.code
+    if validator_member:
+        initial["validator_member"] = validator_member.pk
+        if validator_name and validator_name.upper() != "ILLISIBLE":
+            validator_mismatch = not _names_match(validator_name, validator_member.display_name)
+    elif validator_name and validator_name.upper() != "ILLISIBLE":
+        validator_mismatch = True
+
+    if purchaser_member and validator_member and purchaser_member.pk == validator_member.pk:
+        validator_mismatch = True
+
+    return initial, purchaser_mismatch, validator_mismatch, purchaser_apartment, validator_apartment
+
+
+def _save_paper_bc_extracted_fields(ef, form, house=None):
+    """Persist normalized purchaser/validator signer fields from review form."""
+    expense_member = form.cleaned_data.get("expense_member")
+    validator_member = form.cleaned_data.get("validator_member")
+    expense_apartment = form.cleaned_data.get("expense_apartment") or ""
+    validator_apartment = form.cleaned_data.get("validator_apartment") or ""
+
+    if expense_member:
+        member_apartment = expense_member.current_apartment()
+        if member_apartment and (house is None or member_apartment.house_id == house.id):
+            expense_apartment = member_apartment.code
+    if validator_member:
+        member_apartment = validator_member.current_apartment()
+        if member_apartment and (house is None or member_apartment.house_id == house.id):
+            validator_apartment = member_apartment.code
+
+    ef.final_expense_member_name = (
+        expense_member.display_name if expense_member else (form.cleaned_data.get("expense_member_name") or "")
+    )
+    ef.final_expense_apartment = expense_apartment
+    ef.final_validator_member_name = (
+        validator_member.display_name if validator_member else (form.cleaned_data.get("validator_member_name") or "")
+    )
+    ef.final_validator_apartment = validator_apartment
+    ef.signer_roles_ambiguous_final = bool(form.cleaned_data.get("signer_roles_ambiguous"))
 
 
 class ReceiptUploadWizardView(TreasurerRequiredMixin, FormView):
@@ -639,7 +1038,7 @@ class ReceiptUploadWizardView(TreasurerRequiredMixin, FormView):
 
         # Single batch API call for all receipts
         if ocr_available and receipt_objs:
-            _, err = ReceiptOcrService.process_receipts_batch(receipt_objs)
+            _, err = ReceiptOcrService.process_receipts_batch(receipt_objs, house=house)
             if err:
                 errors.append(err)
 
@@ -685,10 +1084,30 @@ def _get_mismatch_warning(receipt):
         return None
 
     try:
-        bc_total = round(float(paper_bcs[0].get("total") or 0), 2)
-        invoice_total = round(sum(float(d.get("total") or 0) for d in invoices), 2)
+        paper_amounts = _aggregate_json_document_amounts(paper_bcs)
+        invoice_amounts = _aggregate_json_document_amounts(
+            invoices,
+            prefer_invoice_totals=True,
+        )
+        bc_total = paper_amounts["total"]
+        invoice_total = invoice_amounts["total"]
 
-        if abs(bc_total - invoice_total) > 0.01:
+        if bc_total is None or invoice_total is None:
+            return None
+
+        comparable_invoice_values = [invoice_total]
+        if invoice_amounts["subtotal"] is not None:
+            comparable_invoice_values.append(invoice_amounts["subtotal"])
+        if invoice_amounts["subtotal"] is not None and invoice_amounts["tps"] is not None:
+            comparable_invoice_values.append(
+                (invoice_amounts["subtotal"] + invoice_amounts["tps"]).quantize(MONEY_EPSILON)
+            )
+        if invoice_amounts["subtotal"] is not None and invoice_amounts["tvq"] is not None:
+            comparable_invoice_values.append(
+                (invoice_amounts["subtotal"] + invoice_amounts["tvq"]).quantize(MONEY_EPSILON)
+            )
+
+        if not any(abs(bc_total - value) <= MONEY_EPSILON for value in comparable_invoice_values):
             return {
                 "bc_total": f"{bc_total:.2f}",
                 "invoice_total": f"{invoice_total:.2f}",
@@ -724,7 +1143,6 @@ class OcrReviewView(TreasurerRequiredMixin, View):
 
     def _build_form(self, receipt, bon, post_data=None):
         """Build OcrReviewForm for a single receipt, pre-filled from AI data."""
-        from members.models import Member, Residency
         from budget.models import SubBudget
 
         prefix = f"receipt_{receipt.pk}"
@@ -732,6 +1150,7 @@ class OcrReviewView(TreasurerRequiredMixin, View):
         matched_member_name = ""
         name_mismatch = False
         expense_member_mismatch = False
+        validator_member_mismatch = False
         doc_type = "receipt"
 
         try:
@@ -743,47 +1162,26 @@ class OcrReviewView(TreasurerRequiredMixin, View):
             initial["supplier_name"] = ef.final_supplier_name or ef.supplier_name_candidate or ""
             initial["supplier_address"] = ef.final_supplier_address or ef.supplier_address_candidate or ""
 
-            # Expense member fields (paper_bc)
-            expense_name = ef.final_expense_member_name or ef.expense_member_name_candidate or ""
-            expense_apt = ef.final_expense_apartment or ef.expense_apartment_candidate or ""
-            initial["expense_member_name"] = expense_name
-            initial["expense_apartment"] = expense_apt
-
-            # Auto-match expense member for paper_bc
-            if doc_type == "paper_bc" and expense_apt:
-                apartment, exp_member = _match_member_for_apartment(bon.house, expense_apt)
-                if exp_member:
-                    initial["expense_member"] = exp_member.pk
-                    # Check name match
-                    if expense_name and expense_name.upper() != "ILLISIBLE":
-                        if not _names_match(expense_name, exp_member.display_name):
-                            expense_member_mismatch = True
-                elif expense_name and expense_name.upper() != "ILLISIBLE":
-                    expense_member_mismatch = True
-            elif doc_type == "paper_bc" and expense_name and expense_name.upper() != "ILLISIBLE":
-                # Try to match by name across all house members
-                house_member_ids = Residency.objects.filter(
-                    apartment__house=bon.house, end_date__isnull=True
-                ).values_list("member_id", flat=True)
-                for m in Member.objects.filter(pk__in=house_member_ids, is_active=True):
-                    if _names_match(expense_name, m.display_name):
-                        initial["expense_member"] = m.pk
-                        break
-                else:
-                    expense_member_mismatch = True
+            if doc_type == "paper_bc":
+                signer_initials, expense_member_mismatch, validator_member_mismatch, _, _ = (
+                    _paper_bc_signer_initials(bon.house, ef)
+                )
+                initial.update(signer_initials)
 
             apt_code = ef.final_apartment_number or ef.apartment_number_candidate
             member_name_raw = ef.final_member_name or ef.member_name_candidate
 
             # Only do member matching for receipts
             if doc_type == "receipt":
-                member = None
-                if apt_code:
-                    apartment, member = _match_member_for_apartment(bon.house, apt_code)
-                    if member:
-                        matched_member_name = member.display_name
-                        initial["matched_member_id"] = member.pk
-                        initial["purchaser_member"] = member.pk
+                apartment, member = _resolve_member_assignment(
+                    bon.house, apt_code, member_name_raw,
+                )
+                if apartment:
+                    apt_code = apartment.code
+                if member:
+                    matched_member_name = member.display_name
+                    initial["matched_member_id"] = member.pk
+                    initial["purchaser_member"] = member.pk
 
                 name_unreadable = not member_name_raw or member_name_raw.upper() == "ILLISIBLE"
                 if member and member_name_raw and not name_unreadable:
@@ -808,21 +1206,24 @@ class OcrReviewView(TreasurerRequiredMixin, View):
         form = OcrReviewForm(data=post_data, prefix=prefix, initial=initial)
 
         # Populate member choices: all active members with residency in this house
-        house_member_ids = Residency.objects.filter(
-            apartment__house=bon.house, end_date__isnull=True
-        ).values_list("member_id", flat=True)
-        members_qs = Member.objects.filter(
-            pk__in=house_member_ids, is_active=True
-        ).order_by("last_name", "first_name")
+        members_qs = _get_house_members_queryset(bon.house)
         form.fields["purchaser_member"].queryset = members_qs
         form.fields["expense_member"].queryset = members_qs
+        form.fields["validator_member"].queryset = members_qs
 
         # Populate sub_budget choices
         form.fields["sub_budget"].queryset = SubBudget.objects.filter(
             budget_year=bon.budget_year, is_active=True
         ).order_by("sort_order", "trace_code")
 
-        return form, matched_member_name, name_mismatch, doc_type, expense_member_mismatch
+        return (
+            form,
+            matched_member_name,
+            name_mismatch,
+            doc_type,
+            expense_member_mismatch,
+            validator_member_mismatch,
+        )
 
     def get(self, request, pk):
         bon = self._get_bon(request, pk)
@@ -830,8 +1231,18 @@ class OcrReviewView(TreasurerRequiredMixin, View):
         if not current:
             messages.warning(request, "Aucun reçu à vérifier.")
             return redirect(reverse("bons:list"))
-        form, matched_name, name_mismatch, doc_type, expense_mismatch = self._build_form(current, bon)
-        return self._render(request, bon, current, form, idx, total, matched_name, name_mismatch, doc_type, expense_mismatch)
+        (
+            form,
+            matched_name,
+            name_mismatch,
+            doc_type,
+            expense_mismatch,
+            validator_mismatch,
+        ) = self._build_form(current, bon)
+        return self._render(
+            request, bon, current, form, idx, total, matched_name, name_mismatch,
+            doc_type, expense_mismatch, validator_mismatch,
+        )
 
     def post(self, request, pk):
         bon = self._get_bon(request, pk)
@@ -843,15 +1254,10 @@ class OcrReviewView(TreasurerRequiredMixin, View):
         form = OcrReviewForm(data=request.POST, prefix=prefix)
         # Populate querysets so validation works
         from budget.models import SubBudget
-        from members.models import Member, Residency
-        house_member_ids = Residency.objects.filter(
-            apartment__house=bon.house, end_date__isnull=True
-        ).values_list("member_id", flat=True)
-        members_qs = Member.objects.filter(
-            pk__in=house_member_ids, is_active=True
-        ).order_by("last_name", "first_name")
+        members_qs = _get_house_members_queryset(bon.house)
         form.fields["purchaser_member"].queryset = members_qs
         form.fields["expense_member"].queryset = members_qs
+        form.fields["validator_member"].queryset = members_qs
         form.fields["sub_budget"].queryset = SubBudget.objects.filter(
             budget_year=bon.budget_year, is_active=True
         ).order_by("sort_order", "trace_code")
@@ -863,15 +1269,13 @@ class OcrReviewView(TreasurerRequiredMixin, View):
 
         # Save confirmed values
         selected_member = form.cleaned_data.get("purchaser_member")
-        expense_member = form.cleaned_data.get("expense_member")
         ef, _ = ReceiptExtractedFields.objects.get_or_create(receipt_file=current)
         ef.final_document_type = form.cleaned_data.get("document_type") or ""
         ef.final_bc_number = form.cleaned_data.get("bc_number") or ""
         ef.final_associated_bc_number = form.cleaned_data.get("associated_bc_number") or ""
         ef.final_supplier_name = form.cleaned_data.get("supplier_name") or ""
         ef.final_supplier_address = form.cleaned_data.get("supplier_address") or ""
-        ef.final_expense_member_name = expense_member.display_name if expense_member else (form.cleaned_data.get("expense_member_name") or "")
-        ef.final_expense_apartment = form.cleaned_data.get("expense_apartment") or ""
+        _save_paper_bc_extracted_fields(ef, form, bon.house)
         ef.final_member_name = selected_member.display_name if selected_member else ""
         ef.final_apartment_number = form.cleaned_data.get("apartment_number") or ""
         ef.final_merchant = form.cleaned_data.get("merchant_name") or ""
@@ -963,10 +1367,10 @@ class OcrReviewView(TreasurerRequiredMixin, View):
             )
 
             if existing_paper_bc:
-                try:
-                    new_total = bc_receipt.extracted_fields.final_total or bc_receipt.extracted_fields.total_candidate
-                except ReceiptExtractedFields.DoesNotExist:
-                    new_total = None
+                new_total = _aggregate_receipt_amounts(
+                    all_docs,
+                    prefer_invoice_totals=True,
+                )["total"]
 
                 if new_total is not None and existing_paper_bc.total == new_total:
                     # Same BC number AND same total → already added
@@ -1125,6 +1529,27 @@ class OcrReviewView(TreasurerRequiredMixin, View):
                             update_fields["purchase_date"] = ef.final_purchase_date or ef.purchase_date_candidate
                         if ef.sub_budget_id:
                             update_fields["sub_budget_id"] = ef.sub_budget_id
+                        purchaser_name = ef.final_expense_member_name or ef.expense_member_name_candidate
+                        purchaser_apt_code = ef.final_expense_apartment or ef.expense_apartment_candidate
+                        validator_name = ef.final_validator_member_name or ef.validator_member_name_candidate
+                        validator_apt_code = ef.final_validator_apartment or ef.validator_apartment_candidate
+
+                        purchaser_apartment, purchaser_member = _resolve_signer_assignment(
+                            bon.house, purchaser_apt_code, purchaser_name,
+                        )
+                        if purchaser_apartment:
+                            update_fields["purchaser_apartment_id"] = purchaser_apartment.pk
+                        if purchaser_member:
+                            update_fields["purchaser_member_id"] = purchaser_member.pk
+
+                        validator_apartment, validator_member = _resolve_signer_assignment(
+                            bon.house, validator_apt_code, validator_name,
+                        )
+                        if validator_member and purchaser_member and validator_member.pk == purchaser_member.pk:
+                            validator_member = None
+                            validator_apartment = None
+                        update_fields["approver_member_id"] = validator_member.pk if validator_member else None
+                        update_fields["approver_apartment_id"] = validator_apartment.pk if validator_apartment else None
                         break
                 except ReceiptExtractedFields.DoesNotExist:
                     continue
@@ -1149,37 +1574,18 @@ class OcrReviewView(TreasurerRequiredMixin, View):
         if summaries:
             update_fields["short_description"] = "; ".join(summaries)[:255]
 
-        # Sum totals across all receipts
-        from decimal import Decimal
-        total_subtotal = Decimal("0")
-        total_tps = Decimal("0")
-        total_tvq = Decimal("0")
-        total_total = Decimal("0")
-        has_amounts = False
-
-        for r in receipts:
-            try:
-                ef = r.extracted_fields
-                if ef.final_total is not None:
-                    total_total += ef.final_total
-                    has_amounts = True
-                if ef.final_subtotal is not None:
-                    total_subtotal += ef.final_subtotal
-                if ef.final_tps is not None:
-                    total_tps += ef.final_tps
-                if ef.final_tvq is not None:
-                    total_tvq += ef.final_tvq
-            except ReceiptExtractedFields.DoesNotExist:
-                continue
-
-        if has_amounts:
-            update_fields["total"] = total_total
-            if total_subtotal:
-                update_fields["subtotal"] = total_subtotal
-            if total_tps:
-                update_fields["tps"] = total_tps
-            if total_tvq:
-                update_fields["tvq"] = total_tvq
+        aggregated_amounts = _aggregate_receipt_amounts(
+            receipts,
+            prefer_invoice_totals=is_paper_bc,
+        )
+        if aggregated_amounts["total"] is not None:
+            update_fields["total"] = aggregated_amounts["total"]
+        if aggregated_amounts["subtotal"] is not None:
+            update_fields["subtotal"] = aggregated_amounts["subtotal"]
+        if aggregated_amounts["tps"] is not None:
+            update_fields["tps"] = aggregated_amounts["tps"]
+        if aggregated_amounts["tvq"] is not None:
+            update_fields["tvq"] = aggregated_amounts["tvq"]
 
         # Auto-match apartment → member from first receipt (skip for paper BC)
         if not is_paper_bc:
@@ -1193,8 +1599,31 @@ class OcrReviewView(TreasurerRequiredMixin, View):
 
         if update_fields:
             BonDeCommande.objects.filter(pk=bon.pk).update(**update_fields)
+            bon.refresh_from_db()
 
-    def _render(self, request, bon, receipt, form, idx, total, matched_member_name, name_mismatch=False, document_type="receipt", expense_member_mismatch=False):
+    def _sync_existing_bon_paper_bc_data(self, bon):
+        """Apply reviewed paper BC metadata to an existing bon."""
+        receipts = list(bon.receipt_files.order_by("created_at", "pk"))
+        paper_bc_number = ""
+        has_paper_bc = False
+        for receipt in receipts:
+            try:
+                ef = receipt.extracted_fields
+            except ReceiptExtractedFields.DoesNotExist:
+                continue
+            if (ef.final_document_type or ef.document_type_candidate) == "paper_bc":
+                has_paper_bc = True
+                paper_bc_number = ef.final_bc_number or ef.bc_number_candidate or ""
+                break
+        if not has_paper_bc:
+            return
+        self._fill_bon_from_receipts(bon, receipts, is_paper_bc=True)
+        BonDeCommande.objects.filter(pk=bon.pk).update(
+            is_paper_bc=True,
+            paper_bc_number=paper_bc_number,
+        )
+
+    def _render(self, request, bon, receipt, form, idx, total, matched_member_name, name_mismatch=False, document_type="receipt", expense_member_mismatch=False, validator_member_mismatch=False):
         mismatch_warning = _get_mismatch_warning(receipt)
         return TemplateResponse(request, self.template_name, {
             "bon": bon,
@@ -1206,8 +1635,10 @@ class OcrReviewView(TreasurerRequiredMixin, View):
             "matched_member_name": matched_member_name,
             "name_mismatch": name_mismatch,
             "expense_member_mismatch": expense_member_mismatch,
+            "validator_member_mismatch": validator_member_mismatch,
             "document_type": document_type,
             "mismatch_warning": mismatch_warning,
+            "signer_roles_ambiguous": bool(form["signer_roles_ambiguous"].value()),
             "prev_url": (
                 reverse("bons:review", kwargs={"pk": bon.pk}) + f"?idx={idx - 1}"
                 if idx > 0 else None

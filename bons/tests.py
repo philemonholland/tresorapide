@@ -4,15 +4,27 @@ from decimal import Decimal
 from unittest.mock import patch, MagicMock
 from django.test import TestCase
 from django.core.exceptions import ValidationError
+from django.core.files.uploadedfile import SimpleUploadedFile
+from django.urls import reverse
 
 from houses.models import House
 from accounts.models import User
 from members.models import Member, Apartment, Residency
 from budget.models import BudgetYear, SubBudget, Expense
-from bons.models import BonDeCommande, BonStatus, DuplicateFlag, DuplicateFlagStatus
+from bons.models import (
+    BonDeCommande, BonStatus, DuplicateFlag, DuplicateFlagStatus,
+    ReceiptFile, ReceiptExtractedFields, OcrStatus,
+)
 from bons.services import generate_bon_number
 from bons.ocr_service import ReceiptOcrService, DuplicateDetectionService
-from bons.views import _names_match, _normalize_name, _bon_is_export_ready
+from bons.views import (
+    _names_match,
+    _normalize_name,
+    _bon_is_export_ready,
+    _paper_bc_signer_initials,
+    _resolve_member_assignment,
+    _normalize_document_amounts,
+)
 
 
 class BonNumberGenerationTests(TestCase):
@@ -192,6 +204,25 @@ class ReceiptOcrParseTests(TestCase):
         self.assertEqual(results[0]["merchant"], "Metro")
         self.assertEqual(results[1]["merchant"], "IGA")
 
+    def test_parse_batch_paper_bc_signers_and_ambiguity(self):
+        raw = json.dumps([{
+            "filename": "BC16011.pdf - Page 1",
+            "document_type": "paper_bc",
+            "bc_number": "16011",
+            "expense_member_name": "Marylin Lamarche",
+            "expense_apartment": "202",
+            "validator_member_name": "René Côté",
+            "validator_apartment": "203",
+            "signer_roles_ambiguous": True,
+            "total": 547.93,
+        }])
+        results = ReceiptOcrService._parse_batch_response(raw, ["BC16011.pdf"])
+        self.assertEqual(results[0]["document_type"], "paper_bc")
+        self.assertEqual(results[0]["expense_member_name"], "Marylin Lamarche")
+        self.assertEqual(results[0]["validator_member_name"], "René Côté")
+        self.assertEqual(results[0]["validator_apartment"], "203")
+        self.assertTrue(results[0]["signer_roles_ambiguous"])
+
     def test_is_available_without_key(self):
         with self.settings(OPENAI_API_KEY=""):
             self.assertFalse(ReceiptOcrService.is_available())
@@ -325,6 +356,82 @@ class ReceiptOcrParseTests(TestCase):
         self.assertEqual(results[0]["associated_bc_number"], "")
 
 
+class OcrMemberDirectoryTests(TestCase):
+    def setUp(self):
+        self.house = House.objects.create(
+            code="BB", name="Maison BB", account_number="13-51200"
+        )
+        self.budget_year = BudgetYear.objects.create(
+            house=self.house, year=2026, annual_budget_total=Decimal("1000.00")
+        )
+        self.sub_budget = SubBudget.objects.create(
+            budget_year=self.budget_year,
+            trace_code=7,
+            name="Produits ménager",
+            planned_amount=Decimal("100.00"),
+        )
+        self.member = Member.objects.create(first_name="Serge", last_name="Laroche")
+        self.apartment = Apartment.objects.create(house=self.house, code="105")
+        Residency.objects.create(
+            member=self.member,
+            apartment=self.apartment,
+            start_date=date(2020, 1, 1),
+        )
+
+    def test_batch_prompt_includes_canonical_member_directory(self):
+        prompt = ReceiptOcrService._build_batch_prompt(self.house)
+        self.assertIn("RÉPERTOIRE OFFICIEL DES MEMBRES ACTIFS", prompt)
+        self.assertIn("Appartement 105: Serge Laroche", prompt)
+        self.assertIn("retourne EXACTEMENT le nom officiel", prompt)
+
+    def test_resolve_member_assignment_prefers_fuzzy_name_match(self):
+        other_member = Member.objects.create(first_name="Pierre", last_name="Bouchard")
+        other_apartment = Apartment.objects.create(house=self.house, code="205")
+        Residency.objects.create(
+            member=other_member,
+            apartment=other_apartment,
+            start_date=date(2020, 1, 1),
+        )
+
+        apartment, member = _resolve_member_assignment(self.house, "205", "Serge Laroch")
+
+        self.assertEqual(member, self.member)
+        self.assertEqual(apartment, self.apartment)
+
+    def test_paper_bc_signer_initials_prefill_fuzzy_member_and_canonical_apartment(self):
+        fake_receipt = ReceiptFile.objects.create(
+            bon_de_commande=BonDeCommande.objects.create(
+                house=self.house,
+                budget_year=self.budget_year,
+                number="BB260001",
+                purchase_date=date(2026, 1, 7),
+                short_description="Test",
+                total=Decimal("10.00"),
+                sub_budget=self.sub_budget,
+                purchaser_member=self.member,
+            ),
+            file=SimpleUploadedFile("BC17186.pdf", b"fake pdf", content_type="application/pdf"),
+            original_filename="BC17186.pdf",
+            content_type="application/pdf",
+        )
+        ef = ReceiptExtractedFields.objects.create(
+            receipt_file=fake_receipt,
+            document_type_candidate="paper_bc",
+            expense_member_name_candidate="Serge Laroch",
+            expense_apartment_candidate="",
+        )
+
+        initial, purchaser_mismatch, _, purchaser_apartment, _ = _paper_bc_signer_initials(
+            self.house,
+            ef,
+        )
+
+        self.assertEqual(initial["expense_member"], self.member.pk)
+        self.assertEqual(initial["expense_apartment"], "105")
+        self.assertFalse(purchaser_mismatch)
+        self.assertEqual(purchaser_apartment, self.apartment)
+
+
 class PaperBcFinalizationTests(TestCase):
     """Test that _finalize_bons correctly handles paper BC + invoice + receipt mixes."""
 
@@ -343,9 +450,20 @@ class PaperBcFinalizationTests(TestCase):
         Residency.objects.create(
             member=self.member, apartment=self.apt, start_date=date(2020, 1, 1)
         )
+        self.validator_member = Member.objects.create(first_name="René", last_name="Côté")
+        self.validator_apt = Apartment.objects.create(house=self.house, code="203")
+        Residency.objects.create(
+            member=self.validator_member, apartment=self.validator_apt, start_date=date(2020, 1, 1)
+        )
+        self.treasurer_member = Member.objects.create(first_name="Trésorier", last_name="Test")
+        self.treasurer_apt = Apartment.objects.create(house=self.house, code="204")
+        Residency.objects.create(
+            member=self.treasurer_member, apartment=self.treasurer_apt, start_date=date(2020, 1, 1)
+        )
         self.user = User.objects.create_user(
             username="tresorier", password="test123", role=20,
-            member=self.member,
+            member=self.treasurer_member,
+            house=self.house,
         )
 
         # Create a scan session bon
@@ -357,7 +475,7 @@ class PaperBcFinalizationTests(TestCase):
         self.scan_session.short_description = "(scan session)"
         self.scan_session.total = 0
         self.scan_session.sub_budget = self.sub_budget
-        self.scan_session.purchaser_member = self.member
+        self.scan_session.purchaser_member = self.treasurer_member
         self.scan_session.created_by = self.user
         self.scan_session.status = BonStatus.READY_FOR_REVIEW
         self.scan_session.is_scan_session = True
@@ -393,6 +511,16 @@ class PaperBcFinalizationTests(TestCase):
             final_total=Decimal("547.93"),
             purchase_date_candidate=date(2024, 11, 29),
             final_purchase_date=date(2024, 11, 29),
+            expense_member_name_candidate="Maryline Lamarche",
+            final_expense_member_name="Maryline Lamarche",
+            expense_apartment_candidate="202",
+            final_expense_apartment="202",
+            validator_member_name_candidate="René Côté",
+            final_validator_member_name="René Côté",
+            validator_apartment_candidate="203",
+            final_validator_apartment="203",
+            signer_roles_ambiguous_candidate=True,
+            signer_roles_ambiguous_final=True,
             sub_budget=self.sub_budget,
             summary_candidate="Installation purgeur",
             final_summary="Installation purgeur",
@@ -458,6 +586,11 @@ class PaperBcFinalizationTests(TestCase):
         self.assertEqual(paper_bon.number, "16011")
         self.assertEqual(paper_bon.paper_bc_number, "16011")
         self.assertEqual(paper_bon.status, BonStatus.READY_FOR_VALIDATION)
+        self.assertNotEqual(paper_bon.purchaser_member, self.treasurer_member)
+        self.assertEqual(paper_bon.purchaser_member, self.member)
+        self.assertEqual(paper_bon.purchaser_apartment, self.apt)
+        self.assertEqual(paper_bon.approver_member, self.validator_member)
+        self.assertEqual(paper_bon.approver_apartment, self.validator_apt)
         # Paper BC bon should have 2 receipt files (BC + invoice)
         self.assertEqual(paper_bon.receipt_files.count(), 2)
 
@@ -538,6 +671,65 @@ class PaperBcFinalizationTests(TestCase):
         total_receipts = sum(b.receipt_files.count() for b in regular_bons)
         self.assertEqual(total_receipts, 2)  # invoice + receipt
 
+    def test_finalize_leaves_approver_empty_when_no_second_signer(self):
+        ef = self.receipt_bc.extracted_fields
+        ef.final_validator_member_name = ""
+        ef.final_validator_apartment = ""
+        ef.validator_member_name_candidate = ""
+        ef.validator_apartment_candidate = ""
+        ef.save()
+
+        from django.test import RequestFactory
+        from bons.views import OcrReviewView
+        from django.contrib.messages.storage.fallback import FallbackStorage
+
+        request = RequestFactory().get("/")
+        request.user = self.user
+        setattr(request, "session", "session")
+        setattr(request, "_messages", FallbackStorage(request))
+
+        OcrReviewView()._finalize_bons(request, self.scan_session)
+        paper_bon = BonDeCommande.objects.filter(
+            is_paper_bc=True, is_scan_session=False,
+        ).exclude(status=BonStatus.VOID).first()
+        self.assertIsNotNone(paper_bon)
+        self.assertIsNone(paper_bon.approver_member)
+        self.assertIsNone(paper_bon.approver_apartment)
+
+    def test_finalize_prefers_invoice_amounts_and_derives_missing_taxes(self):
+        self.receipt_bc.extracted_fields.final_subtotal = Decimal("100.00")
+        self.receipt_bc.extracted_fields.final_tps = None
+        self.receipt_bc.extracted_fields.final_tvq = None
+        self.receipt_bc.extracted_fields.final_total = Decimal("100.00")
+        self.receipt_bc.extracted_fields.save()
+
+        self.receipt_inv.extracted_fields.final_subtotal = Decimal("100.00")
+        self.receipt_inv.extracted_fields.final_tps = None
+        self.receipt_inv.extracted_fields.final_tvq = None
+        self.receipt_inv.extracted_fields.final_total = Decimal("114.98")
+        self.receipt_inv.extracted_fields.save()
+
+        from django.test import RequestFactory
+        from bons.views import OcrReviewView
+        from django.contrib.messages.storage.fallback import FallbackStorage
+
+        request = RequestFactory().get("/")
+        request.user = self.user
+        setattr(request, "session", "session")
+        setattr(request, "_messages", FallbackStorage(request))
+
+        OcrReviewView()._finalize_bons(request, self.scan_session)
+        paper_bon = BonDeCommande.objects.filter(
+            is_paper_bc=True,
+            is_scan_session=False,
+        ).exclude(status=BonStatus.VOID).first()
+
+        self.assertIsNotNone(paper_bon)
+        self.assertEqual(paper_bon.subtotal, Decimal("100.00"))
+        self.assertEqual(paper_bon.tps, Decimal("5.00"))
+        self.assertEqual(paper_bon.tvq, Decimal("9.98"))
+        self.assertEqual(paper_bon.total, Decimal("114.98"))
+
 
 class MismatchWarningTests(TestCase):
     """Test the _get_mismatch_warning helper."""
@@ -577,6 +769,168 @@ class MismatchWarningTests(TestCase):
             {"document_type": "receipt", "total": 25.00},
         ])
         self.assertIsNone(_get_mismatch_warning(receipt))
+
+    def test_missing_taxes_on_paper_bc_does_not_warn_when_invoice_has_them(self):
+        from bons.views import _get_mismatch_warning
+        from unittest.mock import MagicMock
+
+        receipt = MagicMock()
+        receipt.ocr_raw_text = json.dumps([
+            {
+                "document_type": "paper_bc",
+                "bc_number": "17186",
+                "subtotal": 100.00,
+                "tps": None,
+                "tvq": None,
+                "total": 100.00,
+            },
+            {
+                "document_type": "invoice",
+                "associated_bc_number": "17186",
+                "subtotal": 100.00,
+                "tps": 5.00,
+                "tvq": 9.98,
+                "total": 114.98,
+            },
+        ])
+        self.assertIsNone(_get_mismatch_warning(receipt))
+
+    def test_normalize_derives_taxes_from_total_only(self):
+        """When only total is known, derive subtotal and taxes from Quebec rates."""
+        result = _normalize_document_amounts(total=Decimal("54.58"))
+        self.assertIsNotNone(result["subtotal"])
+        self.assertIsNotNone(result["tps"])
+        self.assertIsNotNone(result["tvq"])
+        self.assertEqual(result["total"], Decimal("54.58"))
+        # subtotal + tps + tvq should equal total
+        self.assertEqual(
+            result["subtotal"] + result["tps"] + result["tvq"],
+            result["total"],
+        )
+        # TPS should be 5% of subtotal
+        expected_tps = (result["subtotal"] * Decimal("0.05")).quantize(Decimal("0.01"))
+        self.assertEqual(result["tps"], expected_tps)
+
+
+class SignerRoleWorkflowTests(TestCase):
+    def setUp(self):
+        self.house = House.objects.create(code="BB", name="Maison BB", account_number="13-51200")
+        self.budget_year = BudgetYear.objects.create(
+            house=self.house, year=2026, annual_budget_total=Decimal("12237.00")
+        )
+        self.sub_budget = SubBudget.objects.create(
+            budget_year=self.budget_year, trace_code=7,
+            name="Produits ménager", planned_amount=Decimal("300.00")
+        )
+        self.purchaser = Member.objects.create(first_name="Marylin", last_name="Lamarche")
+        self.validator = Member.objects.create(first_name="René", last_name="Côté")
+        self.treasurer_member = Member.objects.create(first_name="Trésorier", last_name="Test")
+        self.apt_202 = Apartment.objects.create(house=self.house, code="202")
+        self.apt_203 = Apartment.objects.create(house=self.house, code="203")
+        self.apt_204 = Apartment.objects.create(house=self.house, code="204")
+        Residency.objects.create(member=self.purchaser, apartment=self.apt_202, start_date=date(2020, 1, 1))
+        Residency.objects.create(member=self.validator, apartment=self.apt_203, start_date=date(2020, 1, 1))
+        Residency.objects.create(member=self.treasurer_member, apartment=self.apt_204, start_date=date(2020, 1, 1))
+        self.user = User.objects.create_user(
+            username="tresorier",
+            password="test123",
+            role=User.Role.TREASURER,
+            house=self.house,
+            member=self.treasurer_member,
+        )
+        self.bon = BonDeCommande.objects.create(
+            house=self.house,
+            budget_year=self.budget_year,
+            number="16011",
+            purchase_date=date(2026, 1, 7),
+            short_description="Paper BC",
+            total=Decimal("547.93"),
+            sub_budget=self.sub_budget,
+            purchaser_member=self.treasurer_member,
+            status=BonStatus.READY_FOR_VALIDATION,
+            is_paper_bc=True,
+            paper_bc_number="16011",
+        )
+        self.receipt = ReceiptFile.objects.create(
+            bon_de_commande=self.bon,
+            file=SimpleUploadedFile("BC16011.pdf", b"fake pdf", content_type="application/pdf"),
+            original_filename="BC16011.pdf",
+            content_type="application/pdf",
+            ocr_status="EXTRACTED",
+        )
+        self.extracted = ReceiptExtractedFields.objects.create(
+            receipt_file=self.receipt,
+            document_type_candidate="paper_bc",
+            final_document_type="paper_bc",
+            bc_number_candidate="16011",
+            final_bc_number="16011",
+            expense_member_name_candidate="Marylin Lamarche",
+            expense_apartment_candidate="202",
+            validator_member_name_candidate="René Côté",
+            validator_apartment_candidate="203",
+            signer_roles_ambiguous_candidate=True,
+            total_candidate=Decimal("547.93"),
+            final_total=Decimal("547.93"),
+            sub_budget=self.sub_budget,
+        )
+
+    def test_receipt_review_persists_swapped_signers_for_existing_bon(self):
+        self.client.login(username="tresorier", password="test123")
+        prefix = f"receipt_{self.receipt.pk}"
+        response = self.client.post(
+            reverse("bons:receipt-review", kwargs={"bon_pk": self.bon.pk, "receipt_pk": self.receipt.pk}),
+            {
+                f"{prefix}-document_type": "paper_bc",
+                f"{prefix}-bc_number": "16011",
+                f"{prefix}-associated_bc_number": "",
+                f"{prefix}-supplier_name": "Gicleurs",
+                f"{prefix}-supplier_address": "",
+                f"{prefix}-expense_member_name": "René Côté",
+                f"{prefix}-expense_apartment": "203",
+                f"{prefix}-expense_member": self.validator.pk,
+                f"{prefix}-validator_member_name": "Marylin Lamarche",
+                f"{prefix}-validator_apartment": "202",
+                f"{prefix}-validator_member": self.purchaser.pk,
+                f"{prefix}-signer_roles_ambiguous": "on",
+                f"{prefix}-member_name_raw": "",
+                f"{prefix}-apartment_number": "",
+                f"{prefix}-purchaser_member": "",
+                f"{prefix}-matched_member_id": "",
+                f"{prefix}-sub_budget": self.sub_budget.pk,
+                f"{prefix}-merchant_name": "",
+                f"{prefix}-purchase_date": "2026-01-07",
+                f"{prefix}-subtotal": "",
+                f"{prefix}-tps": "",
+                f"{prefix}-tvq": "",
+                f"{prefix}-total": "547.93",
+                f"{prefix}-summary": "Travaux",
+            },
+        )
+        self.assertEqual(response.status_code, 302)
+        self.extracted.refresh_from_db()
+        self.assertEqual(self.extracted.final_expense_member_name, "René Côté")
+        self.assertEqual(self.extracted.final_validator_member_name, "Marylin Lamarche")
+        self.assertTrue(self.extracted.signer_roles_ambiguous_final)
+
+        self.bon.refresh_from_db()
+        self.assertEqual(self.bon.purchaser_member, self.validator)
+        self.assertEqual(self.bon.approver_member, self.purchaser)
+
+    def test_swap_signers_view_swaps_existing_bon(self):
+        self.bon.purchaser_member = self.purchaser
+        self.bon.purchaser_apartment = self.apt_202
+        self.bon.approver_member = self.validator
+        self.bon.approver_apartment = self.apt_203
+        self.bon.save()
+
+        self.client.login(username="tresorier", password="test123")
+        response = self.client.post(reverse("bons:swap-signers", kwargs={"pk": self.bon.pk}))
+        self.assertEqual(response.status_code, 302)
+        self.bon.refresh_from_db()
+        self.assertEqual(self.bon.purchaser_member, self.validator)
+        self.assertEqual(self.bon.purchaser_apartment, self.apt_203)
+        self.assertEqual(self.bon.approver_member, self.purchaser)
+        self.assertEqual(self.bon.approver_apartment, self.apt_202)
 
 
 class FuzzyNameMatchTests(TestCase):
@@ -715,6 +1069,58 @@ class DigitalInvoiceDuplicateTests(DuplicateDetectionBaseTest):
             self.new_receipt, other_house
         )
         self.assertEqual(len(matches), 0)
+
+    def test_find_matching_totals_ignores_scan_session_receipts(self):
+        temp_bon = BonDeCommande.objects.create(
+            house=self.house,
+            budget_year=self.budget_year,
+            number="BB260099",
+            purchase_date=date(2026, 2, 1),
+            short_description="Temp scan",
+            total=Decimal("19.49"),
+            sub_budget=self.sub_budget,
+            purchaser_member=self.member,
+            status=BonStatus.READY_FOR_REVIEW,
+            is_scan_session=True,
+        )
+        temp_receipt = ReceiptFile.objects.create(
+            bon_de_commande=temp_bon,
+            file=SimpleUploadedFile("temp.png", b"fake temp image", content_type="image/png"),
+            original_filename="temp.png",
+            content_type="image/png",
+            ocr_status=OcrStatus.EXTRACTED,
+        )
+        ReceiptExtractedFields.objects.create(
+            receipt_file=temp_receipt,
+            total_candidate=Decimal("19.49"),
+            final_total=Decimal("19.49"),
+        )
+
+        matches = DuplicateDetectionService.find_matching_totals(
+            self.new_receipt, self.house
+        )
+
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0].receipt_file, self.existing_receipt)
+
+    def test_find_matching_totals_ignores_voided_bons(self):
+        self.existing_bon.status = BonStatus.VOID
+        self.existing_bon.save()
+
+        matches = DuplicateDetectionService.find_matching_totals(
+            self.new_receipt, self.house
+        )
+        self.assertEqual(len(matches), 0)
+
+    def test_normalize_confidence_accepts_percent_values(self):
+        self.assertEqual(
+            DuplicateDetectionService._normalize_confidence("99%"),
+            0.99,
+        )
+        self.assertEqual(
+            DuplicateDetectionService._normalize_confidence(95),
+            0.95,
+        )
 
     @patch.object(DuplicateDetectionService, "compare_with_gpt")
     def test_check_and_flag_creates_flag(self, mock_gpt):
@@ -995,6 +1401,51 @@ class DetailViewDuplicateTests(DuplicateDetectionBaseTest):
         self.client.login(username="tresorier", password="test123")
         resp = self.client.get(f"/bons/{self.new_bon.pk}/")
         self.assertNotContains(resp, "DOUBLON POSSIBLE")
+
+    def test_detail_hides_flags_pointing_to_scan_sessions(self):
+        temp_bon = BonDeCommande.objects.create(
+            house=self.house,
+            budget_year=self.budget_year,
+            number="BB260099",
+            purchase_date=date(2026, 2, 1),
+            short_description="Temp scan",
+            total=Decimal("19.49"),
+            sub_budget=self.sub_budget,
+            purchaser_member=self.member,
+            status=BonStatus.READY_FOR_REVIEW,
+            is_scan_session=True,
+        )
+        temp_receipt = ReceiptFile.objects.create(
+            bon_de_commande=temp_bon,
+            file=SimpleUploadedFile("BC17186.pdf", b"fake temp image", content_type="application/pdf"),
+            original_filename="BC17186.pdf",
+            content_type="application/pdf",
+            ocr_status=OcrStatus.EXTRACTED,
+        )
+        DuplicateFlag.objects.create(
+            receipt_file=self.new_receipt,
+            suspected_duplicate_receipt=temp_receipt,
+            confidence=Decimal("0.95"),
+            gpt_comparison_result="Same temporary scan",
+            status=DuplicateFlagStatus.CONFIRMED_DUPLICATE,
+        )
+        self.client.login(username="tresorier", password="test123")
+        resp = self.client.get(f"/bons/{self.new_bon.pk}/")
+        self.assertNotContains(resp, "Same temporary scan")
+        self.assertNotContains(resp, "BC BB260099")
+
+    def test_detail_shows_confidence_as_real_percentage(self):
+        DuplicateFlag.objects.create(
+            receipt_file=self.new_receipt,
+            suspected_duplicate_receipt=self.existing_receipt,
+            confidence=Decimal("0.95"),
+            gpt_comparison_result="Same merchant",
+            status=DuplicateFlagStatus.PENDING,
+        )
+        self.client.login(username="tresorier", password="test123")
+        resp = self.client.get(f"/bons/{self.new_bon.pk}/")
+        self.assertContains(resp, "Confiance : 95%")
+        self.assertNotContains(resp, "Confiance : 1%")
 
     def test_detail_shows_export_links_when_ready(self):
         self.client.login(username="tresorier", password="test123")
