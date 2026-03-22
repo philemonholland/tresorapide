@@ -790,6 +790,41 @@ def _safe_extracted_fields(receipt):
         return None
 
 
+def _supplement_amounts_from_invoices(initial, receipt):
+    """Fill missing subtotal/tps/tvq in *initial* from invoice docs in the same PDF.
+
+    When a paper BC doesn't have taxes written on it but the associated
+    invoice(s) do, we pull them into the review form so the treasurer sees
+    the correct values instead of empty fields.
+    """
+    needs_subtotal = initial.get("subtotal") is None
+    needs_tps = initial.get("tps") is None
+    needs_tvq = initial.get("tvq") is None
+
+    if not (needs_subtotal or needs_tps or needs_tvq):
+        return  # nothing missing
+
+    try:
+        all_docs = json.loads(receipt.ocr_raw_text or "[]")
+    except (json.JSONDecodeError, TypeError):
+        return
+
+    invoices = [d for d in all_docs if d.get("document_type") == "invoice"]
+    if not invoices:
+        return
+
+    aggregated = _aggregate_json_document_amounts(invoices)
+    if needs_subtotal and aggregated["subtotal"] is not None:
+        initial["subtotal"] = aggregated["subtotal"]
+    if needs_tps and aggregated["tps"] is not None:
+        initial["tps"] = aggregated["tps"]
+    if needs_tvq and aggregated["tvq"] is not None:
+        initial["tvq"] = aggregated["tvq"]
+    # Also fill total from invoice if BC had none
+    if initial.get("total") is None and aggregated["total"] is not None:
+        initial["total"] = aggregated["total"]
+
+
 def _aggregate_extracted_amounts(extracted_fields, *, prefer_invoice_totals=False):
     """Aggregate totals from extracted fields, optionally preferring invoices over the paper BC."""
     documents = []
@@ -1265,6 +1300,11 @@ class OcrReviewView(TreasurerRequiredMixin, View):
                 "total": ef.final_total if ef.final_total is not None else ef.total_candidate,
                 "summary": ef.final_summary or ef.summary_candidate or "",
             })
+
+            # For paper BCs: when subtotal/taxes are missing on the BC,
+            # try to fill them from invoice documents in the same PDF.
+            if doc_type == "paper_bc":
+                _supplement_amounts_from_invoices(initial, receipt)
         except ReceiptExtractedFields.DoesNotExist:
             initial["document_type"] = "receipt"
 

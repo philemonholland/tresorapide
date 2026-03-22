@@ -891,6 +891,74 @@ class MismatchWarningTests(TestCase):
         self.assertEqual(warning["bc_number"], "16739")
         self.assertAlmostEqual(float(warning["bc_total"]), 19.49)
 
+    def test_supplement_amounts_from_invoices(self):
+        """When paper BC has no taxes, they should be filled from invoice data."""
+        from bons.views import _supplement_amounts_from_invoices
+        from unittest.mock import MagicMock
+
+        receipt = MagicMock()
+        receipt.ocr_raw_text = json.dumps([
+            {
+                "document_type": "paper_bc",
+                "bc_number": "17186",
+                "subtotal": None,
+                "tps": None,
+                "tvq": None,
+                "total": 54.58,
+            },
+            {
+                "document_type": "invoice",
+                "associated_bc_number": "17186",
+                "subtotal": 47.47,
+                "tps": 2.37,
+                "tvq": 4.74,
+                "total": 54.58,
+            },
+        ])
+        initial = {"subtotal": None, "tps": None, "tvq": None, "total": Decimal("54.58")}
+        _supplement_amounts_from_invoices(initial, receipt)
+        self.assertAlmostEqual(float(initial["subtotal"]), 47.47)
+        self.assertAlmostEqual(float(initial["tps"]), 2.37)
+        self.assertAlmostEqual(float(initial["tvq"]), 4.74)
+        # total should remain the BC value since it was already set
+        self.assertAlmostEqual(float(initial["total"]), 54.58)
+
+    def test_supplement_does_not_overwrite_existing_values(self):
+        """When paper BC already has taxes, invoice values should NOT overwrite."""
+        from bons.views import _supplement_amounts_from_invoices
+        from unittest.mock import MagicMock
+
+        receipt = MagicMock()
+        receipt.ocr_raw_text = json.dumps([
+            {
+                "document_type": "paper_bc",
+                "bc_number": "100",
+                "subtotal": 10.00,
+                "tps": 0.50,
+                "tvq": 1.00,
+                "total": 11.50,
+            },
+            {
+                "document_type": "invoice",
+                "subtotal": 99.99,
+                "tps": 5.00,
+                "tvq": 9.98,
+                "total": 114.97,
+            },
+        ])
+        initial = {
+            "subtotal": Decimal("10.00"),
+            "tps": Decimal("0.50"),
+            "tvq": Decimal("1.00"),
+            "total": Decimal("11.50"),
+        }
+        _supplement_amounts_from_invoices(initial, receipt)
+        # Values should remain unchanged
+        self.assertEqual(initial["subtotal"], Decimal("10.00"))
+        self.assertEqual(initial["tps"], Decimal("0.50"))
+        self.assertEqual(initial["tvq"], Decimal("1.00"))
+        self.assertEqual(initial["total"], Decimal("11.50"))
+
 
 class SignerRoleWorkflowTests(TestCase):
     def setUp(self):
