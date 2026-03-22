@@ -432,6 +432,63 @@ class OcrMemberDirectoryTests(TestCase):
         self.assertEqual(purchaser_apartment, self.apartment)
 
 
+class OcrBatchSplittingTests(TestCase):
+    """Test that PDFs are isolated into their own batches."""
+
+    def test_each_pdf_gets_own_batch(self):
+        file_map = {
+            "BC16011.pdf": "/tmp/BC16011.pdf",
+            "BC16739.pdf": "/tmp/BC16739.pdf",
+        }
+        # Mock page counts so each PDF has 2 pages
+        with patch.object(ReceiptOcrService, "_count_pages", return_value={
+            "BC16011.pdf": 2, "BC16739.pdf": 2,
+        }):
+            batches = ReceiptOcrService._split_file_map(file_map)
+        self.assertEqual(len(batches), 2)
+        self.assertIn("BC16011.pdf", batches[0])
+        self.assertIn("BC16739.pdf", batches[1])
+
+    def test_images_grouped_together(self):
+        file_map = {
+            "receipt1.png": "/tmp/receipt1.png",
+            "receipt2.jpg": "/tmp/receipt2.jpg",
+            "receipt3.png": "/tmp/receipt3.png",
+        }
+        with patch.object(ReceiptOcrService, "_count_pages", return_value={
+            "receipt1.png": 1, "receipt2.jpg": 1, "receipt3.png": 1,
+        }):
+            batches = ReceiptOcrService._split_file_map(file_map)
+        self.assertEqual(len(batches), 1)
+        self.assertEqual(len(batches[0]), 3)
+
+    def test_pdf_separates_from_images(self):
+        file_map = {
+            "receipt1.png": "/tmp/receipt1.png",
+            "BC16011.pdf": "/tmp/BC16011.pdf",
+            "receipt2.png": "/tmp/receipt2.png",
+        }
+        with patch.object(ReceiptOcrService, "_count_pages", return_value={
+            "receipt1.png": 1, "BC16011.pdf": 3, "receipt2.png": 1,
+        }):
+            batches = ReceiptOcrService._split_file_map(file_map)
+        self.assertEqual(len(batches), 3)
+        self.assertIn("receipt1.png", batches[0])
+        self.assertIn("BC16011.pdf", batches[1])
+        self.assertIn("receipt2.png", batches[2])
+
+    def test_images_respect_page_limit(self):
+        file_map = {f"r{i}.png": f"/tmp/r{i}.png" for i in range(6)}
+        with patch.object(ReceiptOcrService, "_count_pages", return_value={
+            f"r{i}.png": 1 for i in range(6)
+        }):
+            batches = ReceiptOcrService._split_file_map(file_map)
+        # 6 images at 1 page each, MAX=4 → 2 batches (4+2)
+        self.assertEqual(len(batches), 2)
+        self.assertEqual(len(batches[0]), 4)
+        self.assertEqual(len(batches[1]), 2)
+
+
 class PaperBcFinalizationTests(TestCase):
     """Test that _finalize_bons correctly handles paper BC + invoice + receipt mixes."""
 
@@ -931,6 +988,51 @@ class SignerRoleWorkflowTests(TestCase):
         self.assertEqual(self.bon.purchaser_apartment, self.apt_203)
         self.assertEqual(self.bon.approver_member, self.purchaser)
         self.assertEqual(self.bon.approver_apartment, self.apt_202)
+
+    def test_external_supplier_signer_no_mismatch(self):
+        """When the validator name doesn't match any member, treat as external (no mismatch)."""
+        self.extracted.validator_member_name_candidate = "Plomberie ABC Inc."
+        self.extracted.validator_apartment_candidate = ""
+        self.extracted.save()
+
+        initial, _, validator_mismatch, _, _ = _paper_bc_signer_initials(self.house, self.extracted)
+        self.assertFalse(validator_mismatch)
+        self.assertTrue(initial.get("validator_is_external"))
+
+    def test_external_supplier_display_label(self):
+        """External approver should display as 'FOUR / [name]'."""
+        self.bon.approver_is_external = True
+        self.bon.approver_member = None
+        self.bon.approver_apartment = None
+        self.bon.approver_name_snapshot = "Plomberie ABC Inc."
+        self.bon.save()
+
+        self.assertEqual(self.bon.approver_display_label, "FOUR / Plomberie ABC Inc.")
+        self.assertEqual(self.bon.effective_validator_display_label, "FOUR / Plomberie ABC Inc.")
+
+    def test_external_supplier_blocks_swap(self):
+        """Swapping signers should be blocked for external approvers."""
+        self.bon.approver_is_external = True
+        self.bon.approver_member = None
+        self.bon.approver_apartment = None
+        self.bon.approver_name_snapshot = "Plomberie ABC Inc."
+        self.bon.save()
+
+        self.client.login(username="tresorier", password="test123")
+        response = self.client.post(reverse("bons:swap-signers", kwargs={"pk": self.bon.pk}))
+        self.assertEqual(response.status_code, 302)
+        self.bon.refresh_from_db()
+        # Purchaser should NOT have changed
+        self.assertEqual(self.bon.purchaser_member, self.treasurer_member)
+
+    def test_external_snapshot_preserved_on_refresh(self):
+        """refresh_snapshot_fields should keep the external name."""
+        self.bon.approver_is_external = True
+        self.bon.approver_member = None
+        self.bon.approver_apartment = None
+        self.bon.approver_name_snapshot = "Plomberie ABC Inc."
+        self.bon.refresh_snapshot_fields()
+        self.assertEqual(self.bon.approver_name_snapshot, "Plomberie ABC Inc.")
 
 
 class FuzzyNameMatchTests(TestCase):

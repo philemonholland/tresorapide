@@ -98,6 +98,10 @@ class BonDeCommande(TimeStampedModel, NonDestructiveModel):
         "members.Apartment", on_delete=models.PROTECT,
         null=True, blank=True, related_name="approver_bons"
     )
+    approver_is_external = models.BooleanField(
+        default=False,
+        help_text="True when the approver/validator is an external supplier (fournisseur), not a coop member"
+    )
     created_by = models.ForeignKey(
         "accounts.User", on_delete=models.SET_NULL,
         null=True, blank=True, related_name="created_bons"
@@ -179,7 +183,8 @@ class BonDeCommande(TimeStampedModel, NonDestructiveModel):
             self.approver_name_snapshot = self.approver_member.display_name
             apt = self.approver_apartment
             self.approver_unit_snapshot = apt.code if apt else ""
-        else:
+        elif not self.approver_is_external:
+            # Only clear snapshot if not external; external approvers keep their name
             self.approver_name_snapshot = ""
             self.approver_unit_snapshot = ""
         if self.budget_year:
@@ -228,7 +233,16 @@ class BonDeCommande(TimeStampedModel, NonDestructiveModel):
 
     @property
     def approver_display_label(self) -> str:
-        """Display explicit approver if one is stored on the bon."""
+        """Display explicit approver if one is stored on the bon.
+
+        External suppliers (fournisseurs) are shown as 'FOUR / [name]'.
+        """
+        if self.approver_is_external:
+            name = (
+                self.approver_member.display_name if self.approver_member
+                else (self.approver_name_snapshot or "").strip()
+            )
+            return f"FOUR / {name}" if name else "FOUR"
         return self.format_person_label(
             self.approver_member,
             self.approver_apartment,
@@ -256,6 +270,8 @@ class BonDeCommande(TimeStampedModel, NonDestructiveModel):
     @property
     def effective_validator_display_label(self) -> str:
         """Display approver, or the validating treasurer when no second signer exists."""
+        if self.approver_is_external:
+            return self.approver_display_label
         explicit_label = self.approver_display_label
         return explicit_label if explicit_label != "—" else self.validating_treasurer_display_label
 

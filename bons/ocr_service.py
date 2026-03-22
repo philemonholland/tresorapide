@@ -308,24 +308,43 @@ class ReceiptOcrService:
 
     @classmethod
     def _split_file_map(cls, file_map: dict[str, str]) -> list[dict[str, str]]:
-        """Split file_map into sub-batches of at most MAX_PAGES_PER_BATCH pages."""
+        """Split file_map into sub-batches for OCR accuracy.
+
+        Strategy:
+        - Each PDF gets its own batch, since a PDF typically contains a
+          complete set (paper BC + its invoices) and mixing multiple PDFs
+          in one GPT call causes cross-contamination and misreads.
+        - Individual images (PNG/JPG) are grouped together up to
+          MAX_PAGES_PER_BATCH to remain efficient for single-receipt photos.
+        """
         page_counts = cls._count_pages(file_map)
         batches = []
-        current_batch = {}
-        current_pages = 0
+        image_batch = {}
+        image_pages = 0
 
         for label, path in file_map.items():
             file_pages = page_counts.get(label, 1)
-            # If a single file exceeds the limit, give it its own batch
-            if current_pages + file_pages > MAX_PAGES_PER_BATCH and current_batch:
-                batches.append(current_batch)
-                current_batch = {}
-                current_pages = 0
-            current_batch[label] = path
-            current_pages += file_pages
+            is_pdf = path.lower().endswith(".pdf")
 
-        if current_batch:
-            batches.append(current_batch)
+            if is_pdf:
+                # Flush any pending images before the PDF
+                if image_batch:
+                    batches.append(image_batch)
+                    image_batch = {}
+                    image_pages = 0
+                # Each PDF is its own batch
+                batches.append({label: path})
+            else:
+                # Group images together, respecting page limit
+                if image_pages + file_pages > MAX_PAGES_PER_BATCH and image_batch:
+                    batches.append(image_batch)
+                    image_batch = {}
+                    image_pages = 0
+                image_batch[label] = path
+                image_pages += file_pages
+
+        if image_batch:
+            batches.append(image_batch)
 
         return batches
 

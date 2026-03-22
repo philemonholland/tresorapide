@@ -137,6 +137,10 @@
                         <div class="message warning" style="margin-bottom: 0.5rem;">
                             ⚠️ Le 2e signataire n'a pas pu être associé clairement à un membre de la maison. Veuillez valider la sélection.
                         </div>
+                        {% elif validator_is_external %}
+                        <div class="message info" style="margin-bottom: 0.5rem;">
+                            📋 Le 2e signataire semble être un fournisseur externe (non-membre). Il sera affiché comme <strong>FOUR / {{ form.validator_member_name.value }}</strong>.
+                        </div>
                         {% endif %}
 
                         {% if form.validator_member_name.value %}
@@ -154,6 +158,11 @@
                             <label for="{{ form.validator_member.id_for_label }}">{{ form.validator_member.label }}</label>
                             {{ form.validator_member }}
                             {% for error in form.validator_member.errors %}<p class="error-text">{{ error }}</p>{% endfor %}
+                        </div>
+                        <div class="form-group">
+                            {{ form.validator_is_external }}
+                            <label for="{{ form.validator_is_external.id_for_label }}" style="display:inline;">{{ form.validator_is_external.label }}</label>
+                            {% if form.validator_is_external.help_text %}<br><small class="text-muted">{{ form.validator_is_external.help_text }}</small>{% endif %}
                         </div>
                         <div class="form-group">
                             <label for="{{ form.signer_roles_ambiguous.id_for_label }}">{{ form.signer_roles_ambiguous.label }}</label>

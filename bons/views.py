@@ -295,7 +295,13 @@ class BonSwapSignersView(TreasurerRequiredMixin, View):
             pk=pk,
         )
         if not bon.approver_member_id:
-            messages.error(request, "Aucun 2e signataire à échanger pour ce bon.")
+            if bon.approver_is_external:
+                messages.error(
+                    request,
+                    "Le validateur est un fournisseur externe — l'échange de rôles n'est pas possible.",
+                )
+            else:
+                messages.error(request, "Aucun 2e signataire à échanger pour ce bon.")
             return redirect(reverse("bons:detail", kwargs={"pk": bon.pk}))
 
         (
@@ -548,6 +554,7 @@ class ReceiptReviewSingleView(TreasurerRequiredMixin, View):
             "name_mismatch": name_mismatch,
             "expense_member_mismatch": expense_member_mismatch,
             "validator_member_mismatch": validator_member_mismatch,
+            "validator_is_external": bool(initial.get("validator_is_external")),
             "document_type": doc_type,
             "mismatch_warning": mismatch_warning,
             "signer_roles_ambiguous": bool(initial.get("signer_roles_ambiguous")),
@@ -892,7 +899,12 @@ def _aggregate_json_document_amounts(documents, *, prefer_invoice_totals=False):
 
 
 def _paper_bc_signer_initials(house, ef):
-    """Build review-form initials and mismatch flags for paper BC signer fields."""
+    """Build review-form initials and mismatch flags for paper BC signer fields.
+
+    When the validator name doesn't resolve to a coop member, they are treated
+    as an external supplier (fournisseur) — no mismatch is flagged, and the
+    initial dict gets ``validator_is_external = True``.
+    """
     purchaser_name = ef.final_expense_member_name or ef.expense_member_name_candidate or ""
     purchaser_apt = ef.final_expense_apartment or ef.expense_apartment_candidate or ""
     validator_name = ef.final_validator_member_name or ef.validator_member_name_candidate or ""
@@ -908,6 +920,7 @@ def _paper_bc_signer_initials(house, ef):
         "validator_member_name": validator_name,
         "validator_apartment": validator_apt,
         "signer_roles_ambiguous": roles_ambiguous,
+        "validator_is_external": False,
     }
     purchaser_mismatch = False
     validator_mismatch = False
@@ -934,7 +947,8 @@ def _paper_bc_signer_initials(house, ef):
         if validator_name and validator_name.upper() != "ILLISIBLE":
             validator_mismatch = not _names_match(validator_name, validator_member.display_name)
     elif validator_name and validator_name.upper() != "ILLISIBLE":
-        validator_mismatch = True
+        # Validator name exists but doesn't match any member → external supplier
+        initial["validator_is_external"] = True
 
     if purchaser_member and validator_member and purchaser_member.pk == validator_member.pk:
         validator_mismatch = True
@@ -1223,6 +1237,7 @@ class OcrReviewView(TreasurerRequiredMixin, View):
             doc_type,
             expense_member_mismatch,
             validator_member_mismatch,
+            bool(initial.get("validator_is_external")),
         )
 
     def get(self, request, pk):
@@ -1238,10 +1253,11 @@ class OcrReviewView(TreasurerRequiredMixin, View):
             doc_type,
             expense_mismatch,
             validator_mismatch,
+            validator_external,
         ) = self._build_form(current, bon)
         return self._render(
             request, bon, current, form, idx, total, matched_name, name_mismatch,
-            doc_type, expense_mismatch, validator_mismatch,
+            doc_type, expense_mismatch, validator_mismatch, validator_external,
         )
 
     def post(self, request, pk):
@@ -1550,6 +1566,16 @@ class OcrReviewView(TreasurerRequiredMixin, View):
                             validator_apartment = None
                         update_fields["approver_member_id"] = validator_member.pk if validator_member else None
                         update_fields["approver_apartment_id"] = validator_apartment.pk if validator_apartment else None
+
+                        # External supplier: name exists but no member match
+                        is_external = bool(
+                            validator_name
+                            and validator_name.upper() != "ILLISIBLE"
+                            and not validator_member
+                        )
+                        update_fields["approver_is_external"] = is_external
+                        if is_external:
+                            update_fields["approver_name_snapshot"] = validator_name.strip()
                         break
                 except ReceiptExtractedFields.DoesNotExist:
                     continue
@@ -1623,7 +1649,7 @@ class OcrReviewView(TreasurerRequiredMixin, View):
             paper_bc_number=paper_bc_number,
         )
 
-    def _render(self, request, bon, receipt, form, idx, total, matched_member_name, name_mismatch=False, document_type="receipt", expense_member_mismatch=False, validator_member_mismatch=False):
+    def _render(self, request, bon, receipt, form, idx, total, matched_member_name, name_mismatch=False, document_type="receipt", expense_member_mismatch=False, validator_member_mismatch=False, validator_is_external=False):
         mismatch_warning = _get_mismatch_warning(receipt)
         return TemplateResponse(request, self.template_name, {
             "bon": bon,
@@ -1636,6 +1662,7 @@ class OcrReviewView(TreasurerRequiredMixin, View):
             "name_mismatch": name_mismatch,
             "expense_member_mismatch": expense_member_mismatch,
             "validator_member_mismatch": validator_member_mismatch,
+            "validator_is_external": validator_is_external,
             "document_type": document_type,
             "mismatch_warning": mismatch_warning,
             "signer_roles_ambiguous": bool(form["signer_roles_ambiguous"].value()),

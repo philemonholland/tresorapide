@@ -239,6 +239,11 @@ class OcrReviewForm(forms.Form):
         label="Attribution acheteur / validateur ambiguë",
         help_text="Cochez si les deux signatures doivent être validées manuellement.",
     )
+    validator_is_external = forms.BooleanField(
+        required=False,
+        label="Fournisseur externe (non-membre)",
+        help_text="Cochez si le validateur n'est pas un membre de la coopérative.",
+    )
 
     member_name_raw = forms.CharField(
         max_length=200, required=False,
