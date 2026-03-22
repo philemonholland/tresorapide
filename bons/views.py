@@ -523,11 +523,11 @@ def _get_mismatch_warning(receipt):
     if not paper_bcs or not invoices:
         return None
 
-    bc_total = paper_bcs[0].get("total") or 0
-    invoice_total = sum(d.get("total") or 0 for d in invoices)
-
     try:
-        if abs(float(bc_total) - float(invoice_total)) > 0.01:
+        bc_total = float(paper_bcs[0].get("total") or 0)
+        invoice_total = sum(float(d.get("total") or 0) for d in invoices)
+
+        if abs(bc_total - invoice_total) > 0.01:
             return {
                 "bc_total": bc_total,
                 "invoice_total": invoice_total,
