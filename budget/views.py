@@ -443,6 +443,7 @@ class ExpenseLedgerView(RoleRequiredMixin, ListView):
     def get_context_data(self, **kwargs):
         ctx = super().get_context_data(**kwargs)
         ctx["budget_year"] = self.budget_year
+        ctx["base"] = BudgetCalculationService.base_values(self.budget_year)
         ctx["ledger_rows"] = BudgetCalculationService.running_balances(self.budget_year)
         ctx["can_manage"] = (
             self.request.user.is_authenticated

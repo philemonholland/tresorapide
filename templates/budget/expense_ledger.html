@@ -21,7 +21,10 @@
     <section class="card">
         {% if ledger_rows %}
             <div class="table-responsive">
-                <table class="data-table enhanced-table">
+                <table class="data-table enhanced-table"
+                       data-running-balance="true"
+                       data-budget-total="{{ base.budget_total }}"
+                       data-budget-minus-imprevues="{{ base.budget_minus_imprevues }}">
                     <thead>
                         <tr>
                             <th>Date</th>
@@ -31,9 +34,9 @@
                             <th>Fournisseur</th>
                             <th>Dépensé par</th>
                             <th>Validé par</th>
-                            <th>Montant</th>
-                            <th>Solde</th>
-                            <th>Solde − 15 %</th>
+                            <th class="text-right">Montant</th>
+                            <th class="text-right">Solde</th>
+                            <th class="text-right">Solde − 15 %</th>
                             {% if can_manage %}
                                 <th>Actions</th>
                             {% endif %}
@@ -41,20 +44,22 @@
                     </thead>
                     <tbody>
                         {% for row in ledger_rows %}
-                            <tr{% if row.expense.is_cancellation %} style="color: var(--negative, #c0392b);"{% endif %}{% if row.expense.is_cancelled %} style="text-decoration: line-through; opacity: 0.6;"{% endif %}>
-                                <td>{{ row.expense.entry_date|date:"Y-m-d" }}</td>
+                            <tr data-amount="{{ row.expense.amount }}"
+                                data-trace="{{ row.expense.sub_budget.trace_code }}"
+                                {% if row.expense.is_cancellation %}style="color: var(--negative, #c0392b);"{% elif row.expense.is_cancelled %}style="text-decoration: line-through; opacity: 0.6;"{% endif %}>
+                                <td class="nowrap">{{ row.expense.entry_date|date:"Y-m-d" }}</td>
                                 <td>
                                     {{ row.expense.description }}
                                     {% if row.expense.is_cancellation %}<strong> [ANNULATION]</strong>{% endif %}
                                 </td>
                                 <td>{{ row.expense.bon_number|default:"—" }}</td>
-                                <td>{{ row.expense.sub_budget.trace_code }}</td>
+                                <td class="text-center">{{ row.expense.sub_budget.trace_code }}</td>
                                 <td>{{ row.expense.supplier_name|default:"—" }}</td>
                                 <td>{{ row.expense.display_spent_by_label }}</td>
                                 <td>{{ row.expense.display_approved_by_label }}</td>
-                                <td{% if row.expense.is_cancellation %} style="font-weight: bold;"{% endif %}>{{ row.expense.amount|floatformat:2 }} $</td>
-                                <td>{{ row.balance|floatformat:2 }} $</td>
-                                <td>{{ row.balance_minus_imprevues|floatformat:2 }} $</td>
+                                <td class="text-right nowrap"{% if row.expense.is_cancellation %} style="font-weight: bold;"{% endif %}>{{ row.expense.amount|floatformat:2 }} $</td>
+                                <td class="text-right nowrap balance-cell">{{ row.balance|floatformat:2 }} $</td>
+                                <td class="text-right nowrap balance-15-cell">{{ row.balance_minus_imprevues|floatformat:2 }} $</td>
                                 {% if can_manage %}
                                     <td>
                                         {% if not row.expense.is_cancellation %}
