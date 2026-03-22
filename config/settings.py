@@ -163,6 +163,7 @@ LANGUAGE_CODE = "fr"
 TIME_ZONE = get_env("DJANGO_TIME_ZONE", "America/Toronto")
 USE_I18N = True
 USE_TZ = True
+FORMAT_MODULE_PATH = ["config.formats"]
 
 STATIC_URL = "/static/"
 STATIC_ROOT = get_path_env("DJANGO_STATIC_ROOT", BASE_DIR / "staticfiles")
