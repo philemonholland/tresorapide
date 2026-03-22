@@ -6,7 +6,9 @@ from django.views.generic.edit import FormView
 from django.contrib import messages
 from django.template.response import TemplateResponse
 from collections import defaultdict
+from difflib import SequenceMatcher
 import json
+import unicodedata
 
 from accounts.access import RoleRequiredMixin, TreasurerRequiredMixin, check_house_permission
 from .models import (
@@ -17,6 +19,34 @@ from .forms import (
     MultiReceiptUploadForm, OcrReviewForm, BonSearchForm,
 )
 from .services import generate_bon_number
+
+
+def _normalize_name(name: str) -> str:
+    """Lowercase, strip accents, collapse whitespace."""
+    name = name.strip().lower()
+    # Remove accents: é→e, è→e, ê→e, etc.
+    name = unicodedata.normalize("NFD", name)
+    name = "".join(c for c in name if unicodedata.category(c) != "Mn")
+    return " ".join(name.split())
+
+
+def _names_match(ocr_name: str, member_name: str, threshold: float = 0.80) -> bool:
+    """
+    Fuzzy case-insensitive + accent-insensitive name comparison.
+    Returns True if names are similar enough (default ≥80% similarity).
+    Also returns True if one name is a substring of the other.
+    """
+    if not ocr_name or not member_name:
+        return False
+    a = _normalize_name(ocr_name)
+    b = _normalize_name(member_name)
+    if not a or not b:
+        return False
+    # Exact or substring match
+    if a in b or b in a:
+        return True
+    # Fuzzy ratio
+    return SequenceMatcher(None, a, b).ratio() >= threshold
 
 
 def _filter_by_house(qs, user):
@@ -282,7 +312,7 @@ class ReceiptReviewSingleView(TreasurerRequiredMixin, View):
 
             name_unreadable = not member_name_raw or member_name_raw.upper() == "ILLISIBLE"
             if member and member_name_raw and not name_unreadable:
-                if member_name_raw.lower().strip() not in member.display_name.lower():
+                if not _names_match(member_name_raw, member.display_name):
                     name_mismatch = True
 
             initial.update({
@@ -314,7 +344,7 @@ class ReceiptReviewSingleView(TreasurerRequiredMixin, View):
                     _, exp_member = _match_member_for_apartment(bon.house, exp_apt)
                     if exp_member:
                         initial["expense_member"] = exp_member.pk
-                        if exp_name and exp_name.lower().strip() not in exp_member.display_name.lower():
+                        if exp_name and not _names_match(exp_name, exp_member.display_name):
                             expense_member_mismatch = True
                     else:
                         expense_member_mismatch = True
@@ -324,7 +354,7 @@ class ReceiptReviewSingleView(TreasurerRequiredMixin, View):
                         apartment__house=bon.house, end_date__isnull=True,
                     ).values_list("member_id", flat=True)
                     for m in Member.objects.filter(pk__in=house_member_ids, is_active=True):
-                        if exp_name.lower().strip() in m.display_name.lower():
+                        if _names_match(exp_name, m.display_name):
                             initial["expense_member"] = m.pk
                             break
                     else:
@@ -649,7 +679,7 @@ class OcrReviewView(TreasurerRequiredMixin, View):
                     initial["expense_member"] = exp_member.pk
                     # Check name match
                     if expense_name and expense_name.upper() != "ILLISIBLE":
-                        if expense_name.lower().strip() not in exp_member.display_name.lower():
+                        if not _names_match(expense_name, exp_member.display_name):
                             expense_member_mismatch = True
                 elif expense_name and expense_name.upper() != "ILLISIBLE":
                     expense_member_mismatch = True
@@ -659,7 +689,7 @@ class OcrReviewView(TreasurerRequiredMixin, View):
                     apartment__house=bon.house, end_date__isnull=True
                 ).values_list("member_id", flat=True)
                 for m in Member.objects.filter(pk__in=house_member_ids, is_active=True):
-                    if expense_name.lower().strip() in m.display_name.lower():
+                    if _names_match(expense_name, m.display_name):
                         initial["expense_member"] = m.pk
                         break
                 else:
@@ -680,7 +710,7 @@ class OcrReviewView(TreasurerRequiredMixin, View):
 
                 name_unreadable = not member_name_raw or member_name_raw.upper() == "ILLISIBLE"
                 if member and member_name_raw and not name_unreadable:
-                    if member_name_raw.lower().strip() not in member.display_name.lower():
+                    if not _names_match(member_name_raw, member.display_name):
                         name_mismatch = True
 
                 initial["member_name_raw"] = member_name_raw if (member and not name_mismatch and not name_unreadable) else ""

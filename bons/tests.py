@@ -12,6 +12,7 @@ from budget.models import BudgetYear, SubBudget, Expense
 from bons.models import BonDeCommande, BonStatus
 from bons.services import generate_bon_number
 from bons.ocr_service import ReceiptOcrService
+from bons.views import _names_match, _normalize_name
 
 
 class BonNumberGenerationTests(TestCase):
@@ -576,3 +577,36 @@ class MismatchWarningTests(TestCase):
             {"document_type": "receipt", "total": 25.00},
         ])
         self.assertIsNone(_get_mismatch_warning(receipt))
+
+
+class FuzzyNameMatchTests(TestCase):
+    """Test _names_match and _normalize_name for case/accent-insensitive matching."""
+
+    def test_exact_match(self):
+        self.assertTrue(_names_match("Marylin Lamarche", "Marylin Lamarche"))
+
+    def test_case_insensitive(self):
+        self.assertTrue(_names_match("MARYLINE LAMARCHE", "Marylin Lamarche"))
+
+    def test_spelling_variation(self):
+        # MARYLINE vs Marylin — one extra letter
+        self.assertTrue(_names_match("MARYLINE LAMARCHE", "Marylin Lamarche"))
+
+    def test_accented_names(self):
+        self.assertTrue(_names_match("René Lévesque", "rene levesque"))
+        self.assertTrue(_names_match("HÉLOÏSE CÔTÉ", "Heloise Cote"))
+
+    def test_substring_match(self):
+        self.assertTrue(_names_match("Carl-David", "Carl-David Fortin"))
+
+    def test_completely_different_names(self):
+        self.assertFalse(_names_match("Jean Tremblay", "Marie Bouchard"))
+
+    def test_empty_strings(self):
+        self.assertFalse(_names_match("", "Someone"))
+        self.assertFalse(_names_match("Someone", ""))
+        self.assertFalse(_names_match("", ""))
+
+    def test_normalize_strips_accents(self):
+        self.assertEqual(_normalize_name("Héloïse Côté"), "heloise cote")
+        self.assertEqual(_normalize_name("  CARL-DAVID  FORTIN  "), "carl-david fortin")
