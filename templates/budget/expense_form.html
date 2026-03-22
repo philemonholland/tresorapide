@@ -9,7 +9,7 @@
                 <h1>{% if object %}Modifier la dépense{% else %}Ajouter une dépense{% endif %}</h1>
                 <p class="text-muted">{{ budget_year.label }} — {{ budget_year.house.code }}</p>
             </div>
-            <a class="button-link" href="{% url 'budget:expense-ledger' budget_year.pk %}">Retour au grand livre</a>
+            <a class="button-link" href="{% url 'budget:expense-ledger' budget_year.pk %}">Retour à la grille</a>
         </div>
         <form method="post" class="stack">
             {% csrf_token %}
