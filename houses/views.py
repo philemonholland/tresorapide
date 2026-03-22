@@ -58,18 +58,21 @@ class HouseCreateView(AdminRequiredMixin, CreateView):
         # Auto-create treasurer account
         t_username = f"tresorier-{code}"
         if not User.objects.filter(username=t_username).exists():
+            import secrets
+            t_password = secrets.token_urlsafe(12)
             t_user = User(username=t_username, role=Role.TREASURER, house=house)
-            t_user.set_password(f"tresorier-{code}")
+            t_user.set_password(t_password)
             t_user.save()
-            created_accounts.append(t_username)
+            created_accounts.append(f"{t_username} (mot de passe : {t_password})")
 
         # Auto-create member (viewer) account
         m_username = f"membre-{code}"
         if not User.objects.filter(username=m_username).exists():
+            m_password = secrets.token_urlsafe(12)
             m_user = User(username=m_username, role=Role.VIEWER, house=house)
-            m_user.set_password(f"membre-{code}")
+            m_user.set_password(m_password)
             m_user.save()
-            created_accounts.append(m_username)
+            created_accounts.append(f"{m_username} (mot de passe : {m_password})")
 
         msg = f"Maison « {house} » créée."
         if created_accounts:

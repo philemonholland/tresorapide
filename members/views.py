@@ -7,7 +7,7 @@ from django.db.models import Prefetch
 from django.urls import reverse, reverse_lazy
 from django.views.generic import CreateView, DetailView, ListView, UpdateView
 
-from accounts.access import TreasurerRequiredMixin, AdminRequiredMixin
+from accounts.access import TreasurerRequiredMixin, AdminRequiredMixin, ViewerRequiredMixin
 
 from .forms import ApartmentForm, MemberForm, ResidencyForm
 from .models import Apartment, Member, Residency
@@ -20,10 +20,10 @@ def _filter_by_house(qs, user, field="house"):
     return qs
 
 
-# -- Members (read-only views are public) ------------------------------------
+# -- Members -----------------------------------------------------------------
 
-class MemberListView(ListView):
-    """Tous les membres. Accessible sans connexion (lecture seule)."""
+class MemberListView(ViewerRequiredMixin, ListView):
+    """Tous les membres. Accessible aux utilisateurs connectés."""
     model = Member
     template_name = "members/member_list.html"
     context_object_name = "members"
@@ -100,8 +100,8 @@ class MemberListView(ListView):
         return ctx
 
 
-class MemberDetailView(DetailView):
-    """Detail d'un membre. Accessible sans connexion (lecture seule)."""
+class MemberDetailView(ViewerRequiredMixin, DetailView):
+    """Détail d'un membre. Accessible aux utilisateurs connectés."""
     model = Member
     template_name = "members/member_detail.html"
     context_object_name = "member"
@@ -184,8 +184,8 @@ class MemberUpdateView(TreasurerRequiredMixin, UpdateView):
 
 # -- Apartments --------------------------------------------------------------
 
-class ApartmentListView(ListView):
-    """Liste des appartements. Accessible sans connexion."""
+class ApartmentListView(ViewerRequiredMixin, ListView):
+    """Liste des appartements. Accessible aux utilisateurs connectés."""
     model = Apartment
     template_name = "members/apartment_list.html"
     context_object_name = "apartments"

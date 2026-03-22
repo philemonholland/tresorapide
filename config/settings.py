@@ -150,6 +150,7 @@ AUTH_PASSWORD_VALIDATORS = [
     },
     {
         "NAME": "django.contrib.auth.password_validation.MinimumLengthValidator",
+        "OPTIONS": {"min_length": 12},
     },
     {
         "NAME": "django.contrib.auth.password_validation.CommonPasswordValidator",
@@ -198,6 +199,24 @@ REST_FRAMEWORK = {
 }
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+
+# ── Security hardening ──────────────────────────────────────────────────────
+_REQUIRE_HTTPS = get_bool_env("DJANGO_REQUIRE_HTTPS", default=False)
+SESSION_COOKIE_HTTPONLY = True
+SESSION_COOKIE_SECURE = _REQUIRE_HTTPS
+CSRF_COOKIE_SECURE = _REQUIRE_HTTPS
+SECURE_CONTENT_TYPE_NOSNIFF = True
+SECURE_BROWSER_XSS_FILTER = True
+X_FRAME_OPTIONS = "DENY"
+if _REQUIRE_HTTPS:
+    SECURE_SSL_REDIRECT = True
+    SECURE_HSTS_SECONDS = 31_536_000
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = True
+    SECURE_HSTS_PRELOAD = True
+
+# File upload limits
+DATA_UPLOAD_MAX_MEMORY_SIZE = 20 * 1024 * 1024  # 20 MB
+FILE_UPLOAD_MAX_MEMORY_SIZE = 10 * 1024 * 1024   # 10 MB
 
 # OpenAI API for receipt analysis (GPT-5.4 Vision)
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")

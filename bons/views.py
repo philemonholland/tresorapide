@@ -25,14 +25,16 @@ def _filter_by_house(qs, user):
     return qs
 
 
-class BonListView(ListView):
+class BonListView(RoleRequiredMixin, ListView):
     model = BonDeCommande
     template_name = "bons/list.html"
     context_object_name = "bons"
     paginate_by = 50
 
     def get_queryset(self):
-        qs = super().get_queryset().select_related(
+        qs = _filter_by_house(
+            super().get_queryset(), self.request.user
+        ).select_related(
             "budget_year", "sub_budget", "purchaser_member"
         ).filter(is_scan_session=False)
 
@@ -59,13 +61,15 @@ class BonListView(ListView):
         return ctx
 
 
-class BonDetailView(DetailView):
+class BonDetailView(RoleRequiredMixin, DetailView):
     model = BonDeCommande
     template_name = "bons/detail.html"
     context_object_name = "bon"
 
     def get_queryset(self):
-        return super().get_queryset().select_related(
+        return _filter_by_house(
+            super().get_queryset(), self.request.user
+        ).select_related(
             "house", "budget_year", "sub_budget",
             "purchaser_member", "purchaser_apartment",
             "approver_member", "created_by", "validated_by",
@@ -163,6 +167,13 @@ class BonValidateView(TreasurerRequiredMixin, FormView):
 
     def form_valid(self, form):
         bon = self.bon
+        # Prevent double-validation and duplicate expense entries
+        if bon.status not in (BonStatus.READY_FOR_VALIDATION, BonStatus.READY_FOR_REVIEW):
+            messages.error(self.request, "Ce bon ne peut plus être validé (statut actuel : {}).".format(
+                bon.get_status_display()
+            ))
+            return redirect(self.get_success_url())
+
         bon.status = BonStatus.VALIDATED
         bon.validated_by = self.request.user
         bon.validated_at = timezone.now()

@@ -40,13 +40,13 @@ def _filter_by_house(qs, user):
 # BudgetYear views
 # ---------------------------------------------------------------------------
 
-class BudgetYearListView(ListView):
+class BudgetYearListView(RoleRequiredMixin, ListView):
     model = BudgetYear
     template_name = "budget/year_list.html"
     context_object_name = "budget_years"
 
     def get_queryset(self):
-        return super().get_queryset()
+        return _filter_by_house(super().get_queryset(), self.request.user)
 
     def get_context_data(self, **kwargs):
         ctx = super().get_context_data(**kwargs)
@@ -57,10 +57,13 @@ class BudgetYearListView(ListView):
         return ctx
 
 
-class BudgetYearDetailView(DetailView):
+class BudgetYearDetailView(RoleRequiredMixin, DetailView):
     model = BudgetYear
     template_name = "budget/year_detail.html"
     context_object_name = "budget_year"
+
+    def get_queryset(self):
+        return _filter_by_house(super().get_queryset(), self.request.user)
 
     def get_context_data(self, **kwargs):
         ctx = super().get_context_data(**kwargs)
@@ -302,13 +305,16 @@ class SubBudgetUpdateView(TreasurerRequiredMixin, UpdateView):
 # Expense views
 # ---------------------------------------------------------------------------
 
-class ExpenseLedgerView(ListView):
+class ExpenseLedgerView(RoleRequiredMixin, ListView):
     model = Expense
     template_name = "budget/expense_ledger.html"
     context_object_name = "ledger_rows"
 
     def dispatch(self, request, *args, **kwargs):
-        self.budget_year = get_object_or_404(BudgetYear, pk=self.kwargs["budget_year_pk"])
+        self.budget_year = get_object_or_404(
+            _filter_by_house(BudgetYear.objects.all(), request.user),
+            pk=self.kwargs["budget_year_pk"],
+        )
         return super().dispatch(request, *args, **kwargs)
 
     def get_queryset(self):

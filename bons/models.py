@@ -25,7 +25,8 @@ class OcrStatus(models.TextChoices):
 
 def receipt_upload_to(instance, filename):
     bon = instance.bon_de_commande
-    return f"receipts/{bon.budget_year.year}/{bon.number}/{filename}"
+    safe_name = filename.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+    return f"receipts/{bon.budget_year.year}/{bon.number}/{safe_name}"
 
 
 class Merchant(models.Model):

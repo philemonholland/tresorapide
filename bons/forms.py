@@ -94,11 +94,34 @@ class BonDeCommandeForm(forms.ModelForm):
         self.fields["approver_member"].queryset = Member.objects.filter(is_active=True)
 
 
+ALLOWED_RECEIPT_TYPES = {
+    "application/pdf", "image/jpeg", "image/png",
+}
+MAX_RECEIPT_SIZE = 10 * 1024 * 1024  # 10 MB
+
+
+def _validate_receipt_file(f):
+    """Server-side validation for receipt file type and size."""
+    if f.size > MAX_RECEIPT_SIZE:
+        raise forms.ValidationError(
+            f"Fichier trop volumineux ({f.size // (1024*1024)} Mo). Maximum : 10 Mo."
+        )
+    if f.content_type not in ALLOWED_RECEIPT_TYPES:
+        raise forms.ValidationError(
+            f"Type de fichier non autorisé ({f.content_type}). "
+            "Seuls les PDF, JPEG et PNG sont acceptés."
+        )
+    return f
+
+
 class ReceiptUploadForm(forms.Form):
     file = forms.FileField(
         label="Fichier (reçu / facture)",
-        help_text="PDF, JPEG ou PNG acceptés.",
+        help_text="PDF, JPEG ou PNG acceptés (max 10 Mo).",
     )
+
+    def clean_file(self):
+        return _validate_receipt_file(self.cleaned_data["file"])
 
 
 class BonValidateForm(forms.Form):
@@ -122,7 +145,7 @@ class MultiReceiptUploadForm(forms.Form):
     )
     files = MultipleFileField(
         label="Reçus / factures",
-        help_text="PDF, JPEG ou PNG acceptés. Vous pouvez sélectionner plusieurs fichiers.",
+        help_text="PDF, JPEG ou PNG acceptés (max 10 Mo chaque). Vous pouvez sélectionner plusieurs fichiers.",
         widget=forms.FileInput(),
         required=True,
     )
@@ -139,6 +162,12 @@ class MultiReceiptUploadForm(forms.Form):
             )
         else:
             self.fields["budget_year"].queryset = BudgetYear.objects.filter(is_active=True)
+
+    def clean_files(self):
+        files = self.cleaned_data.get("files", [])
+        for f in files:
+            _validate_receipt_file(f)
+        return files
 
 
 class OcrReviewForm(forms.Form):

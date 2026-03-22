@@ -1,3 +1,4 @@
+from django.core.validators import MinValueValidator
 from django.db import models
 from django.core.exceptions import ValidationError
 from core.models import TimeStampedModel
@@ -177,7 +178,10 @@ class Expense(TimeStampedModel):
         max_length=200,
         help_text="ex : '202 / Marylin' ou 'BB' ou nom du fournisseur"
     )
-    amount = models.DecimalField(max_digits=10, decimal_places=2)
+    amount = models.DecimalField(
+        max_digits=10, decimal_places=2,
+        validators=[MinValueValidator(0, message="Le montant ne peut pas être négatif.")],
+    )
     source_type = models.CharField(
         max_length=20, choices=ExpenseSourceType.choices,
         default=ExpenseSourceType.BON_DE_COMMANDE
