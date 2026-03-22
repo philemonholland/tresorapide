@@ -151,6 +151,11 @@ class BonDeCommande(TimeStampedModel, NonDestructiveModel):
         help_text="Original number from the paper bon de commande (e.g., 16011)"
     )
     notes = models.TextField(blank=True)
+    invoice_amounts_unverified = models.BooleanField(
+        default=False,
+        help_text="True when invoice amounts could not be extracted by OCR; "
+                  "the bon total comes from the paper BC and must be verified manually"
+    )
 
     class Meta:
         ordering = ["-purchase_date", "-created_at", "-id"]

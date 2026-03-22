@@ -123,6 +123,12 @@ Si complètement illisible, utilise "ILLISIBLE".
 - tvq: TVQ (taxe provinciale, ~9.975%). Si absente, null.
 - total: montant TOTAL TTC. Si absent, null. ATTENTION: extraire le montant \
 EXACT tel qu'affiché sur le document, ne pas recalculer.
+- IMPORTANT pour les factures ("invoice"): extraire ABSOLUMENT les montants \
+(subtotal, tps, tvq, total) même s'ils apparaissent dans un tableau, un bon \
+de commande associé, ou une section « montant ». C'est CRITIQUE pour la \
+vérification croisée avec le bon de commande papier. Si le prix unitaire et \
+la quantité sont visibles mais pas de sous-total explicite, calculer \
+prix × quantité comme subtotal.
 - summary: courte description du contenu du document.
 - Les montants en nombre décimal (pas de $).
 - Retourne UNIQUEMENT le JSON, sans texte additionnel.

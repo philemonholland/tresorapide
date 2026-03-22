@@ -32,10 +32,17 @@
         {# Mismatch warning #}
         {% if mismatch_warning %}
         <div class="message" style="margin-bottom: 1rem; background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; border-radius: 4px; padding: 0.75rem 1rem;">
+            {% if mismatch_warning.unverifiable %}
+            ⚠️ <strong>Vérification impossible !</strong>
+            Le total du BC n°{{ mismatch_warning.bc_number }} est de <strong>{{ mismatch_warning.bc_total }} $</strong>,
+            mais les montants de la facture n'ont pas pu être extraits automatiquement.
+            Veuillez vérifier et saisir les montants manuellement.
+            {% else %}
             ⚠️ <strong>Écart détecté !</strong>
             Le total du BC n°{{ mismatch_warning.bc_number }} (<strong>{{ mismatch_warning.bc_total }} $</strong>)
             ne correspond pas à la somme des factures associées (<strong>{{ mismatch_warning.invoice_total }} $</strong>).
             Veuillez vérifier les montants.
+            {% endif %}
         </div>
         {% endif %}
 

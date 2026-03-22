@@ -57,7 +57,7 @@
                                 <td>{{ row.expense.supplier_name|default:"—" }}</td>
                                 <td>{{ row.expense.display_spent_by_label }}</td>
                                 <td>{{ row.expense.display_approved_by_label }}</td>
-                                <td class="text-right nowrap"{% if row.expense.is_cancellation %} style="font-weight: bold;"{% endif %}>{{ row.expense.amount|floatformat:2 }} $</td>
+                                <td class="text-right nowrap"{% if row.expense.is_cancellation %} style="font-weight: bold;"{% endif %}>{{ row.expense.amount|floatformat:2 }} ${% if row.expense.bon_de_commande.invoice_amounts_unverified %} <span title="Montants de factures non vérifiés par l'OCR" style="color:#c0392b;cursor:help;">⚠️</span>{% endif %}</td>
                                 <td class="text-right nowrap balance-cell">{{ row.balance|floatformat:2 }} $</td>
                                 <td class="text-right nowrap balance-15-cell">{{ row.balance_minus_imprevues|floatformat:2 }} $</td>
                                 {% if can_manage %}

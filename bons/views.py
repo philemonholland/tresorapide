@@ -168,6 +168,23 @@ class BonDetailView(RoleRequiredMixin, DetailView):
             target_object_id=str(bon.pk),
         ).select_related("actor")[:20]
 
+        # Amount mismatch warning (paper BC vs invoices)
+        if bon.is_paper_bc:
+            for receipt in bon.receipt_files.all():
+                warning = _get_mismatch_warning(receipt)
+                if warning:
+                    ctx["mismatch_warning"] = warning
+                    break
+            # Persistent flag fallback when OCR raw data doesn't trigger a warning
+            # but amounts were flagged as unverified during finalization
+            if "mismatch_warning" not in ctx and bon.invoice_amounts_unverified:
+                ctx["mismatch_warning"] = {
+                    "bc_total": f"{bon.total:.2f}" if bon.total else "?",
+                    "invoice_total": "N/A",
+                    "bc_number": bon.paper_bc_number or bon.number,
+                    "unverifiable": True,
+                }
+
         return ctx
 
 
@@ -342,11 +359,6 @@ class BonValidateView(TreasurerRequiredMixin, FormView):
     def get_context_data(self, **kwargs):
         ctx = super().get_context_data(**kwargs)
         ctx["bon"] = self.bon
-        return ctx
-
-    def get_context_data(self, **kwargs):
-        ctx = super().get_context_data(**kwargs)
-        ctx["bon"] = self.bon
         # Show how many bons still need validation in the same house/year
         pending_count = (
             BonDeCommande.objects
@@ -360,6 +372,22 @@ class BonValidateView(TreasurerRequiredMixin, FormView):
             .count()
         )
         ctx["pending_validation_count"] = pending_count
+
+        # Amount mismatch warning (paper BC vs invoices)
+        if self.bon.is_paper_bc:
+            for receipt in self.bon.receipt_files.all():
+                warning = _get_mismatch_warning(receipt)
+                if warning:
+                    ctx["mismatch_warning"] = warning
+                    break
+            if "mismatch_warning" not in ctx and self.bon.invoice_amounts_unverified:
+                ctx["mismatch_warning"] = {
+                    "bc_total": f"{self.bon.total:.2f}" if self.bon.total else "?",
+                    "invoice_total": "N/A",
+                    "bc_number": self.bon.paper_bc_number or self.bon.number,
+                    "unverifiable": True,
+                }
+
         return ctx
 
     def form_valid(self, form):
@@ -754,6 +782,14 @@ def _extracted_document_amounts(ef):
     )
 
 
+def _safe_extracted_fields(receipt):
+    """Return the receipt's ReceiptExtractedFields or None if missing."""
+    try:
+        return receipt.extracted_fields
+    except ReceiptExtractedFields.DoesNotExist:
+        return None
+
+
 def _aggregate_extracted_amounts(extracted_fields, *, prefer_invoice_totals=False):
     """Aggregate totals from extracted fields, optionally preferring invoices over the paper BC."""
     documents = []
@@ -1082,7 +1118,12 @@ class ReceiptUploadWizardView(TreasurerRequiredMixin, FormView):
 # ---------------------------------------------------------------------------
 
 def _get_mismatch_warning(receipt):
-    """Check if paper BC total matches invoice totals."""
+    """Check if paper BC total matches invoice totals.
+
+    Returns a warning dict when:
+    - BC and invoice totals differ
+    - Invoices exist but amounts couldn't be extracted (unverifiable)
+    """
     try:
         all_docs = json.loads(receipt.ocr_raw_text or "[]")
     except (json.JSONDecodeError, TypeError):
@@ -1105,9 +1146,19 @@ def _get_mismatch_warning(receipt):
         )
         bc_total = paper_amounts["total"]
         invoice_total = invoice_amounts["total"]
+        bc_number = paper_bcs[0].get("bc_number", "?")
 
-        if bc_total is None or invoice_total is None:
+        if bc_total is None:
             return None
+
+        # Invoice amounts couldn't be extracted → warn that verification failed
+        if invoice_total is None:
+            return {
+                "bc_total": f"{bc_total:.2f}",
+                "invoice_total": "N/A",
+                "bc_number": bc_number,
+                "unverifiable": True,
+            }
 
         comparable_invoice_values = [invoice_total]
         if invoice_amounts["subtotal"] is not None:
@@ -1125,7 +1176,7 @@ def _get_mismatch_warning(receipt):
             return {
                 "bc_total": f"{bc_total:.2f}",
                 "invoice_total": f"{invoice_total:.2f}",
-                "bc_number": paper_bcs[0].get("bc_number", "?"),
+                "bc_number": bc_number,
             }
     except (ValueError, TypeError):
         return None
@@ -1612,6 +1663,21 @@ class OcrReviewView(TreasurerRequiredMixin, View):
             update_fields["tps"] = aggregated_amounts["tps"]
         if aggregated_amounts["tvq"] is not None:
             update_fields["tvq"] = aggregated_amounts["tvq"]
+
+        # Flag when paper BC has invoices but invoice amounts couldn't be extracted
+        if is_paper_bc and not aggregated_amounts.get("using_invoices", True):
+            has_invoices = any(
+                _extracted_document_type(ef) == "invoice"
+                for r in receipts
+                for ef in [_safe_extracted_fields(r)]
+                if ef is not None
+            )
+            if has_invoices:
+                update_fields["invoice_amounts_unverified"] = True
+            else:
+                update_fields["invoice_amounts_unverified"] = False
+        elif is_paper_bc:
+            update_fields["invoice_amounts_unverified"] = False
 
         # Auto-match apartment → member from first receipt (skip for paper BC)
         if not is_paper_bc:

@@ -60,7 +60,7 @@
                                 <td><a href="{% url 'bons:detail' bon.pk %}">{{ bon.number }}</a></td>
                                 <td>{{ bon.purchase_date|date:"Y-m-d" }}</td>
                                 <td>{{ bon.short_description }}</td>
-                                <td>{{ bon.total|floatformat:2 }}&nbsp;$</td>
+                                <td>{{ bon.total|floatformat:2 }}&nbsp;${% if bon.invoice_amounts_unverified %} <span title="Montants de factures non vérifiés par l'OCR" style="color:#c0392b;cursor:help;">⚠️</span>{% endif %}</td>
                                 <td>{{ bon.sub_budget.name }}</td>
                                 <td><span class="badge badge-{{ bon.status|lower }}">{{ bon.get_status_display }}</span></td>
                             </tr>

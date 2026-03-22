@@ -868,6 +868,29 @@ class MismatchWarningTests(TestCase):
         expected_tps = (result["subtotal"] * Decimal("0.05")).quantize(Decimal("0.01"))
         self.assertEqual(result["tps"], expected_tps)
 
+    def test_unverifiable_when_invoice_amounts_null(self):
+        """When invoices exist but all amounts are null, return unverifiable warning."""
+        from bons.views import _get_mismatch_warning
+        from unittest.mock import MagicMock
+
+        receipt = MagicMock()
+        receipt.ocr_raw_text = json.dumps([
+            {"document_type": "paper_bc", "bc_number": "16739", "total": 19.49},
+            {
+                "document_type": "invoice",
+                "associated_bc_number": "16739",
+                "subtotal": None,
+                "tps": None,
+                "tvq": None,
+                "total": None,
+            },
+        ])
+        warning = _get_mismatch_warning(receipt)
+        self.assertIsNotNone(warning)
+        self.assertTrue(warning.get("unverifiable"))
+        self.assertEqual(warning["bc_number"], "16739")
+        self.assertAlmostEqual(float(warning["bc_total"]), 19.49)
+
 
 class SignerRoleWorkflowTests(TestCase):
     def setUp(self):

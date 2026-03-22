@@ -3,6 +3,29 @@
 {% block title %}Valider BC {{ bon.number }} | Tresorapide{% endblock %}
 
 {% block content %}
+    {# Amount mismatch warning (paper BC vs invoices) #}
+    {% if mismatch_warning %}
+    <section class="card" style="background: #f8d7da; border: 2px solid #f5c6cb;">
+        <div style="color: #721c24;">
+            {% if mismatch_warning.unverifiable %}
+            <h2 style="margin-bottom: 0.5rem;">⚠️ VÉRIFICATION IMPOSSIBLE</h2>
+            <p>
+                Le total du BC n°{{ mismatch_warning.bc_number }} est de <strong>{{ mismatch_warning.bc_total }} $</strong>,
+                mais les montants de la facture n'ont pas pu être extraits automatiquement.
+                Veuillez vérifier les montants manuellement avant de valider.
+            </p>
+            {% else %}
+            <h2 style="margin-bottom: 0.5rem;">⚠️ ÉCART DE MONTANTS</h2>
+            <p>
+                Le total du BC n°{{ mismatch_warning.bc_number }} (<strong>{{ mismatch_warning.bc_total }} $</strong>)
+                ne correspond pas à la somme des factures associées (<strong>{{ mismatch_warning.invoice_total }} $</strong>).
+                Veuillez vérifier les montants avant de valider.
+            </p>
+            {% endif %}
+        </div>
+    </section>
+    {% endif %}
+
     <section class="card">
         <div class="section-heading">
             <div>
