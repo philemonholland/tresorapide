@@ -52,9 +52,15 @@
                         <tbody>
                             {% for row in ledger_rows %}
                                 <tr data-amount="{{ row.expense.amount }}"
-                                    data-trace="{{ row.expense.sub_budget.trace_code }}">
+                                    data-trace="{{ row.expense.sub_budget.trace_code }}"
+                                    {% if row.has_duplicate_flag %}style="background: #fff3cd;"{% endif %}>
                                     <td class="nowrap">{{ row.expense.entry_date|date:"Y-m-d" }}</td>
-                                    <td>{{ row.expense.description }}</td>
+                                    <td>
+                                        {{ row.expense.description }}
+                                        {% if row.has_duplicate_flag %}
+                                            <span style="color:#c0392b;font-weight:bold;" title="Doublon possible détecté">⚠️ DOUBLON</span>
+                                        {% endif %}
+                                    </td>
                                     <td>{{ row.expense.bon_number|default:"" }}</td>
                                     <td class="text-center">{% if row.expense.validated_gl %}✓{% endif %}</td>
                                     <td>{{ row.expense.supplier_name|default:"" }}</td>

@@ -82,6 +82,30 @@ class BudgetYearDetailView(RoleRequiredMixin, DetailView):
             and self.request.user.can_manage_financials
         )
 
+        # Annotate ledger rows with duplicate flag info
+        from bons.models import DuplicateFlag
+        bon_ids_with_dup = set()
+        for row in ctx["ledger_rows"]:
+            exp = row["expense"]
+            if exp.bon_de_commande_id:
+                bon_ids_with_dup.add(exp.bon_de_commande_id)
+
+        if bon_ids_with_dup:
+            from bons.models import ReceiptFile
+            flagged_bon_ids = set(
+                ReceiptFile.objects.filter(
+                    bon_de_commande_id__in=bon_ids_with_dup,
+                    duplicate_flags__status__in=["PENDING", "CONFIRMED_DUPLICATE"],
+                ).values_list("bon_de_commande_id", flat=True).distinct()
+            )
+        else:
+            flagged_bon_ids = set()
+
+        for row in ctx["ledger_rows"]:
+            row["has_duplicate_flag"] = (
+                row["expense"].bon_de_commande_id in flagged_bon_ids
+            )
+
         # Totals excluding contingency for sub-budget table footer
         non_contingency = [
             c for c in ctx["categories"] if not c["sub_budget"].is_contingency

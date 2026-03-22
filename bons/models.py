@@ -349,3 +349,58 @@ class ReceiptExtractedFields(TimeStampedModel):
 
     def __str__(self):
         return f"Fields for {self.receipt_file}"
+
+
+class DuplicateFlagStatus(models.TextChoices):
+    PENDING = "PENDING", "En attente"
+    CONFIRMED_DUPLICATE = "CONFIRMED_DUPLICATE", "Doublon confirmé"
+    DISMISSED = "DISMISSED", "Rejeté"
+
+
+class DuplicateFlag(TimeStampedModel):
+    """Tracks detected duplicate invoices/receipts for audit and export warnings."""
+
+    receipt_file = models.ForeignKey(
+        ReceiptFile, on_delete=models.PROTECT,
+        related_name="duplicate_flags",
+        help_text="The new receipt flagged as a possible duplicate",
+    )
+    suspected_duplicate_receipt = models.ForeignKey(
+        ReceiptFile, on_delete=models.PROTECT,
+        related_name="flagged_as_duplicate_of",
+        help_text="The existing receipt this may be a duplicate of",
+    )
+    confidence = models.DecimalField(
+        max_digits=4, decimal_places=2, null=True, blank=True,
+        help_text="GPT confidence score (0.00–1.00) that these are the same purchase",
+    )
+    gpt_comparison_result = models.TextField(
+        blank=True,
+        help_text="Raw GPT response from image comparison",
+    )
+    status = models.CharField(
+        max_length=25,
+        choices=DuplicateFlagStatus.choices,
+        default=DuplicateFlagStatus.PENDING,
+    )
+    flagged_at = models.DateTimeField(auto_now_add=True)
+    resolved_at = models.DateTimeField(null=True, blank=True)
+    resolved_by = models.ForeignKey(
+        "accounts.User", on_delete=models.SET_NULL,
+        null=True, blank=True, related_name="resolved_duplicate_flags",
+    )
+
+    class Meta:
+        verbose_name = "signalement de doublon"
+        verbose_name_plural = "signalements de doublons"
+        indexes = [
+            models.Index(fields=["status"]),
+            models.Index(fields=["receipt_file"]),
+        ]
+
+    def __str__(self):
+        return (
+            f"Duplicate flag: receipt #{self.receipt_file_id} "
+            f"↔ #{self.suspected_duplicate_receipt_id} "
+            f"({self.get_status_display()})"
+        )

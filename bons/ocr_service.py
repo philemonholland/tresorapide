@@ -570,3 +570,260 @@ class ReceiptOcrService:
                 r.save(update_fields=["ocr_status", "ocr_raw_text"])
 
             return empties, msg
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Duplicate Detection Service
+# ══════════════════════════════════════════════════════════════════════════════
+
+DUPLICATE_COMPARISON_PROMPT = """\
+Tu es un assistant spécialisé dans la détection de factures en doublon \
+pour une coopérative d'habitation au Québec.
+
+On te présente DEUX images de factures/reçus. Tu dois déterminer si \
+ces deux documents correspondent au MÊME achat (même transaction).
+
+Critères de comparaison :
+- Même fournisseur / marchand
+- Même date (ou dates très proches, ±2 jours)
+- Mêmes articles / descriptions
+- Même montant total
+- Même numéro de facture (si visible)
+
+NOTE : Les deux images peuvent être de qualité différente, sous un \
+angle différent, ou l'une peut être une photocopie/scan de l'autre. \
+Concentre-toi sur le CONTENU, pas la qualité de l'image.
+
+Réponds UNIQUEMENT avec un JSON valide :
+{
+  "is_same_purchase": true/false,
+  "confidence": 0.0 à 1.0,
+  "reasoning": "Explication courte de ta décision"
+}
+"""
+
+
+class DuplicateDetectionService:
+    """Detect duplicate invoices/receipts using totals comparison and GPT Vision."""
+
+    @staticmethod
+    def find_matching_totals(receipt_file, house, lookback_years=2):
+        """
+        Find existing receipts in the same house with matching final_total.
+        Returns list of ReceiptExtractedFields with matching totals.
+        """
+        from django.db import models as db_models
+        from django.utils import timezone as tz
+        from datetime import timedelta
+        from .models import ReceiptExtractedFields, OcrStatus as OS
+
+        try:
+            ef = receipt_file.extracted_fields
+        except ReceiptExtractedFields.DoesNotExist:
+            return []
+
+        target_total = ef.final_total or ef.total_candidate
+        if target_total is None:
+            return []
+
+        cutoff = tz.now() - timedelta(days=lookback_years * 365)
+
+        matches = (
+            ReceiptExtractedFields.objects
+            .filter(
+                receipt_file__bon_de_commande__house=house,
+                receipt_file__created_at__gte=cutoff,
+                receipt_file__ocr_status__in=[OS.EXTRACTED, OS.CORRECTED],
+            )
+            .exclude(receipt_file_id=receipt_file.pk)
+            .filter(
+                db_models.Q(final_total=target_total)
+                | db_models.Q(total_candidate=target_total)
+            )
+            .select_related("receipt_file", "receipt_file__bon_de_commande")
+        )
+        return list(matches)
+
+    @staticmethod
+    def _receipt_to_base64(receipt_file) -> str | None:
+        """Convert a receipt file to base64 image for GPT comparison."""
+        if not PILLOW_AVAILABLE:
+            return None
+
+        try:
+            file_path = receipt_file.file.path
+        except (ValueError, AttributeError):
+            return None
+
+        content_type = receipt_file.content_type or ""
+
+        if content_type.startswith("image/"):
+            try:
+                img = Image.open(file_path).convert("RGB")
+                max_w = 800
+                if img.width > max_w:
+                    ratio = max_w / img.width
+                    img = img.resize((max_w, int(img.height * ratio)), Image.LANCZOS)
+                buf = io.BytesIO()
+                img.save(buf, format="PNG")
+                return base64.b64encode(buf.getvalue()).decode("utf-8")
+            except Exception:
+                logger.exception("Failed to convert image for dup comparison: %s", file_path)
+                return None
+
+        elif content_type == "application/pdf":
+            if not PDF2IMAGE_AVAILABLE:
+                return None
+            try:
+                images = convert_from_path(file_path, first_page=1, last_page=1, dpi=150)
+                if not images:
+                    return None
+                img = images[0].convert("RGB")
+                max_w = 800
+                if img.width > max_w:
+                    ratio = max_w / img.width
+                    img = img.resize((max_w, int(img.height * ratio)), Image.LANCZOS)
+                buf = io.BytesIO()
+                img.save(buf, format="PNG")
+                return base64.b64encode(buf.getvalue()).decode("utf-8")
+            except Exception:
+                logger.exception("Failed to convert PDF for dup comparison: %s", file_path)
+                return None
+
+        return None
+
+    @classmethod
+    def compare_with_gpt(cls, receipt_file_new, receipt_file_old) -> dict:
+        """
+        Use GPT Vision to compare two receipt images.
+        Returns dict with keys: is_same_purchase, confidence, reasoning.
+        """
+        if not OPENAI_AVAILABLE or not ReceiptOcrService.is_available():
+            return {
+                "is_same_purchase": False,
+                "confidence": 0.0,
+                "reasoning": "Service OpenAI non disponible",
+            }
+
+        img1_b64 = cls._receipt_to_base64(receipt_file_new)
+        img2_b64 = cls._receipt_to_base64(receipt_file_old)
+
+        if not img1_b64 or not img2_b64:
+            return {
+                "is_same_purchase": False,
+                "confidence": 0.0,
+                "reasoning": "Impossible de convertir les images pour comparaison",
+            }
+
+        try:
+            client = OpenAI(api_key=settings.OPENAI_API_KEY)
+            model = _get_openai_model()
+
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": DUPLICATE_COMPARISON_PROMPT},
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": (
+                                    "Compare ces deux factures/reçus. "
+                                    "Sont-ils le MÊME achat (même transaction) ?"
+                                ),
+                            },
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/png;base64,{img1_b64}",
+                                },
+                            },
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/png;base64,{img2_b64}",
+                                },
+                            },
+                        ],
+                    },
+                ],
+                max_completion_tokens=4000,
+                temperature=0,
+            )
+
+            raw = response.choices[0].message.content.strip()
+            logger.info("GPT duplicate comparison (model=%s): %s", model, raw)
+
+            if "```json" in raw:
+                raw = raw.split("```json")[1].split("```")[0].strip()
+            elif "```" in raw:
+                raw = raw.split("```")[1].split("```")[0].strip()
+
+            result = json.loads(raw)
+            return {
+                "is_same_purchase": bool(result.get("is_same_purchase", False)),
+                "confidence": float(result.get("confidence", 0.0)),
+                "reasoning": str(result.get("reasoning", "")),
+            }
+
+        except Exception as e:
+            logger.exception("GPT duplicate comparison failed: %s", e)
+            return {
+                "is_same_purchase": False,
+                "confidence": 0.0,
+                "reasoning": f"Erreur lors de la comparaison : {str(e)[:200]}",
+            }
+
+    @classmethod
+    def check_and_flag_duplicates(cls, receipt_file, house):
+        """
+        Full duplicate detection pipeline for a single receipt.
+        1. Find matching totals in the house
+        2. If matches found, compare images with GPT
+        3. Create DuplicateFlag entries
+        Returns list of created DuplicateFlag objects.
+        """
+        from .models import DuplicateFlag, DuplicateFlagStatus
+
+        matching_efs = cls.find_matching_totals(receipt_file, house)
+        if not matching_efs:
+            return []
+
+        created_flags = []
+        for match_ef in matching_efs:
+            existing_receipt = match_ef.receipt_file
+
+            # Skip if already flagged in either direction
+            already = DuplicateFlag.objects.filter(
+                receipt_file=receipt_file,
+                suspected_duplicate_receipt=existing_receipt,
+            ).exists() or DuplicateFlag.objects.filter(
+                receipt_file=existing_receipt,
+                suspected_duplicate_receipt=receipt_file,
+            ).exists()
+            if already:
+                continue
+
+            comparison = cls.compare_with_gpt(receipt_file, existing_receipt)
+
+            status = DuplicateFlagStatus.PENDING
+            if comparison["confidence"] >= 0.90 and comparison["is_same_purchase"]:
+                status = DuplicateFlagStatus.CONFIRMED_DUPLICATE
+
+            flag = DuplicateFlag.objects.create(
+                receipt_file=receipt_file,
+                suspected_duplicate_receipt=existing_receipt,
+                confidence=Decimal(str(round(comparison["confidence"], 2))),
+                gpt_comparison_result=comparison["reasoning"],
+                status=status,
+            )
+            created_flags.append(flag)
+
+            logger.info(
+                "Duplicate flag created: receipt #%d ↔ #%d (confidence=%.2f, status=%s)",
+                receipt_file.pk, existing_receipt.pk,
+                comparison["confidence"], status,
+            )
+
+        return created_flags

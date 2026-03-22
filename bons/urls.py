@@ -21,4 +21,5 @@ urlpatterns = [
     path("<int:pk>/xlsx/", views.BonExportXlsxView.as_view(), name="export-xlsx"),
     path("<int:bon_pk>/receipts/upload/", views.ReceiptUploadToExistingView.as_view(), name="receipt-upload"),
     path("<int:bon_pk>/receipts/<int:receipt_pk>/review/", views.ReceiptReviewSingleView.as_view(), name="receipt-review"),
+    path("duplicates/<int:flag_pk>/resolve/", views.ResolveDuplicateFlagView.as_view(), name="resolve-duplicate"),
 ]

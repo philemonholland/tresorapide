@@ -107,13 +107,38 @@ class BonDetailView(RoleRequiredMixin, DetailView):
         )
 
     def get_context_data(self, **kwargs):
+        from .models import DuplicateFlag
+        from audits.models import AuditLogEntry
+
         ctx = super().get_context_data(**kwargs)
-        ctx["receipts"] = self.object.receipt_files.all()
+        bon = self.object
+        ctx["receipts"] = bon.receipt_files.all()
         ctx["can_manage"] = (
             self.request.user.is_authenticated
             and self.request.user.can_manage_financials
         )
         ctx["upload_form"] = ReceiptUploadForm()
+        ctx["export_ready"] = _bon_is_export_ready(bon)
+
+        # Duplicate flags for any receipt on this bon
+        receipt_ids = list(bon.receipt_files.values_list("pk", flat=True))
+        ctx["duplicate_flags"] = list(
+            DuplicateFlag.objects.filter(
+                receipt_file_id__in=receipt_ids,
+            ).exclude(status="DISMISSED")
+            .select_related(
+                "receipt_file", "suspected_duplicate_receipt",
+                "suspected_duplicate_receipt__bon_de_commande",
+            )
+        )
+
+        # Audit log
+        ctx["audit_entries"] = AuditLogEntry.objects.filter(
+            target_app_label="bons",
+            target_model="bondecommande",
+            target_object_id=str(bon.pk),
+        ).select_related("actor")[:20]
+
         return ctx
 
 
@@ -161,6 +186,8 @@ class BonUpdateView(TreasurerRequiredMixin, UpdateView):
     form_class = BonDeCommandeForm
     template_name = "bons/form.html"
 
+    FINANCIAL_FIELDS = {"subtotal", "tps", "tvq", "total"}
+
     def get_queryset(self):
         qs = super().get_queryset()
         qs = _filter_by_house(qs, self.request.user)
@@ -175,6 +202,56 @@ class BonUpdateView(TreasurerRequiredMixin, UpdateView):
         ctx = super().get_context_data(**kwargs)
         ctx["is_create"] = False
         return ctx
+
+    def form_valid(self, form):
+        from audits.models import AuditLogEntry
+        from .ocr_service import DuplicateDetectionService
+
+        bon = self.object
+        old_values = {}
+        changed_fields = form.changed_data
+        financial_changed = False
+
+        for field in changed_fields:
+            old_val = getattr(bon, field, None)
+            if hasattr(old_val, "pk"):
+                old_values[field] = str(old_val)
+            else:
+                old_values[field] = str(old_val) if old_val is not None else ""
+            if field in self.FINANCIAL_FIELDS:
+                financial_changed = True
+
+        response = super().form_valid(form)
+
+        # Audit trail
+        if changed_fields:
+            new_values = {}
+            for field in changed_fields:
+                new_val = getattr(self.object, field, None)
+                if hasattr(new_val, "pk"):
+                    new_values[field] = str(new_val)
+                else:
+                    new_values[field] = str(new_val) if new_val is not None else ""
+
+            AuditLogEntry.objects.create(
+                actor=self.request.user,
+                action="bon.edited",
+                target_app_label="bons",
+                target_model="bondecommande",
+                target_object_id=str(bon.pk),
+                summary=f"Champs modifiés : {', '.join(changed_fields)}",
+                payload={"old": old_values, "new": new_values},
+                ip_address=self.request.META.get("REMOTE_ADDR"),
+            )
+
+        # Re-run duplicate detection if financial fields changed
+        if financial_changed:
+            for receipt in bon.receipt_files.filter(
+                ocr_status__in=[OcrStatus.EXTRACTED, OcrStatus.CORRECTED]
+            ):
+                DuplicateDetectionService.check_and_flag_duplicates(receipt, bon.house)
+
+        return response
 
     def get_success_url(self):
         return reverse("bons:detail", kwargs={"pk": self.object.pk})
@@ -866,18 +943,61 @@ class OcrReviewView(TreasurerRequiredMixin, View):
                 regular_receipts.append(receipt)
 
         created_bons = []
+        duplicate_warnings = []
 
         # --- Paper BC bons ---
         for bc_number, bc_receipt in paper_bc_receipts.items():
             matched_invoices = invoice_receipts.pop(bc_number, [])
             all_docs = [bc_receipt] + matched_invoices
 
-            # Handle unique number constraint: reassign VOID bon number or add suffix
+            # ── Paper BC duplicate detection ──
+            existing_paper_bc = (
+                BonDeCommande.objects
+                .filter(
+                    house=house,
+                    is_paper_bc=True,
+                    paper_bc_number=bc_number,
+                )
+                .exclude(status=BonStatus.VOID)
+                .first()
+            )
+
+            if existing_paper_bc:
+                try:
+                    new_total = bc_receipt.extracted_fields.final_total or bc_receipt.extracted_fields.total_candidate
+                except ReceiptExtractedFields.DoesNotExist:
+                    new_total = None
+
+                if new_total is not None and existing_paper_bc.total == new_total:
+                    # Same BC number AND same total → already added
+                    messages.error(
+                        request,
+                        f"Le BC papier n°{bc_number} ({new_total} $) a déjà été "
+                        f"enregistré (BC {existing_paper_bc.number}). "
+                        f"Ce doublon n'a pas été créé."
+                    )
+                    continue  # skip creating this bon
+                else:
+                    # Same BC number, different total → warn but create
+                    duplicate_warnings.append({
+                        "bc_number": bc_number,
+                        "existing_bon": existing_paper_bc,
+                        "existing_total": existing_paper_bc.total,
+                        "new_total": new_total,
+                    })
+                    messages.warning(
+                        request,
+                        f"⚠️ Le BC papier n°{bc_number} existe déjà "
+                        f"(ancien total : {existing_paper_bc.total} $, "
+                        f"nouveau total : {new_total} $). "
+                        f"Veuillez vérifier les montants."
+                    )
+
+            # Handle unique number constraint
             bon_number = bc_number
             existing = BonDeCommande.objects.filter(number=bon_number).first()
             if existing:
                 if existing.status == BonStatus.VOID:
-                    # NonDestructiveModel prevents delete — reassign its number
                     BonDeCommande.objects.filter(pk=existing.pk).update(
                         number=f"_VOID_{existing.pk}_{bon_number}"
                     )
@@ -909,6 +1029,12 @@ class OcrReviewView(TreasurerRequiredMixin, View):
                 r.save(update_fields=["bon_de_commande_id"])
 
             self._fill_bon_from_receipts(bon, all_docs, is_paper_bc=True)
+
+            # Run digital invoice duplicate detection on each receipt
+            from .ocr_service import DuplicateDetectionService
+            for r in all_docs:
+                DuplicateDetectionService.check_and_flag_duplicates(r, house)
+
             created_bons.append(bon)
 
         # --- Orphan invoices (no matching paper BC) → treat as regular ---
@@ -946,6 +1072,12 @@ class OcrReviewView(TreasurerRequiredMixin, View):
                 r.save(update_fields=["bon_de_commande_id"])
 
             self._fill_bon_from_receipts(bon, group_receipts)
+
+            # Run duplicate detection on each receipt
+            from .ocr_service import DuplicateDetectionService
+            for r in group_receipts:
+                DuplicateDetectionService.check_and_flag_duplicates(r, house)
+
             created_bons.append(bon)
 
         # Archive the scan session
@@ -1124,6 +1256,16 @@ class BonCompleteView(TreasurerRequiredMixin, UpdateView):
 # Export views: PDF and XLSX
 # ---------------------------------------------------------------------------
 
+def _bon_is_export_ready(bon):
+    """A bon is export-ready when all its receipts have been reviewed (EXTRACTED or CORRECTED)."""
+    receipts = bon.receipt_files.all()
+    if not receipts.exists():
+        return True  # no receipts = nothing to review
+    return not receipts.exclude(
+        ocr_status__in=[OcrStatus.EXTRACTED, OcrStatus.CORRECTED]
+    ).exists()
+
+
 class BonExportPdfView(RoleRequiredMixin, View):
     """Export a bon de commande as PDF with attached receipts."""
     min_role = 10  # VIEWER — any logged-in user can download
@@ -1134,6 +1276,13 @@ class BonExportPdfView(RoleRequiredMixin, View):
         bon = get_object_or_404(
             _filter_by_house(BonDeCommande.objects.all(), request.user), pk=pk
         )
+        if not _bon_is_export_ready(bon):
+            messages.error(
+                request,
+                "L'exportation n'est pas disponible : tous les reçus doivent "
+                "être révisés avant de pouvoir exporter ce bon de commande."
+            )
+            return redirect(reverse("bons:detail", kwargs={"pk": pk}))
         pdf_bytes = generate_bon_pdf(bon)
         response = HttpResponse(pdf_bytes, content_type="application/pdf")
         response["Content-Disposition"] = f'attachment; filename="BC_{bon.number}.pdf"'
@@ -1150,6 +1299,13 @@ class BonExportXlsxView(RoleRequiredMixin, View):
         bon = get_object_or_404(
             _filter_by_house(BonDeCommande.objects.all(), request.user), pk=pk
         )
+        if not _bon_is_export_ready(bon):
+            messages.error(
+                request,
+                "L'exportation n'est pas disponible : tous les reçus doivent "
+                "être révisés avant de pouvoir exporter ce bon de commande."
+            )
+            return redirect(reverse("bons:detail", kwargs={"pk": pk}))
         xlsx_bytes = generate_bon_xlsx(bon)
         response = HttpResponse(
             xlsx_bytes,
@@ -1157,6 +1313,40 @@ class BonExportXlsxView(RoleRequiredMixin, View):
         )
         response["Content-Disposition"] = f'attachment; filename="BC_{bon.number}.xlsx"'
         return response
+
+
+# ---------------------------------------------------------------------------
+# Duplicate flag resolution
+# ---------------------------------------------------------------------------
+
+class ResolveDuplicateFlagView(TreasurerRequiredMixin, View):
+    """Resolve a duplicate flag: dismiss or confirm."""
+
+    def post(self, request, flag_pk):
+        from .models import DuplicateFlag, DuplicateFlagStatus
+
+        flag = get_object_or_404(DuplicateFlag, pk=flag_pk)
+        # Verify user has access to the bon
+        bon = flag.receipt_file.bon_de_commande
+        _filter_by_house(BonDeCommande.objects.filter(pk=bon.pk), request.user).get()
+
+        action = request.POST.get("action")
+        if action == "dismiss":
+            flag.status = DuplicateFlagStatus.DISMISSED
+            flag.resolved_at = timezone.now()
+            flag.resolved_by = request.user
+            flag.save(update_fields=["status", "resolved_at", "resolved_by"])
+            messages.success(request, "Le signalement de doublon a été rejeté.")
+        elif action == "confirm":
+            flag.status = DuplicateFlagStatus.CONFIRMED_DUPLICATE
+            flag.resolved_at = timezone.now()
+            flag.resolved_by = request.user
+            flag.save(update_fields=["status", "resolved_at", "resolved_by"])
+            messages.warning(request, "Le doublon a été confirmé. Il sera indiqué dans les exportations.")
+        else:
+            messages.error(request, "Action invalide.")
+
+        return redirect(reverse("bons:detail", kwargs={"pk": bon.pk}))
 
 
 # ---------------------------------------------------------------------------

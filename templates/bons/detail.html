@@ -3,6 +3,43 @@
 {% block title %}BC {{ bon.number }} | Tresorapide{% endblock %}
 
 {% block content %}
+    {# Duplicate warning banner #}
+    {% if duplicate_flags %}
+    <section class="card" style="background: #f8d7da; border: 2px solid #f5c6cb;">
+        <div style="color: #721c24;">
+            <h2 style="margin-bottom: 0.5rem;">⚠️ DOUBLON POSSIBLE</h2>
+            {% for flag in duplicate_flags %}
+            <div style="margin-bottom: 0.5rem; padding: 0.5rem; background: #fff; border-radius: 4px; border: 1px solid #f5c6cb;">
+                <p>
+                    <strong>{{ flag.receipt_file.original_filename }}</strong> correspond possiblement à
+                    <strong>{{ flag.suspected_duplicate_receipt.original_filename }}</strong>
+                    (BC {{ flag.suspected_duplicate_receipt.bon_de_commande.number }})
+                </p>
+                <p class="text-muted">
+                    Confiance : {{ flag.confidence|floatformat:0 }}% —
+                    {{ flag.gpt_comparison_result }}
+                </p>
+                {% if flag.status == "PENDING" and can_manage %}
+                <form method="post" action="{% url 'bons:resolve-duplicate' flag.pk %}" style="display:inline;">
+                    {% csrf_token %}
+                    <button type="submit" name="action" value="dismiss" class="button-link">
+                        ✅ Ce n'est pas un doublon
+                    </button>
+                    <button type="submit" name="action" value="confirm" class="button-link" style="color:#c0392b;">
+                        ❌ Confirmer le doublon
+                    </button>
+                </form>
+                {% elif flag.status == "CONFIRMED_DUPLICATE" %}
+                <span style="color: #c0392b; font-weight: bold;">❌ Doublon confirmé</span>
+                {% elif flag.status == "DISMISSED" %}
+                <span style="color: #155724;">✅ Rejeté</span>
+                {% endif %}
+            </div>
+            {% endfor %}
+        </div>
+    </section>
+    {% endif %}
+
     <section class="card">
         <div class="section-heading">
             <div>
@@ -10,12 +47,20 @@
                 <p class="text-muted">
                     <span class="badge badge-{{ bon.status|lower }}">{{ bon.get_status_display }}</span>
                     &middot; {{ bon.purchase_date|date:"Y-m-d" }}
+                    {% if bon.is_paper_bc %}
+                        &middot; <span style="background:#fff3cd;color:#856404;padding:0.15rem 0.5rem;border-radius:3px;font-size:0.85em;">📄 BC papier n°{{ bon.paper_bc_number }}</span>
+                    {% endif %}
                 </p>
             </div>
             <div class="quick-links">
                 <a class="button-link" href="{% url 'bons:list' %}">Retour à la liste</a>
-                <a class="button-link" href="{% url 'bons:export-pdf' bon.pk %}">📄 PDF</a>
-                <a class="button-link" href="{% url 'bons:export-xlsx' bon.pk %}">📊 Excel</a>
+                {% if export_ready %}
+                    <a class="button-link" href="{% url 'bons:export-pdf' bon.pk %}">📄 PDF</a>
+                    <a class="button-link" href="{% url 'bons:export-xlsx' bon.pk %}">📊 Excel</a>
+                {% else %}
+                    <span class="button-link" style="opacity:0.5;cursor:not-allowed;" title="Tous les reçus doivent être révisés avant l'exportation">📄 PDF</span>
+                    <span class="button-link" style="opacity:0.5;cursor:not-allowed;" title="Tous les reçus doivent être révisés avant l'exportation">📊 Excel</span>
+                {% endif %}
                 {% if can_manage and bon.status != "VALIDATED" and bon.status != "REIMBURSED" and bon.status != "VOID" %}
                     <a class="button-link" href="{% url 'bons:edit' bon.pk %}">Modifier</a>
                 {% endif %}
@@ -136,6 +181,7 @@
                         <tr>
                             <th>Fichier</th>
                             <th>Type</th>
+                            <th>Statut OCR</th>
                             <th>Taille</th>
                             <th>Téléversé par</th>
                             <th>Date</th>
@@ -146,6 +192,17 @@
                             <tr>
                                 <td><a href="{{ r.file.url }}">{{ r.original_filename }}</a></td>
                                 <td>{{ r.content_type|default:"—" }}</td>
+                                <td>
+                                    {% if r.ocr_status == "EXTRACTED" or r.ocr_status == "CORRECTED" %}
+                                        <span style="color:#155724;">✅ {{ r.get_ocr_status_display }}</span>
+                                    {% elif r.ocr_status == "FAILED" %}
+                                        <span style="color:#721c24;">❌ {{ r.get_ocr_status_display }}</span>
+                                    {% elif r.ocr_status == "PENDING" %}
+                                        <span style="color:#856404;">⏳ {{ r.get_ocr_status_display }}</span>
+                                    {% else %}
+                                        {{ r.get_ocr_status_display }}
+                                    {% endif %}
+                                </td>
                                 <td>
                                     {% if r.file_size_bytes %}
                                         {{ r.file_size_bytes|filesizeformat }}
@@ -178,4 +235,33 @@
             </form>
         {% endif %}
     </section>
+
+    {# Audit log for this bon #}
+    {% if audit_entries %}
+    <section class="card">
+        <h2>Journal d'audit</h2>
+        <div class="table-responsive">
+            <table class="data-table">
+                <thead>
+                    <tr>
+                        <th>Date</th>
+                        <th>Action</th>
+                        <th>Résumé</th>
+                        <th>Utilisateur</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for entry in audit_entries %}
+                    <tr>
+                        <td class="nowrap">{{ entry.created_at|date:"Y-m-d H:i" }}</td>
+                        <td>{{ entry.action }}</td>
+                        <td>{{ entry.summary }}</td>
+                        <td>{{ entry.actor|default:"—" }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </section>
+    {% endif %}
 {% endblock %}

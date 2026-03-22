@@ -9,10 +9,10 @@ from houses.models import House
 from accounts.models import User
 from members.models import Member, Apartment, Residency
 from budget.models import BudgetYear, SubBudget, Expense
-from bons.models import BonDeCommande, BonStatus
+from bons.models import BonDeCommande, BonStatus, DuplicateFlag, DuplicateFlagStatus
 from bons.services import generate_bon_number
-from bons.ocr_service import ReceiptOcrService
-from bons.views import _names_match, _normalize_name
+from bons.ocr_service import ReceiptOcrService, DuplicateDetectionService
+from bons.views import _names_match, _normalize_name, _bon_is_export_ready
 
 
 class BonNumberGenerationTests(TestCase):
@@ -610,3 +610,411 @@ class FuzzyNameMatchTests(TestCase):
     def test_normalize_strips_accents(self):
         self.assertEqual(_normalize_name("Héloïse Côté"), "heloise cote")
         self.assertEqual(_normalize_name("  CARL-DAVID  FORTIN  "), "carl-david fortin")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Phase 10 Tests: Duplicate Detection, Export Gating, Audit Trail
+# ═══════════════════════════════════════════════════════════════════════════
+
+class DuplicateDetectionBaseTest(TestCase):
+    """Base setup for duplicate detection tests."""
+
+    def setUp(self):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        from bons.models import ReceiptFile, ReceiptExtractedFields, OcrStatus
+
+        self.house = House.objects.create(
+            code="BB", name="Maison BB", account_number="13-51200"
+        )
+        self.budget_year = BudgetYear.objects.create(
+            house=self.house, year=2026,
+            annual_budget_total=Decimal("12237.00")
+        )
+        self.sub_budget = SubBudget.objects.create(
+            budget_year=self.budget_year, trace_code=7,
+            name="Produits ménager", planned_amount=Decimal("300.00")
+        )
+        self.member = Member.objects.create(first_name="Marylin", last_name="Lamarche")
+        self.apartment = Apartment.objects.create(house=self.house, code="202")
+        Residency.objects.create(
+            member=self.member, apartment=self.apartment,
+            start_date=date(2020, 1, 1)
+        )
+        self.user = User.objects.create_user(
+            username="tresorier", password="test123",
+            role="TREASURER", house=self.house, member=self.member,
+        )
+
+        # Create existing bon with a receipt
+        self.existing_bon = BonDeCommande.objects.create(
+            house=self.house, budget_year=self.budget_year,
+            number="BB260001", purchase_date=date(2026, 1, 7),
+            short_description="Existing purchase", total=Decimal("19.49"),
+            sub_budget=self.sub_budget, purchaser_member=self.member,
+            status=BonStatus.VALIDATED,
+        )
+        fake_file = SimpleUploadedFile("receipt1.png", b"fake image data", content_type="image/png")
+        self.existing_receipt = ReceiptFile.objects.create(
+            bon_de_commande=self.existing_bon,
+            file=fake_file,
+            original_filename="receipt1.png",
+            content_type="image/png",
+            ocr_status=OcrStatus.EXTRACTED,
+        )
+        self.existing_ef = ReceiptExtractedFields.objects.create(
+            receipt_file=self.existing_receipt,
+            total_candidate=Decimal("19.49"),
+            final_total=Decimal("19.49"),
+        )
+
+        # Create new bon with a receipt (same total)
+        self.new_bon = BonDeCommande.objects.create(
+            house=self.house, budget_year=self.budget_year,
+            number="BB260002", purchase_date=date(2026, 3, 15),
+            short_description="New purchase", total=Decimal("19.49"),
+            sub_budget=self.sub_budget, purchaser_member=self.member,
+            status=BonStatus.READY_FOR_VALIDATION,
+        )
+        fake_file2 = SimpleUploadedFile("receipt2.png", b"fake image data 2", content_type="image/png")
+        self.new_receipt = ReceiptFile.objects.create(
+            bon_de_commande=self.new_bon,
+            file=fake_file2,
+            original_filename="receipt2.png",
+            content_type="image/png",
+            ocr_status=OcrStatus.EXTRACTED,
+        )
+        self.new_ef = ReceiptExtractedFields.objects.create(
+            receipt_file=self.new_receipt,
+            total_candidate=Decimal("19.49"),
+            final_total=Decimal("19.49"),
+        )
+
+
+class DigitalInvoiceDuplicateTests(DuplicateDetectionBaseTest):
+    """Test digital invoice duplicate detection via matching totals."""
+
+    def test_find_matching_totals_same_total(self):
+        matches = DuplicateDetectionService.find_matching_totals(
+            self.new_receipt, self.house
+        )
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0].receipt_file, self.existing_receipt)
+
+    def test_find_matching_totals_different_total(self):
+        self.existing_ef.final_total = Decimal("99.99")
+        self.existing_ef.total_candidate = Decimal("99.99")
+        self.existing_ef.save()
+        matches = DuplicateDetectionService.find_matching_totals(
+            self.new_receipt, self.house
+        )
+        self.assertEqual(len(matches), 0)
+
+    def test_find_matching_totals_different_house(self):
+        other_house = House.objects.create(code="XX", name="Other", account_number="99-99999")
+        matches = DuplicateDetectionService.find_matching_totals(
+            self.new_receipt, other_house
+        )
+        self.assertEqual(len(matches), 0)
+
+    @patch.object(DuplicateDetectionService, "compare_with_gpt")
+    def test_check_and_flag_creates_flag(self, mock_gpt):
+        mock_gpt.return_value = {
+            "is_same_purchase": True,
+            "confidence": 0.95,
+            "reasoning": "Same merchant, date, and amount",
+        }
+        flags = DuplicateDetectionService.check_and_flag_duplicates(
+            self.new_receipt, self.house
+        )
+        self.assertEqual(len(flags), 1)
+        flag = flags[0]
+        self.assertEqual(flag.receipt_file, self.new_receipt)
+        self.assertEqual(flag.suspected_duplicate_receipt, self.existing_receipt)
+        self.assertEqual(flag.confidence, Decimal("0.95"))
+        self.assertEqual(flag.status, DuplicateFlagStatus.CONFIRMED_DUPLICATE)
+
+    @patch.object(DuplicateDetectionService, "compare_with_gpt")
+    def test_check_and_flag_pending_if_low_confidence(self, mock_gpt):
+        mock_gpt.return_value = {
+            "is_same_purchase": True,
+            "confidence": 0.60,
+            "reasoning": "Similar amounts but different dates",
+        }
+        flags = DuplicateDetectionService.check_and_flag_duplicates(
+            self.new_receipt, self.house
+        )
+        self.assertEqual(len(flags), 1)
+        self.assertEqual(flags[0].status, DuplicateFlagStatus.PENDING)
+
+    @patch.object(DuplicateDetectionService, "compare_with_gpt")
+    def test_no_duplicate_flag_for_same_receipt(self, mock_gpt):
+        """Should not flag a receipt against itself."""
+        mock_gpt.return_value = {
+            "is_same_purchase": True, "confidence": 1.0, "reasoning": "Same"
+        }
+        matches = DuplicateDetectionService.find_matching_totals(
+            self.existing_receipt, self.house
+        )
+        # The existing receipt should match the new one, not itself
+        self.assertNotIn(
+            self.existing_receipt,
+            [m.receipt_file for m in matches]
+        )
+
+    @patch.object(DuplicateDetectionService, "compare_with_gpt")
+    def test_no_double_flagging(self, mock_gpt):
+        mock_gpt.return_value = {
+            "is_same_purchase": True, "confidence": 0.95, "reasoning": "Dup"
+        }
+        # First call creates flags
+        flags1 = DuplicateDetectionService.check_and_flag_duplicates(
+            self.new_receipt, self.house
+        )
+        self.assertEqual(len(flags1), 1)
+
+        # Second call should not create duplicates
+        flags2 = DuplicateDetectionService.check_and_flag_duplicates(
+            self.new_receipt, self.house
+        )
+        self.assertEqual(len(flags2), 0)
+
+
+class PaperBcDuplicateTests(DuplicateDetectionBaseTest):
+    """Test paper BC duplicate detection at finalization."""
+
+    def test_paper_bc_same_number_same_total_blocks(self):
+        """If a paper BC with the same number and total exists, it should be blocked."""
+        self.existing_bon.is_paper_bc = True
+        self.existing_bon.paper_bc_number = "16011"
+        BonDeCommande.objects.filter(pk=self.existing_bon.pk).update(
+            is_paper_bc=True, paper_bc_number="16011"
+        )
+
+        existing_dup = BonDeCommande.objects.filter(
+            house=self.house,
+            is_paper_bc=True,
+            paper_bc_number="16011",
+        ).exclude(status=BonStatus.VOID).first()
+
+        self.assertIsNotNone(existing_dup)
+        self.assertEqual(existing_dup.total, Decimal("19.49"))
+
+    def test_paper_bc_voided_not_detected(self):
+        """Voided paper BCs should not block new ones."""
+        BonDeCommande.objects.filter(pk=self.existing_bon.pk).update(
+            is_paper_bc=True, paper_bc_number="16011", status=BonStatus.VOID,
+        )
+
+        existing_dup = BonDeCommande.objects.filter(
+            house=self.house,
+            is_paper_bc=True,
+            paper_bc_number="16011",
+        ).exclude(status=BonStatus.VOID).first()
+
+        self.assertIsNone(existing_dup)
+
+
+class ExportGatingTests(DuplicateDetectionBaseTest):
+    """Test that exports are blocked when receipts haven't been reviewed."""
+
+    def test_export_ready_when_all_reviewed(self):
+        self.assertTrue(_bon_is_export_ready(self.existing_bon))
+
+    def test_export_not_ready_when_pending(self):
+        from bons.models import ReceiptFile, OcrStatus
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        fake = SimpleUploadedFile("unreviewed.png", b"data", content_type="image/png")
+        ReceiptFile.objects.create(
+            bon_de_commande=self.existing_bon,
+            file=fake, original_filename="unreviewed.png",
+            content_type="image/png",
+            ocr_status=OcrStatus.PENDING,
+        )
+        self.assertFalse(_bon_is_export_ready(self.existing_bon))
+
+    def test_export_ready_no_receipts(self):
+        empty_bon = BonDeCommande.objects.create(
+            house=self.house, budget_year=self.budget_year,
+            number="BB260099", purchase_date=date(2026, 1, 1),
+            short_description="Empty bon", total=Decimal("0.00"),
+            sub_budget=self.sub_budget, purchaser_member=self.member,
+        )
+        self.assertTrue(_bon_is_export_ready(empty_bon))
+
+    def test_export_pdf_blocked_when_not_ready(self):
+        from bons.models import ReceiptFile, OcrStatus
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        fake = SimpleUploadedFile("pending.png", b"data", content_type="image/png")
+        ReceiptFile.objects.create(
+            bon_de_commande=self.existing_bon,
+            file=fake, original_filename="pending.png",
+            content_type="image/png",
+            ocr_status=OcrStatus.NOT_REQUESTED,
+        )
+        self.client.login(username="tresorier", password="test123")
+        resp = self.client.get(f"/bons/{self.existing_bon.pk}/pdf/")
+        self.assertEqual(resp.status_code, 302)  # redirect back to detail
+
+    def test_export_xlsx_blocked_when_not_ready(self):
+        from bons.models import ReceiptFile, OcrStatus
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        fake = SimpleUploadedFile("pending.png", b"data", content_type="image/png")
+        ReceiptFile.objects.create(
+            bon_de_commande=self.existing_bon,
+            file=fake, original_filename="pending.png",
+            content_type="image/png",
+            ocr_status=OcrStatus.NOT_REQUESTED,
+        )
+        self.client.login(username="tresorier", password="test123")
+        resp = self.client.get(f"/bons/{self.existing_bon.pk}/xlsx/")
+        self.assertEqual(resp.status_code, 302)  # redirect back to detail
+
+
+class AuditTrailTests(DuplicateDetectionBaseTest):
+    """Test that edits create audit log entries."""
+
+    def test_edit_creates_audit_entry(self):
+        from audits.models import AuditLogEntry
+
+        self.client.login(username="tresorier", password="test123")
+
+        # Set bon to editable status
+        BonDeCommande.objects.filter(pk=self.existing_bon.pk).update(
+            status=BonStatus.READY_FOR_VALIDATION,
+        )
+        self.existing_bon.refresh_from_db()
+
+        resp = self.client.post(f"/bons/{self.existing_bon.pk}/edit/", {
+            "budget_year": self.budget_year.pk,
+            "purchase_date": "2026-01-08",
+            "short_description": "Updated description",
+            "total": "25.00",
+            "sub_budget": self.sub_budget.pk,
+            "purchaser_member": self.member.pk,
+        })
+        self.assertEqual(resp.status_code, 302)
+
+        entries = AuditLogEntry.objects.filter(
+            target_app_label="bons",
+            target_model="bondecommande",
+            target_object_id=str(self.existing_bon.pk),
+            action="bon.edited",
+        )
+        self.assertTrue(entries.exists())
+        entry = entries.first()
+        self.assertIn("short_description", entry.summary)
+
+    def test_no_audit_entry_when_nothing_changed(self):
+        from audits.models import AuditLogEntry
+
+        self.client.login(username="tresorier", password="test123")
+
+        BonDeCommande.objects.filter(pk=self.existing_bon.pk).update(
+            status=BonStatus.READY_FOR_VALIDATION,
+        )
+        self.existing_bon.refresh_from_db()
+
+        # Submit the form with the same values
+        resp = self.client.post(f"/bons/{self.existing_bon.pk}/edit/", {
+            "budget_year": self.budget_year.pk,
+            "purchase_date": str(self.existing_bon.purchase_date),
+            "short_description": self.existing_bon.short_description,
+            "total": str(self.existing_bon.total),
+            "sub_budget": self.sub_budget.pk,
+            "purchaser_member": self.member.pk,
+        })
+        self.assertEqual(resp.status_code, 302)
+
+        entries = AuditLogEntry.objects.filter(
+            target_app_label="bons",
+            target_model="bondecommande",
+            target_object_id=str(self.existing_bon.pk),
+            action="bon.edited",
+        )
+        self.assertFalse(entries.exists())
+
+
+class DuplicateFlagResolveTests(DuplicateDetectionBaseTest):
+    """Test duplicate flag resolution."""
+
+    def setUp(self):
+        super().setUp()
+        self.flag = DuplicateFlag.objects.create(
+            receipt_file=self.new_receipt,
+            suspected_duplicate_receipt=self.existing_receipt,
+            confidence=Decimal("0.95"),
+            gpt_comparison_result="Same merchant and amount",
+            status=DuplicateFlagStatus.PENDING,
+        )
+
+    def test_dismiss_duplicate_flag(self):
+        self.client.login(username="tresorier", password="test123")
+        resp = self.client.post(
+            f"/bons/duplicates/{self.flag.pk}/resolve/",
+            {"action": "dismiss"},
+        )
+        self.assertEqual(resp.status_code, 302)
+        self.flag.refresh_from_db()
+        self.assertEqual(self.flag.status, DuplicateFlagStatus.DISMISSED)
+        self.assertIsNotNone(self.flag.resolved_at)
+
+    def test_confirm_duplicate_flag(self):
+        self.client.login(username="tresorier", password="test123")
+        resp = self.client.post(
+            f"/bons/duplicates/{self.flag.pk}/resolve/",
+            {"action": "confirm"},
+        )
+        self.assertEqual(resp.status_code, 302)
+        self.flag.refresh_from_db()
+        self.assertEqual(self.flag.status, DuplicateFlagStatus.CONFIRMED_DUPLICATE)
+
+
+class DetailViewDuplicateTests(DuplicateDetectionBaseTest):
+    """Test that the detail view shows duplicate warnings and export gating."""
+
+    def test_detail_shows_duplicate_flag(self):
+        DuplicateFlag.objects.create(
+            receipt_file=self.new_receipt,
+            suspected_duplicate_receipt=self.existing_receipt,
+            confidence=Decimal("0.95"),
+            gpt_comparison_result="Same merchant",
+            status=DuplicateFlagStatus.PENDING,
+        )
+        self.client.login(username="tresorier", password="test123")
+        resp = self.client.get(f"/bons/{self.new_bon.pk}/")
+        self.assertContains(resp, "DOUBLON POSSIBLE")
+
+    def test_detail_hides_dismissed_flags(self):
+        DuplicateFlag.objects.create(
+            receipt_file=self.new_receipt,
+            suspected_duplicate_receipt=self.existing_receipt,
+            confidence=Decimal("0.95"),
+            gpt_comparison_result="Same merchant",
+            status=DuplicateFlagStatus.DISMISSED,
+        )
+        self.client.login(username="tresorier", password="test123")
+        resp = self.client.get(f"/bons/{self.new_bon.pk}/")
+        self.assertNotContains(resp, "DOUBLON POSSIBLE")
+
+    def test_detail_shows_export_links_when_ready(self):
+        self.client.login(username="tresorier", password="test123")
+        resp = self.client.get(f"/bons/{self.existing_bon.pk}/")
+        self.assertContains(resp, "📄 PDF")
+        self.assertContains(resp, "📊 Excel")
+        # Links should be active (not greyed out)
+        self.assertContains(resp, f'href="/bons/{self.existing_bon.pk}/pdf/"')
+
+    def test_detail_disables_export_when_not_ready(self):
+        from bons.models import ReceiptFile, OcrStatus
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        fake = SimpleUploadedFile("pending.png", b"data", content_type="image/png")
+        ReceiptFile.objects.create(
+            bon_de_commande=self.existing_bon,
+            file=fake, original_filename="pending.png",
+            content_type="image/png",
+            ocr_status=OcrStatus.PENDING,
+        )
+        self.client.login(username="tresorier", password="test123")
+        resp = self.client.get(f"/bons/{self.existing_bon.pk}/")
+        # Should show greyed-out export buttons
+        self.assertContains(resp, "cursor:not-allowed")
