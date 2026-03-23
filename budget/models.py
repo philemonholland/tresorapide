@@ -14,6 +14,137 @@ class ExpenseSourceType(models.TextChoices):
     GL_IMPORT = "gl_import", "Import grand livre"
 
 
+class GLUploadStatus(models.TextChoices):
+    PENDING = "pending", "En attente"
+    PARSED = "parsed", "Analysé"
+    RECONCILING = "reconciling", "Rapprochement en cours"
+    RECONCILED = "reconciled", "Rapproché"
+    ERROR = "error", "Erreur"
+
+
+class GLMatchConfidence(models.TextChoices):
+    EXACT = "exact", "Correspondance exacte"
+    PROBABLE = "probable", "Correspondance probable"
+    UNMATCHED = "unmatched", "Non apparié"
+
+
+class GrandLivreUpload(TimeStampedModel):
+    """A single Grand Livre Excel file uploaded by a treasurer."""
+    budget_year = models.ForeignKey(
+        "budget.BudgetYear", on_delete=models.CASCADE,
+        related_name="gl_uploads",
+    )
+    uploaded_file = models.FileField(upload_to="grand_livre/%Y/")
+    uploaded_by = models.ForeignKey(
+        "accounts.User", on_delete=models.SET_NULL,
+        null=True, related_name="gl_uploads",
+    )
+    account_number = models.CharField(
+        max_length=20, blank=True,
+        help_text="Numéro de compte trouvé, ex : 13-51200",
+    )
+    status = models.CharField(
+        max_length=15, choices=GLUploadStatus.choices,
+        default=GLUploadStatus.PENDING,
+    )
+    gl_total_debit = models.DecimalField(
+        max_digits=12, decimal_places=2, null=True, blank=True,
+    )
+    gl_total_credit = models.DecimalField(
+        max_digits=12, decimal_places=2, null=True, blank=True,
+    )
+    gl_solde_fin = models.DecimalField(
+        max_digits=12, decimal_places=2, null=True, blank=True,
+        help_text="Solde fin from the GL total line",
+    )
+    entry_count = models.PositiveIntegerField(default=0)
+    period_end_date = models.DateField(
+        null=True, blank=True,
+        help_text="Date de fin de la période couverte par le GL",
+    )
+    error_message = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"GL {self.budget_year} — {self.get_status_display()}"
+
+
+class GrandLivreEntry(TimeStampedModel):
+    """A single transaction row parsed from the Grand Livre."""
+    upload = models.ForeignKey(
+        GrandLivreUpload, on_delete=models.CASCADE,
+        related_name="entries",
+    )
+    row_number = models.PositiveIntegerField()
+    period = models.CharField(max_length=20, blank=True)
+    date = models.DateField(null=True, blank=True)
+    source = models.CharField(max_length=100, blank=True)
+    description_raw = models.TextField(blank=True)
+    description_clean = models.TextField(
+        blank=True,
+        help_text="AI-rewritten description",
+    )
+    debit = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    credit = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    solde_fin = models.DecimalField(
+        max_digits=12, decimal_places=2, null=True, blank=True,
+    )
+
+    # Reconciliation fields
+    matched_expense = models.ForeignKey(
+        "budget.Expense", on_delete=models.SET_NULL,
+        null=True, blank=True, related_name="gl_matches",
+    )
+    match_confidence = models.CharField(
+        max_length=15, choices=GLMatchConfidence.choices,
+        default=GLMatchConfidence.UNMATCHED,
+    )
+    match_notes = models.TextField(blank=True)
+    extracted_apartment = models.CharField(max_length=20, blank=True)
+    extracted_bc_number = models.CharField(max_length=30, blank=True)
+    is_validated = models.BooleanField(default=False)
+    needs_import = models.BooleanField(
+        default=False,
+        help_text="True for coop worker expenses not yet in our system",
+    )
+
+    class Meta:
+        ordering = ["upload", "row_number"]
+
+    @property
+    def net_amount(self):
+        return self.debit - self.credit
+
+    def __str__(self):
+        return f"GL#{self.row_number}: {self.description_raw[:50]} ({self.debit})"
+
+
+class ReconciliationResult(TimeStampedModel):
+    """Summary of a Grand Livre reconciliation."""
+    upload = models.OneToOneField(
+        GrandLivreUpload, on_delete=models.CASCADE,
+        related_name="reconciliation",
+    )
+    gl_total = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    grille_total = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    difference = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    matched_count = models.PositiveIntegerField(default=0)
+    unmatched_gl_count = models.PositiveIntegerField(default=0)
+    missing_from_gl_count = models.PositiveIntegerField(default=0)
+    is_balanced = models.BooleanField(default=False)
+    anomalies = models.JSONField(default=list, blank=True)
+    ai_analysis = models.TextField(blank=True)
+    status_light = models.CharField(
+        max_length=10, default="red",
+        help_text="green, yellow, or red",
+    )
+
+    def __str__(self):
+        return f"Reconciliation {self.upload} — {self.status_light}"
+
+
 class BudgetYear(TimeStampedModel):
     """Annual budget for a specific house."""
     house = models.ForeignKey(
@@ -95,6 +226,17 @@ class BudgetYear(TimeStampedModel):
         from django.utils import timezone
         return self.year == timezone.now().year
 
+    @property
+    def is_year_active(self):
+        """True when the calendar year is current or future (regardless of the manual is_active flag)."""
+        from django.utils import timezone
+        return self.year >= timezone.now().year
+
+    @property
+    def is_inactive(self):
+        """Budget is inactive when the calendar year is over OR manually deactivated/closed."""
+        return not self.is_year_active or not self.is_active or self.is_closed
+
 
 class SubBudget(TimeStampedModel):
     """
@@ -174,6 +316,10 @@ class Expense(TimeStampedModel):
         help_text="Confirmé dans le grand livre du gestionnaire"
     )
     supplier_name = models.CharField(max_length=200, blank=True)
+    reimburse_to = models.CharField(
+        max_length=10, blank=True, default="",
+        help_text="member = rembourser le membre, supplier = rembourser le fournisseur"
+    )
     spent_by_label = models.CharField(
         max_length=200,
         help_text="ex : '202 / Marylin' ou 'BB' ou nom du fournisseur"
@@ -238,6 +384,18 @@ class Expense(TimeStampedModel):
         if self.bon_de_commande_id:
             return self.bon_de_commande.effective_validator_display_label
         return "—"
+
+    @property
+    def display_reimburse_label(self) -> str:
+        """Show Membre or Fournisseur for the grille column."""
+        target = self.reimburse_to
+        if not target and self.bon_de_commande_id:
+            target = self.bon_de_commande.reimburse_to
+        if target == "member":
+            return "Membre"
+        elif target == "supplier":
+            return "Fournisseur"
+        return ""
 
     def __str__(self):
         return f"{self.entry_date} · {self.description[:50]} · ${self.amount}"

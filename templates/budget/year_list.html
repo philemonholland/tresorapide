@@ -7,11 +7,11 @@
         <div class="section-heading">
             <div>
                 <h1>Années budgétaires</h1>
-                <p class="text-muted">Suivi budgétaire par année.</p>
+                <p class="text-muted">Suivi budgétaire par année et par maison.</p>
             </div>
             <div class="quick-links">
                 <a class="button-link" href="{% url 'home' %}">Tableau de bord</a>
-                {% if can_manage %}
+                {% if can_create_budget_year %}
                     <a class="button-link" href="{% url 'budget:year-create' %}">Créer une année budgétaire</a>
                 {% endif %}
             </div>
@@ -19,6 +19,37 @@
     </section>
 
     <section class="card">
+        <form method="get" class="stack" style="margin-bottom: 1rem;">
+            <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(200px, 1fr));gap:1rem;align-items:end;">
+                <div class="form-group">
+                    <label for="id_house">Maison</label>
+                    <select id="id_house" name="house">
+                        <option value="">Toutes les maisons</option>
+                        {% for house in house_choices %}
+                            <option value="{{ house.pk }}"{% if selected_house == house.pk|stringformat:"s" %} selected{% endif %}>
+                                {{ house.code }} — {{ house.name }}
+                            </option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="id_year">Année</label>
+                    <select id="id_year" name="year">
+                        <option value="">Toutes les années</option>
+                        {% for year in year_choices %}
+                            <option value="{{ year }}"{% if selected_year == year|stringformat:"s" %} selected{% endif %}>
+                                {{ year }}
+                            </option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div style="display:flex;gap:0.75rem;align-items:center;">
+                    <button type="submit" class="btn btn-primary">Filtrer</button>
+                    <a class="button-link" href="{% url 'budget:year-list' %}">Réinitialiser</a>
+                </div>
+            </div>
+        </form>
+
         {% if budget_years %}
             <div class="table-responsive">
                 <table class="data-table enhanced-table">
@@ -27,10 +58,11 @@
                             <th>Année</th>
                             <th>Immeuble</th>
                             <th>Statut</th>
-                            <th>Budget total</th>
-                            <th>Déneigement</th>
-                            <th>Imprévues</th>
-                            {% if can_manage %}
+                            <th class="money-col">Budget total</th>
+                            <th class="money-col">Dépenses à ce jour</th>
+                            <th class="money-col">Déneigement</th>
+                            <th class="money-col">Imprévues</th>
+                            {% if manageable_house_ids %}
                                 <th>Actions</th>
                             {% endif %}
                         </tr>
@@ -45,17 +77,24 @@
                                 <td>
                                     {% if by.is_closed %}
                                         <span class="badge badge-archived">Fermé</span>
-                                    {% elif by.is_active %}
-                                        <span class="badge badge-approved">Actif</span>
-                                    {% else %}
+                                    {% elif by.is_inactive %}
                                         <span class="badge">Inactif</span>
+                                    {% else %}
+                                        <span class="badge badge-approved">Actif</span>
                                     {% endif %}
                                 </td>
-                                <td>{{ by.annual_budget_total|floatformat:2 }} $</td>
-                                <td>{{ by.snow_budget|floatformat:2 }} $</td>
-                                <td>{{ by.imprevues_amount|floatformat:2 }} $</td>
-                                {% if can_manage %}
-                                    <td><a href="{% url 'budget:year-edit' by.pk %}">Modifier</a></td>
+                                <td class="money-col">{{ by.annual_budget_total|floatformat:2 }} $</td>
+                                <td class="money-col">{{ by.expenses_to_date|floatformat:2 }} $</td>
+                                <td class="money-col">{{ by.snow_budget|floatformat:2 }} $</td>
+                                <td class="money-col">{{ by.imprevues_amount|floatformat:2 }} $</td>
+                                {% if manageable_house_ids %}
+                                    <td>
+                                        {% if by.house_id in manageable_house_ids %}
+                                            <a href="{% url 'budget:year-edit' by.pk %}">Modifier</a>
+                                        {% else %}
+                                            —
+                                        {% endif %}
+                                    </td>
                                 {% endif %}
                             </tr>
                         {% endfor %}
