@@ -7,6 +7,10 @@ class House(TimeStampedModel):
         max_length=2, unique=True,
         help_text="Code de 2 caractères alphanumériques, ex : 'BB'"
     )
+    accounting_code = models.CharField(
+        max_length=10, blank=True,
+        help_text="Code comptable court du tableau coop, ex : '13'"
+    )
     name = models.CharField(max_length=150, help_text="ex : 'Maison BB'")
     account_number = models.CharField(
         max_length=10, unique=True,

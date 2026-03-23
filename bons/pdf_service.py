@@ -8,6 +8,15 @@ import os
 from decimal import Decimal
 
 from django.conf import settings
+from pdf2image import convert_from_path
+from pdf2image.exceptions import (
+    PDFInfoNotInstalledError,
+    PDFPageCountError,
+    PDFPopplerTimeoutError,
+    PDFSyntaxError,
+    PopplerNotInstalledError,
+)
+from PIL import Image as PILImage, ImageOps, UnidentifiedImageError
 
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter
@@ -24,6 +33,17 @@ COOP_NAME = "COOPÉRATIVE D'HABITATION\nDES CANTONS DE L'EST"
 COOP_ADDRESS = "548, rue Dufferin, Sherbrooke (Québec) J1H 4N1"
 COOP_PHONE = "Tél. : (819) 566-6303  Téléc. : (819) 829-1593"
 COOP_EMAIL = "Courriel : chce@reseaucoop.com  www.chce.coop"
+RECEIPT_PREVIEW_EXCEPTIONS = (
+    FileNotFoundError,
+    OSError,
+    ValueError,
+    UnidentifiedImageError,
+    PDFInfoNotInstalledError,
+    PDFPageCountError,
+    PDFPopplerTimeoutError,
+    PDFSyntaxError,
+    PopplerNotInstalledError,
+)
 
 
 def _fmt_money(val):
@@ -31,6 +51,85 @@ def _fmt_money(val):
     if val is None:
         return ""
     return f"{val:.2f} $"
+
+
+def _duplicate_flags_for_bon(bon):
+    from .models import DuplicateFlag
+
+    receipt_ids = list(bon.active_receipt_files.values_list("pk", flat=True))
+    if not receipt_ids:
+        return []
+    return list(
+        DuplicateFlag.objects.actionable().filter(
+            receipt_file_id__in=receipt_ids,
+        ).select_related(
+            "receipt_file",
+            "suspected_duplicate_receipt",
+            "suspected_duplicate_receipt__bon_de_commande",
+        )
+    )
+
+
+def _pil_image_to_png_bytes(image_obj) -> bytes:
+    image = image_obj.copy()
+    if image.mode != "RGB":
+        image = image.convert("RGB")
+    buf = io.BytesIO()
+    image.save(buf, format="PNG", optimize=True)
+    return buf.getvalue()
+
+
+def _receipt_preview_pages(receipt):
+    """Return rendered preview pages as (label, png_bytes)."""
+    if not receipt.file:
+        return []
+
+    file_path = receipt.file.path
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"Fichier introuvable : {receipt.original_filename}")
+
+    base_label = receipt.original_filename or os.path.basename(file_path)
+    is_pdf = receipt.content_type == "application/pdf" or base_label.lower().endswith(".pdf")
+
+    if is_pdf:
+        pdf_pages = convert_from_path(file_path, dpi=150)
+        rendered_pages = []
+        for index, page in enumerate(pdf_pages, start=1):
+            label = base_label if len(pdf_pages) == 1 else f"{base_label} — page {index}"
+            rendered_pages.append((label, _pil_image_to_png_bytes(page)))
+        return rendered_pages
+
+    with PILImage.open(file_path) as source_image:
+        image = ImageOps.exif_transpose(source_image)
+        return [(base_label, _pil_image_to_png_bytes(image))]
+
+
+def _load_receipt_previews(receipt):
+    try:
+        return _receipt_preview_pages(receipt), None
+    except RECEIPT_PREVIEW_EXCEPTIONS as exc:
+        return [], str(exc)
+
+
+def _scaled_reportlab_image(image_bytes, max_width, max_height):
+    image_stream = io.BytesIO(image_bytes)
+    img = RLImage(image_stream)
+    ratio = min(max_width / img.imageWidth, max_height / img.imageHeight)
+    ratio = min(ratio, 1)
+    img.drawWidth = img.imageWidth * ratio
+    img.drawHeight = img.imageHeight * ratio
+    return img
+
+
+def _scaled_xlsx_image(image_bytes, max_width=320, max_height=420):
+    from openpyxl.drawing.image import Image as XLImage
+
+    image = XLImage(io.BytesIO(image_bytes))
+    ratio = min(max_width / image.width, max_height / image.height)
+    ratio = min(ratio, 1)
+    image.width = int(image.width * ratio)
+    image.height = int(image.height * ratio)
+    return image
 
 
 def generate_bon_pdf(bon) -> bytes:
@@ -149,7 +248,7 @@ def generate_bon_pdf(bon) -> bytes:
     ]
     items_data = [items_header]
 
-    receipts = bon.receipt_files.order_by("created_at", "pk")
+    receipts = bon.active_receipt_files.order_by("created_at", "pk")
     for r in receipts:
         try:
             ef = r.extracted_fields
@@ -259,15 +358,7 @@ def generate_bon_pdf(bon) -> bytes:
         elements.append(Spacer(1, 0.3 * cm))
 
     # ── Duplicate warning ────────────────────────────────────────────────
-    from .models import DuplicateFlag
-    receipt_ids = list(bon.receipt_files.values_list("pk", flat=True))
-    active_dup_flags = list(
-        DuplicateFlag.objects.actionable().filter(
-            receipt_file_id__in=receipt_ids,
-        )
-        .select_related("receipt_file", "suspected_duplicate_receipt",
-                        "suspected_duplicate_receipt__bon_de_commande")
-    )
+    active_dup_flags = _duplicate_flags_for_bon(bon)
     if active_dup_flags:
         style_dup = ParagraphStyle(
             "DupWarning", parent=style_normal,
@@ -308,37 +399,115 @@ def generate_bon_pdf(bon) -> bytes:
     ]))
     elements.append(footer_table)
 
-    # ── Attached receipt images ──────────────────────────────────────────
+    # ── Attached receipt previews ────────────────────────────────────────
     for receipt in receipts:
-        if not receipt.file or not receipt.content_type:
-            continue
-        if not receipt.content_type.startswith("image/"):
-            continue
-        try:
-            file_path = receipt.file.path
-            if not os.path.exists(file_path):
-                continue
+        preview_pages, preview_error = _load_receipt_previews(receipt)
+        if preview_error:
             elements.append(PageBreak())
             elements.append(Paragraph(
                 f"<b>Reçu : {receipt.original_filename}</b>",
                 style_bold,
             ))
-            elements.append(Spacer(1, 0.3 * cm))
-
-            # Fit image to page
-            max_w = 17 * cm
-            max_h = 22 * cm
-            img = RLImage(file_path)
-            iw, ih = img.imageWidth, img.imageHeight
-            ratio = min(max_w / iw, max_h / ih)
-            img.drawWidth = iw * ratio
-            img.drawHeight = ih * ratio
-            elements.append(img)
-        except Exception:
             elements.append(Paragraph(
-                f"<i>(Image non disponible : {receipt.original_filename})</i>",
+                f"<i>(Aperçu non disponible : {preview_error})</i>",
                 style_small,
             ))
+            continue
+
+        for page_label, preview_bytes in preview_pages:
+            elements.append(PageBreak())
+            elements.append(Paragraph(
+                f"<b>Reçu : {page_label}</b>",
+                style_bold,
+            ))
+            elements.append(Spacer(1, 0.3 * cm))
+            elements.append(_scaled_reportlab_image(preview_bytes, 17 * cm, 22 * cm))
+
+    # ── Duplicate comparison pages ───────────────────────────────────────
+    if active_dup_flags:
+        style_dup_page = ParagraphStyle(
+            "DupPageTitle", parent=style_normal,
+            fontSize=12, fontName="Helvetica-Bold",
+            textColor=colors.red, alignment=TA_CENTER,
+            spaceAfter=8,
+        )
+        style_dup_label = ParagraphStyle(
+            "DupLabel", parent=style_normal,
+            fontSize=9, fontName="Helvetica-Bold",
+            alignment=TA_CENTER,
+        )
+
+        for flag in active_dup_flags:
+            current_previews, current_error = _load_receipt_previews(flag.receipt_file)
+            duplicate_previews, duplicate_error = _load_receipt_previews(
+                flag.suspected_duplicate_receipt
+            )
+            current_number = flag.receipt_file.bon_de_commande.number
+            duplicate_number = flag.suspected_duplicate_receipt.bon_de_commande.number
+
+            elements.append(PageBreak())
+            elements.append(Paragraph(
+                "DOUBLON POSSIBLE — COMPARAISON VISUELLE",
+                style_dup_page,
+            ))
+            elements.append(Paragraph(
+                (
+                    f"<font size='9'><b>Facture du BC exporté :</b> "
+                    f"{flag.receipt_file.original_filename} (BC {current_number})<br/>"
+                    f"<b>Facture suspecte :</b> "
+                    f"{flag.suspected_duplicate_receipt.original_filename} "
+                    f"(BC {duplicate_number})<br/>"
+                    f"<b>Confiance :</b> {flag.confidence_percent:.0f}%</font>"
+                ),
+                style_normal,
+            ))
+            elements.append(Spacer(1, 0.3 * cm))
+
+            comparison_row = [
+                Paragraph("<font color='black'><b>BC exporté</b></font>", style_dup_label),
+                Paragraph("<font color='red'><b>POSSIBLE DOUBLON</b></font>", style_dup_label),
+            ]
+            if current_previews:
+                current_block = _scaled_reportlab_image(current_previews[0][1], 8 * cm, 10 * cm)
+            else:
+                current_block = Paragraph(
+                    f"<i>Aperçu non disponible : {current_error or 'non pris en charge'}</i>",
+                    style_small,
+                )
+            if duplicate_previews:
+                duplicate_block = _scaled_reportlab_image(
+                    duplicate_previews[0][1], 8 * cm, 10 * cm
+                )
+            else:
+                duplicate_block = Paragraph(
+                    f"<i>Aperçu non disponible : {duplicate_error or 'non pris en charge'}</i>",
+                    style_small,
+                )
+            compare_table = Table(
+                [
+                    comparison_row,
+                    [current_block, duplicate_block],
+                ],
+                colWidths=[8.5 * cm, 8.5 * cm],
+            )
+            compare_table.setStyle(TableStyle([
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("ALIGN", (0, 0), (-1, 0), "CENTER"),
+                ("BOX", (0, 0), (-1, -1), 0.5, colors.grey),
+                ("INNERGRID", (0, 0), (-1, -1), 0.5, colors.grey),
+                ("TOPPADDING", (0, 0), (-1, -1), 6),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+            ]))
+            elements.append(compare_table)
+
+            for page_label, preview_bytes in duplicate_previews[1:]:
+                elements.append(PageBreak())
+                elements.append(Paragraph(
+                    f"POSSIBLE DOUBLON — {page_label}",
+                    style_dup_page,
+                ))
+                elements.append(Spacer(1, 0.2 * cm))
+                elements.append(_scaled_reportlab_image(preview_bytes, 17 * cm, 22 * cm))
 
     doc.build(elements)
     return buf.getvalue()
@@ -415,7 +584,7 @@ def generate_bon_xlsx(bon) -> bytes:
     row += 1
 
     # Items from receipts
-    receipts = bon.receipt_files.order_by("created_at", "pk")
+    receipts = bon.active_receipt_files.order_by("created_at", "pk")
     for r in receipts:
         try:
             ef = r.extracted_fields
@@ -477,15 +646,7 @@ def generate_bon_xlsx(bon) -> bytes:
     row += 2
 
     # ── Duplicate warning ────────────────────────────────────────────
-    from .models import DuplicateFlag
-    receipt_ids = list(bon.receipt_files.values_list("pk", flat=True))
-    active_dup_flags = list(
-        DuplicateFlag.objects.actionable().filter(
-            receipt_file_id__in=receipt_ids,
-        )
-        .select_related("receipt_file", "suspected_duplicate_receipt",
-                        "suspected_duplicate_receipt__bon_de_commande")
-    )
+    active_dup_flags = _duplicate_flags_for_bon(bon)
     if active_dup_flags:
         dup_fill = PatternFill(start_color="F8D7DA", end_color="F8D7DA", fill_type="solid")
         dup_font = Font(bold=True, color="CC0000", size=12)
@@ -510,6 +671,80 @@ def generate_bon_xlsx(bon) -> bytes:
             cell.font = dup_detail_font
             cell.fill = dup_fill
             row += 1
+
+        dup_ws = wb.create_sheet("Doublons possibles")
+        for col in ["A", "B", "C", "D", "F", "G", "H", "I"]:
+            dup_ws.column_dimensions[col].width = 18
+        dup_ws.column_dimensions["E"].width = 4
+
+        dup_ws.merge_cells("A1:I1")
+        dup_ws["A1"] = "DOUBLONS POSSIBLES — COMPARAISON VISUELLE"
+        dup_ws["A1"].font = dup_font
+        dup_ws["A1"].fill = dup_fill
+        dup_ws["A1"].alignment = Alignment(horizontal="center")
+
+        row = 3
+        for index, flag in enumerate(active_dup_flags, start=1):
+            current_previews, current_error = _load_receipt_previews(flag.receipt_file)
+            duplicate_previews, duplicate_error = _load_receipt_previews(
+                flag.suspected_duplicate_receipt
+            )
+            dup_ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=9)
+            dup_ws.cell(row=row, column=1, value=f"POSSIBLE DOUBLON #{index}").font = dup_font
+            dup_ws.cell(row=row, column=1).fill = dup_fill
+            row += 1
+
+            dup_text = (
+                f"Reçu exporté : {flag.receipt_file.original_filename} (BC {flag.receipt_file.bon_de_commande.number}) | "
+                f"Reçu suspect : {flag.suspected_duplicate_receipt.original_filename} "
+                f"(BC {flag.suspected_duplicate_receipt.bon_de_commande.number}) | "
+                f"Confiance : {flag.confidence_percent:.0f}%"
+            )
+            dup_ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=9)
+            dup_ws.cell(row=row, column=1, value=dup_text).font = dup_detail_font
+            dup_ws.cell(row=row, column=1).fill = dup_fill
+            row += 2
+
+            max_pages = max(len(current_previews), len(duplicate_previews), 1)
+            for page_index in range(max_pages):
+                current_preview = (
+                    current_previews[page_index] if page_index < len(current_previews) else None
+                )
+                duplicate_preview = (
+                    duplicate_previews[page_index] if page_index < len(duplicate_previews) else None
+                )
+
+                dup_ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=4)
+                dup_ws.merge_cells(start_row=row, start_column=6, end_row=row, end_column=9)
+                dup_ws.cell(
+                    row=row,
+                    column=1,
+                    value=(
+                        current_preview[0]
+                        if current_preview
+                        else f"Aperçu non disponible : {current_error or 'non pris en charge'}"
+                    ),
+                ).font = bold
+                dup_ws.cell(
+                    row=row,
+                    column=6,
+                    value=(
+                        f"POSSIBLE DOUBLON — {duplicate_preview[0]}"
+                        if duplicate_preview
+                        else f"Aperçu non disponible : {duplicate_error or 'non pris en charge'}"
+                    ),
+                ).font = dup_detail_font
+                row += 1
+
+                image_anchor_row = row
+                if current_preview:
+                    dup_ws.add_image(_scaled_xlsx_image(current_preview[1]), f"A{image_anchor_row}")
+                if duplicate_preview:
+                    dup_ws.add_image(_scaled_xlsx_image(duplicate_preview[1]), f"F{image_anchor_row}")
+
+                for visual_row in range(image_anchor_row, image_anchor_row + 24):
+                    dup_ws.row_dimensions[visual_row].height = 24
+                row = image_anchor_row + 25
 
     buf = io.BytesIO()
     wb.save(buf)

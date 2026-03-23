@@ -71,6 +71,7 @@ Retourne UNIQUEMENT un tableau JSON. Chaque élément = un document distinct:
     "associated_bc_number": "",
     "supplier_name": "Nom du fournisseur",
     "supplier_address": "Adresse du fournisseur",
+    "reimburse_to": "member",
     "expense_member_name": "Nom de la personne ayant effectué la dépense",
     "expense_apartment": "202",
     "validator_member_name": "Nom du 2e signataire",
@@ -83,6 +84,7 @@ Retourne UNIQUEMENT un tableau JSON. Chaque élément = un document distinct:
     "subtotal": 0.00,
     "tps": 0.00,
     "tvq": 0.00,
+    "untaxed_extra_amount": 0.00,
     "total": 0.00,
     "summary": "Courte description des achats"
   }
@@ -100,6 +102,12 @@ description) pour associer. Laisser "" si pas de BC associé.
 - supplier_name: pour "paper_bc" et "invoice" — le nom du fournisseur ou la \
 personne à rembourser tel qu'inscrit sur le document.
 - supplier_address: adresse du fournisseur si visible.
+- reimburse_to: pour "paper_bc" — détermine qui doit être remboursé. Regarde \
+le champ "Nom du fournisseur ou de la personne à rembourser" sur le bon de \
+commande papier. Si ce nom correspond à la personne qui a effectué la dépense \
+(expense_member_name) ou à un membre du répertoire de la maison, retourne \
+"member". Si c'est une entreprise ou un fournisseur externe, retourne \
+"supplier". Pour les "invoice" et "receipt", laisser "".
 - expense_member_name: pour "paper_bc" — le NOM de la personne qui a signé \
 le bon de commande, inscrit au-dessus de "NOM EN LETTRES MOULÉES" dans la \
 section signature. C'est la personne qui a effectué la dépense. Laisser "" si \
@@ -107,9 +115,14 @@ non visible ou pour les autres types.
 - expense_apartment: pour "paper_bc" — le numéro d'appartement de la personne \
 ayant effectué la dépense, s'il est visible sur le bon. Laisser "" si absent.
 - validator_member_name: pour "paper_bc" — s'il y a une DEUXIÈME signature qui \
-valide l'achat, le nom de cette personne. Sinon "".
+  valide l'achat, le nom de cette personne. Cette personne peut être EXTERNE à \
+  la coop. Ne force pas ce nom vers un membre du répertoire si ce n'est pas un \
+  match clair. Sinon "".
 - validator_apartment: pour "paper_bc" — l'appartement du 2e signataire si \
-visible. Sinon "".
+  visible sur le document lui-même. Si le 2e signataire semble externe ou si \
+  l'appartement n'est pas clairement écrit près de sa signature, laisse "". \
+  Ne déduis jamais validator_apartment uniquement à partir du répertoire des \
+  membres. Sinon "".
 - signer_roles_ambiguous: pour "paper_bc" — true s'il y a deux signatures mais \
 qu'il est ambigu lequel est l'acheteur vs lequel valide l'achat; false sinon.
 - member_name: pour "receipt" seulement — le nom écrit à la main par le membre. \
@@ -121,15 +134,24 @@ Si complètement illisible, utilise "ILLISIBLE".
 - subtotal: sous-total AVANT taxes. Si absent, null (NE PAS calculer).
 - tps: TPS (taxe fédérale, ~5%). Si absente, null.
 - tvq: TVQ (taxe provinciale, ~9.975%). Si absente, null.
+- untaxed_extra_amount: pourboire, livraison ou autres frais NON TAXABLES
+  inclus au total. Si absent, null.
 - total: montant TOTAL TTC. Si absent, null. ATTENTION: extraire le montant \
 EXACT tel qu'affiché sur le document, ne pas recalculer.
 - IMPORTANT pour les factures ("invoice"): extraire ABSOLUMENT les montants \
-(subtotal, tps, tvq, total) même s'ils apparaissent dans un tableau, un bon \
+(subtotal, tps, tvq, untaxed_extra_amount, total) même s'ils apparaissent dans un tableau, un bon \
 de commande associé, ou une section « montant ». C'est CRITIQUE pour la \
 vérification croisée avec le bon de commande papier. Si le prix unitaire et \
 la quantité sont visibles mais pas de sous-total explicite, calculer \
 prix × quantité comme subtotal.
-- summary: courte description du contenu du document.
+- summary: courte description du contenu du document. Garde le resume a
+  l'essentiel: decris simplement les articles, travaux ou achats, sans
+  ajouter de formule comme "Bon de commande pour", "Recu pour",
+  "Facture pour", ni le nom du fournisseur ou de la maison sauf si c'est
+  indispensable pour comprendre l'achat.
+- Exemple de mauvais resume: "Bon de commande pour quincaillerie Parent:
+  joints toriques, cartouches/robinet et rondelle pour maison B"
+- Exemple de bon resume: "Joints toriques, cartouches/robinet et rondelle"
 - Les montants en nombre décimal (pas de $).
 - Retourne UNIQUEMENT le JSON, sans texte additionnel.
 """
@@ -208,6 +230,11 @@ class ReceiptOcrService:
             "- Si un appartement du document permet d'identifier un membre du répertoire, "
             "retourne aussi l'appartement officiel du répertoire dans apartment_number, "
             "expense_apartment ou validator_apartment.\n"
+            "- IMPORTANT pour validator_member_name / validator_apartment sur un paper_bc: "
+            "le 2e signataire peut etre une personne EXTERNE a la coop. N'utilise le "
+            "repertoire pour ce 2e signataire que si le nom manuscrit correspond "
+            "clairement a un membre. Sinon, conserve le nom lu tel quel et laisse "
+            "validator_apartment vide.\n"
             "- N'invente jamais un membre absent du répertoire. Si aucun match crédible "
             "n'existe, conserve le texte lu tel quel.\n"
         )
@@ -477,6 +504,7 @@ class ReceiptOcrService:
             "subtotal": cls._safe_decimal(data.get("subtotal")),
             "tps": cls._safe_decimal(data.get("tps")),
             "tvq": cls._safe_decimal(data.get("tvq")),
+            "untaxed_extra_amount": cls._safe_decimal(data.get("untaxed_extra_amount")),
             "total": cls._safe_decimal(data.get("total")),
             "summary": str(data.get("summary") or "").strip(),
         }
@@ -564,6 +592,7 @@ class ReceiptOcrService:
             "subtotal": None,
             "tps": None,
             "tvq": None,
+            "untaxed_extra_amount": None,
             "total": None,
             "summary": "",
         }
@@ -655,6 +684,7 @@ class ReceiptOcrService:
                         "associated_bc_number_candidate": primary.get("associated_bc_number", ""),
                         "supplier_name_candidate": primary.get("supplier_name", ""),
                         "supplier_address_candidate": primary.get("supplier_address", ""),
+                        "reimburse_to_candidate": primary.get("reimburse_to", ""),
                         "expense_member_name_candidate": primary.get("expense_member_name", ""),
                         "expense_apartment_candidate": primary.get("expense_apartment", ""),
                         "validator_member_name_candidate": primary.get("validator_member_name", ""),
@@ -667,6 +697,7 @@ class ReceiptOcrService:
                         "subtotal_candidate": primary.get("subtotal"),
                         "tps_candidate": primary.get("tps"),
                         "tvq_candidate": primary.get("tvq"),
+                        "untaxed_extra_amount_candidate": primary.get("untaxed_extra_amount"),
                         "total_candidate": primary.get("total"),
                         "summary_candidate": primary.get("summary", ""),
                     },
@@ -775,6 +806,7 @@ class DuplicateDetectionService:
             .filter(
                 receipt_file__bon_de_commande__house=house,
                 receipt_file__created_at__gte=cutoff,
+                receipt_file__archived_at__isnull=True,
                 receipt_file__ocr_status__in=[OS.EXTRACTED, OS.CORRECTED],
                 receipt_file__bon_de_commande__is_scan_session=False,
             )

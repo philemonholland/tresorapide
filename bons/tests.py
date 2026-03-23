@@ -6,6 +6,7 @@ from django.test import TestCase
 from django.core.exceptions import ValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.urls import reverse
+from django.utils import timezone
 
 from houses.models import House
 from accounts.models import User
@@ -383,6 +384,7 @@ class OcrMemberDirectoryTests(TestCase):
         self.assertIn("RÉPERTOIRE OFFICIEL DES MEMBRES ACTIFS", prompt)
         self.assertIn("Appartement 105: Serge Laroche", prompt)
         self.assertIn("retourne EXACTEMENT le nom officiel", prompt)
+        self.assertIn("le 2e signataire peut etre une personne EXTERNE", prompt)
 
     def test_resolve_member_assignment_prefers_fuzzy_name_match(self):
         other_member = Member.objects.create(first_name="Pierre", last_name="Bouchard")
@@ -643,6 +645,7 @@ class PaperBcFinalizationTests(TestCase):
         self.assertEqual(paper_bon.number, "16011")
         self.assertEqual(paper_bon.paper_bc_number, "16011")
         self.assertEqual(paper_bon.status, BonStatus.READY_FOR_VALIDATION)
+        self.assertEqual(paper_bon.merchant_name, "Gicleurs de l'Estrie")
         self.assertNotEqual(paper_bon.purchaser_member, self.treasurer_member)
         self.assertEqual(paper_bon.purchaser_member, self.member)
         self.assertEqual(paper_bon.purchaser_apartment, self.apt)
@@ -691,6 +694,61 @@ class PaperBcFinalizationTests(TestCase):
         self.assertIsNotNone(paper_bon)
         self.assertEqual(paper_bon.number, "16011-2")
         self.assertEqual(paper_bon.paper_bc_number, "16011")
+
+    def test_finalize_reactivates_voided_paper_bc_instead_of_creating_new_one(self):
+        from django.contrib.messages.storage.fallback import FallbackStorage
+        from django.test import RequestFactory
+        from bons.views import OcrReviewView
+
+        archived_bon = BonDeCommande.objects.create(
+            house=self.house,
+            budget_year=self.budget_year,
+            number="16011",
+            purchase_date=date(2026, 1, 1),
+            short_description="Ancien BC annulé",
+            total=Decimal("100.00"),
+            sub_budget=self.sub_budget,
+            purchaser_member=self.member,
+            status=BonStatus.VOID,
+            is_paper_bc=True,
+            paper_bc_number="16011",
+            void_reason="Test",
+            voided_at=timezone.now(),
+        )
+        old_receipt = ReceiptFile.objects.create(
+            bon_de_commande=archived_bon,
+            file=SimpleUploadedFile("old.png", b"old image", content_type="image/png"),
+            original_filename="old.png",
+            content_type="image/png",
+            ocr_status=OcrStatus.CORRECTED,
+        )
+
+        request = RequestFactory().get("/")
+        request.user = self.user
+        setattr(request, "session", "session")
+        setattr(request, "_messages", FallbackStorage(request))
+
+        OcrReviewView()._finalize_bons(request, self.scan_session)
+
+        archived_bon.refresh_from_db()
+        old_receipt.refresh_from_db()
+        self.assertEqual(archived_bon.status, BonStatus.READY_FOR_VALIDATION)
+        self.assertIsNone(archived_bon.voided_at)
+        self.assertEqual(archived_bon.paper_bc_number, "16011")
+        self.assertTrue(old_receipt.is_archived)
+        self.assertEqual(archived_bon.active_receipt_files.count(), 2)
+        self.assertSetEqual(
+            set(archived_bon.active_receipt_files.values_list("original_filename", flat=True)),
+            {"BC16011.pdf", "facture.png"},
+        )
+        self.assertEqual(
+            BonDeCommande.objects.filter(
+                is_scan_session=False,
+                is_paper_bc=True,
+                paper_bc_number="16011",
+            ).count(),
+            1,
+        )
 
     def test_orphan_invoices_grouped_as_regular(self):
         """Invoices with no matching paper BC are treated as regular receipts."""
@@ -787,6 +845,42 @@ class PaperBcFinalizationTests(TestCase):
         self.assertEqual(paper_bon.tvq, Decimal("9.98"))
         self.assertEqual(paper_bon.total, Decimal("114.98"))
 
+    def test_finalize_preserves_untaxed_extra_amount(self):
+        self.receipt_bc.extracted_fields.final_subtotal = Decimal("100.00")
+        self.receipt_bc.extracted_fields.final_tps = None
+        self.receipt_bc.extracted_fields.final_tvq = None
+        self.receipt_bc.extracted_fields.final_total = Decimal("124.98")
+        self.receipt_bc.extracted_fields.save()
+
+        self.receipt_inv.extracted_fields.final_subtotal = Decimal("100.00")
+        self.receipt_inv.extracted_fields.final_tps = None
+        self.receipt_inv.extracted_fields.final_tvq = None
+        self.receipt_inv.extracted_fields.final_untaxed_extra_amount = Decimal("10.00")
+        self.receipt_inv.extracted_fields.final_total = Decimal("124.98")
+        self.receipt_inv.extracted_fields.save()
+
+        from django.test import RequestFactory
+        from bons.views import OcrReviewView
+        from django.contrib.messages.storage.fallback import FallbackStorage
+
+        request = RequestFactory().get("/")
+        request.user = self.user
+        setattr(request, "session", "session")
+        setattr(request, "_messages", FallbackStorage(request))
+
+        OcrReviewView()._finalize_bons(request, self.scan_session)
+        paper_bon = BonDeCommande.objects.filter(
+            is_paper_bc=True,
+            is_scan_session=False,
+        ).exclude(status=BonStatus.VOID).first()
+
+        self.assertIsNotNone(paper_bon)
+        self.assertEqual(paper_bon.subtotal, Decimal("100.00"))
+        self.assertEqual(paper_bon.tps, Decimal("5.00"))
+        self.assertEqual(paper_bon.tvq, Decimal("9.98"))
+        self.assertEqual(paper_bon.untaxed_extra_amount, Decimal("10.00"))
+        self.assertEqual(paper_bon.total, Decimal("124.98"))
+
 
 class MismatchWarningTests(TestCase):
     """Test the _get_mismatch_warning helper."""
@@ -852,6 +946,24 @@ class MismatchWarningTests(TestCase):
         ])
         self.assertIsNone(_get_mismatch_warning(receipt))
 
+    def test_tax_only_difference_does_not_warn(self):
+        from bons.views import _get_mismatch_warning
+        from unittest.mock import MagicMock
+
+        receipt = MagicMock()
+        receipt.ocr_raw_text = json.dumps([
+            {"document_type": "paper_bc", "bc_number": "16739", "total": 19.49},
+            {
+                "document_type": "invoice",
+                "associated_bc_number": "16739",
+                "subtotal": 16.95,
+                "tps": None,
+                "tvq": None,
+                "total": None,
+            },
+        ])
+        self.assertIsNone(_get_mismatch_warning(receipt))
+
     def test_normalize_derives_taxes_from_total_only(self):
         """When only total is known, derive subtotal and taxes from Quebec rates."""
         result = _normalize_document_amounts(total=Decimal("54.58"))
@@ -867,6 +979,20 @@ class MismatchWarningTests(TestCase):
         # TPS should be 5% of subtotal
         expected_tps = (result["subtotal"] * Decimal("0.05")).quantize(Decimal("0.01"))
         self.assertEqual(result["tps"], expected_tps)
+
+    def test_normalize_derives_taxable_amounts_excluding_untaxed_extra(self):
+        result = _normalize_document_amounts(
+            subtotal=Decimal("100.00"),
+            tps=None,
+            tvq=None,
+            total=Decimal("124.98"),
+            untaxed_extra_amount=Decimal("10.00"),
+        )
+        self.assertEqual(result["subtotal"], Decimal("100.00"))
+        self.assertEqual(result["tps"], Decimal("5.00"))
+        self.assertEqual(result["tvq"], Decimal("9.98"))
+        self.assertEqual(result["untaxed_extra_amount"], Decimal("10.00"))
+        self.assertEqual(result["total"], Decimal("124.98"))
 
     def test_unverifiable_when_invoice_amounts_null(self):
         """When invoices exist but all amounts are null, return unverifiable warning."""
@@ -912,14 +1038,22 @@ class MismatchWarningTests(TestCase):
                 "subtotal": 47.47,
                 "tps": 2.37,
                 "tvq": 4.74,
+                "untaxed_extra_amount": 10.00,
                 "total": 54.58,
             },
         ])
-        initial = {"subtotal": None, "tps": None, "tvq": None, "total": Decimal("54.58")}
+        initial = {
+            "subtotal": None,
+            "tps": None,
+            "tvq": None,
+            "untaxed_extra_amount": None,
+            "total": Decimal("54.58"),
+        }
         _supplement_amounts_from_invoices(initial, receipt)
         self.assertAlmostEqual(float(initial["subtotal"]), 47.47)
         self.assertAlmostEqual(float(initial["tps"]), 2.37)
         self.assertAlmostEqual(float(initial["tvq"]), 4.74)
+        self.assertAlmostEqual(float(initial["untaxed_extra_amount"]), 10.00)
         # total should remain the BC value since it was already set
         self.assertAlmostEqual(float(initial["total"]), 54.58)
 
@@ -950,6 +1084,7 @@ class MismatchWarningTests(TestCase):
             "subtotal": Decimal("10.00"),
             "tps": Decimal("0.50"),
             "tvq": Decimal("1.00"),
+            "untaxed_extra_amount": Decimal("2.00"),
             "total": Decimal("11.50"),
         }
         _supplement_amounts_from_invoices(initial, receipt)
@@ -957,7 +1092,78 @@ class MismatchWarningTests(TestCase):
         self.assertEqual(initial["subtotal"], Decimal("10.00"))
         self.assertEqual(initial["tps"], Decimal("0.50"))
         self.assertEqual(initial["tvq"], Decimal("1.00"))
+        self.assertEqual(initial["untaxed_extra_amount"], Decimal("2.00"))
         self.assertEqual(initial["total"], Decimal("11.50"))
+
+    def test_supplement_derives_standard_taxes_when_invoice_only_has_subtotal(self):
+        from bons.views import _supplement_amounts_from_invoices
+        from unittest.mock import MagicMock
+
+        receipt = MagicMock()
+        receipt.ocr_raw_text = json.dumps([
+            {
+                "document_type": "paper_bc",
+                "bc_number": "16739",
+                "subtotal": None,
+                "tps": None,
+                "tvq": None,
+                "total": 19.49,
+            },
+            {
+                "document_type": "invoice",
+                "associated_bc_number": "16739",
+                "subtotal": 16.95,
+                "tps": None,
+                "tvq": None,
+                "total": None,
+            },
+        ])
+        initial = {
+            "subtotal": None,
+            "tps": None,
+            "tvq": None,
+            "untaxed_extra_amount": None,
+            "total": Decimal("19.49"),
+        }
+        _supplement_amounts_from_invoices(initial, receipt)
+        self.assertEqual(initial["subtotal"], Decimal("16.95"))
+        self.assertEqual(initial["tps"], Decimal("0.85"))
+        self.assertEqual(initial["tvq"], Decimal("1.69"))
+
+    def test_supplement_replaces_bc_subtotal_when_it_is_actually_total(self):
+        from bons.views import _supplement_amounts_from_invoices
+        from unittest.mock import MagicMock
+
+        receipt = MagicMock()
+        receipt.ocr_raw_text = json.dumps([
+            {
+                "document_type": "paper_bc",
+                "bc_number": "16739",
+                "subtotal": 19.49,
+                "tps": None,
+                "tvq": None,
+                "total": 19.49,
+            },
+            {
+                "document_type": "invoice",
+                "associated_bc_number": "16739",
+                "subtotal": 16.95,
+                "tps": None,
+                "tvq": None,
+                "total": 16.95,
+            },
+        ])
+        initial = {
+            "subtotal": Decimal("19.49"),
+            "tps": None,
+            "tvq": None,
+            "untaxed_extra_amount": None,
+            "total": Decimal("19.49"),
+        }
+        _supplement_amounts_from_invoices(initial, receipt)
+        self.assertEqual(initial["subtotal"], Decimal("16.95"))
+        self.assertEqual(initial["tps"], Decimal("0.85"))
+        self.assertEqual(initial["tvq"], Decimal("1.69"))
 
 
 class SignerRoleWorkflowTests(TestCase):
@@ -1064,6 +1270,167 @@ class SignerRoleWorkflowTests(TestCase):
         self.assertEqual(self.bon.purchaser_member, self.validator)
         self.assertEqual(self.bon.approver_member, self.purchaser)
 
+    def test_build_form_prefills_paper_bc_merchant_from_supplier(self):
+        from bons.views import OcrReviewView
+
+        self.extracted.final_supplier_name = "Produits Sany"
+        self.extracted.final_merchant = ""
+        self.extracted.save()
+
+        form, *_ = OcrReviewView()._build_form(self.receipt, self.bon)
+        self.assertEqual(form.initial["merchant_name"], "Produits Sany")
+
+    def test_build_form_prefers_invoice_supplier_name_and_address_for_company_reimbursement(self):
+        from bons.views import OcrReviewView
+
+        self.extracted.final_supplier_name = "Parent"
+        self.extracted.final_supplier_address = "Rock Forest"
+        self.extracted.final_merchant = ""
+        self.receipt.ocr_raw_text = json.dumps([
+            {
+                "document_type": "paper_bc",
+                "supplier_name": "Parent",
+                "supplier_address": "Rock Forest",
+            },
+            {
+                "document_type": "invoice",
+                "supplier_name": "Quincaillerie Parent Enr.",
+                "supplier_address": "1237 Belvedere Sud, Sherbrooke, QC, J1H 4E1",
+            },
+        ])
+        self.receipt.save(update_fields=["ocr_raw_text"])
+        self.extracted.save()
+
+        form, *_ = OcrReviewView()._build_form(self.receipt, self.bon)
+        self.assertEqual(form.initial["supplier_name"], "Quincaillerie Parent Enr.")
+        self.assertEqual(
+            form.initial["supplier_address"],
+            "1237 Belvedere Sud, Sherbrooke, QC, J1H 4E1",
+        )
+        self.assertEqual(form.initial["merchant_name"], "Quincaillerie Parent Enr.")
+        self.assertEqual(form.initial["reimburse_to"], "supplier")
+
+    def test_build_form_keeps_member_reimbursement_from_paper_bc_payee(self):
+        from bons.views import OcrReviewView
+
+        self.extracted.final_supplier_name = "Marylin Lamarche"
+        self.extracted.supplier_name_candidate = "Marylin Lamarche"
+        self.receipt.ocr_raw_text = json.dumps([
+            {
+                "document_type": "paper_bc",
+                "supplier_name": "Marylin Lamarche",
+                "expense_member_name": "Marylin Lamarche",
+            },
+            {
+                "document_type": "invoice",
+                "supplier_name": "Quincaillerie Parent Enr.",
+                "supplier_address": "1237 Belvedere Sud, Sherbrooke, QC, J1H 4E1",
+            },
+        ])
+        self.receipt.save(update_fields=["ocr_raw_text"])
+        self.extracted.save()
+
+        form, *_ = OcrReviewView()._build_form(self.receipt, self.bon)
+        self.assertEqual(form.initial["supplier_name"], "Quincaillerie Parent Enr.")
+        self.assertEqual(form.initial["reimburse_to"], "member")
+
+    def test_receipt_review_syncs_member_reimbursement_from_paper_bc_payee(self):
+        self.client.login(username="tresorier", password="test123")
+        prefix = f"receipt_{self.receipt.pk}"
+        self.extracted.supplier_name_candidate = "Marylin Lamarche"
+        self.receipt.ocr_raw_text = json.dumps([
+            {
+                "document_type": "paper_bc",
+                "supplier_name": "Marylin Lamarche",
+                "expense_member_name": "Marylin Lamarche",
+            },
+            {
+                "document_type": "invoice",
+                "supplier_name": "Quincaillerie Parent Enr.",
+                "supplier_address": "1237 Belvedere Sud, Sherbrooke, QC, J1H 4E1",
+            },
+        ])
+        self.receipt.save(update_fields=["ocr_raw_text"])
+        self.extracted.save(update_fields=["supplier_name_candidate"])
+
+        response = self.client.post(
+            reverse("bons:receipt-review", kwargs={"bon_pk": self.bon.pk, "receipt_pk": self.receipt.pk}),
+            {
+                f"{prefix}-document_type": "paper_bc",
+                f"{prefix}-bc_number": "16011",
+                f"{prefix}-associated_bc_number": "",
+                f"{prefix}-supplier_name": "Quincaillerie Parent Enr.",
+                f"{prefix}-supplier_address": "1237 Belvedere Sud, Sherbrooke, QC, J1H 4E1",
+                f"{prefix}-reimburse_to": "supplier",
+                f"{prefix}-expense_member_name": "Marylin Lamarche",
+                f"{prefix}-expense_apartment": "202",
+                f"{prefix}-expense_member": self.purchaser.pk,
+                f"{prefix}-validator_member_name": "René Côté",
+                f"{prefix}-validator_apartment": "203",
+                f"{prefix}-validator_member": self.validator.pk,
+                f"{prefix}-signer_roles_ambiguous": "on",
+                f"{prefix}-member_name_raw": "",
+                f"{prefix}-apartment_number": "",
+                f"{prefix}-purchaser_member": "",
+                f"{prefix}-matched_member_id": "",
+                f"{prefix}-sub_budget": self.sub_budget.pk,
+                f"{prefix}-merchant_name": "Quincaillerie Parent Enr.",
+                f"{prefix}-purchase_date": "2026-01-07",
+                f"{prefix}-subtotal": "",
+                f"{prefix}-tps": "",
+                f"{prefix}-tvq": "",
+                f"{prefix}-total": "547.93",
+                f"{prefix}-summary": "Travaux",
+            },
+        )
+        self.assertEqual(response.status_code, 302)
+
+        self.extracted.refresh_from_db()
+        self.bon.refresh_from_db()
+        self.assertEqual(self.extracted.final_reimburse_to, "member")
+        self.assertEqual(self.bon.reimburse_to, "member")
+
+    def test_receipt_review_derives_taxes_with_untaxed_extra(self):
+        self.client.login(username="tresorier", password="test123")
+        prefix = f"receipt_{self.receipt.pk}"
+        response = self.client.post(
+            reverse("bons:receipt-review", kwargs={"bon_pk": self.bon.pk, "receipt_pk": self.receipt.pk}),
+            {
+                f"{prefix}-document_type": "paper_bc",
+                f"{prefix}-bc_number": "16011",
+                f"{prefix}-associated_bc_number": "",
+                f"{prefix}-supplier_name": "Produits Sany",
+                f"{prefix}-supplier_address": "",
+                f"{prefix}-expense_member_name": "Marylin Lamarche",
+                f"{prefix}-expense_apartment": "202",
+                f"{prefix}-expense_member": self.purchaser.pk,
+                f"{prefix}-validator_member_name": "René Côté",
+                f"{prefix}-validator_apartment": "203",
+                f"{prefix}-validator_member": self.validator.pk,
+                f"{prefix}-signer_roles_ambiguous": "on",
+                f"{prefix}-member_name_raw": "",
+                f"{prefix}-apartment_number": "",
+                f"{prefix}-purchaser_member": "",
+                f"{prefix}-matched_member_id": "",
+                f"{prefix}-sub_budget": self.sub_budget.pk,
+                f"{prefix}-merchant_name": "",
+                f"{prefix}-purchase_date": "2026-01-07",
+                f"{prefix}-subtotal": "100.00",
+                f"{prefix}-tps": "",
+                f"{prefix}-tvq": "",
+                f"{prefix}-untaxed_extra_amount": "10.00",
+                f"{prefix}-total": "124.98",
+                f"{prefix}-summary": "Travaux",
+            },
+        )
+        self.assertEqual(response.status_code, 302)
+        self.extracted.refresh_from_db()
+        self.assertEqual(self.extracted.final_subtotal, Decimal("100.00"))
+        self.assertEqual(self.extracted.final_tps, Decimal("5.00"))
+        self.assertEqual(self.extracted.final_tvq, Decimal("9.98"))
+        self.assertEqual(self.extracted.final_untaxed_extra_amount, Decimal("10.00"))
+        self.assertEqual(self.extracted.final_total, Decimal("124.98"))
+
     def test_swap_signers_view_swaps_existing_bon(self):
         self.bon.purchaser_member = self.purchaser
         self.bon.purchaser_apartment = self.apt_202
@@ -1090,6 +1457,22 @@ class SignerRoleWorkflowTests(TestCase):
         self.assertFalse(validator_mismatch)
         self.assertTrue(initial.get("validator_is_external"))
 
+    def test_external_validator_name_overrides_bad_apartment_guess(self):
+        """A conflicting apartment guess must not force the validator to a house member."""
+        extra_member = Member.objects.create(first_name="Lionel", last_name="Munezero")
+        apt_104 = Apartment.objects.create(house=self.house, code="104")
+        Residency.objects.create(member=extra_member, apartment=apt_104, start_date=date(2020, 1, 1))
+        self.extracted.validator_member_name_candidate = "Lui-Jade Rodrigue"
+        self.extracted.validator_apartment_candidate = "104"
+        self.extracted.save()
+
+        initial, _, validator_mismatch, _, _ = _paper_bc_signer_initials(self.house, self.extracted)
+        self.assertFalse(validator_mismatch)
+        self.assertTrue(initial.get("validator_is_external"))
+        self.assertEqual(initial.get("validator_member_name"), "Lui-Jade Rodrigue")
+        self.assertEqual(initial.get("validator_apartment"), "")
+        self.assertNotIn("validator_member", initial)
+
     def test_external_supplier_display_label(self):
         """External approver should display as 'FOUR / [name]'."""
         self.bon.approver_is_external = True
@@ -1100,6 +1483,24 @@ class SignerRoleWorkflowTests(TestCase):
 
         self.assertEqual(self.bon.approver_display_label, "FOUR / Plomberie ABC Inc.")
         self.assertEqual(self.bon.effective_validator_display_label, "FOUR / Plomberie ABC Inc.")
+
+    def test_sync_existing_bon_keeps_external_validator_when_apartment_conflicts(self):
+        from bons.views import OcrReviewView
+
+        extra_member = Member.objects.create(first_name="Lionel", last_name="Munezero")
+        apt_104 = Apartment.objects.create(house=self.house, code="104")
+        Residency.objects.create(member=extra_member, apartment=apt_104, start_date=date(2020, 1, 1))
+        self.extracted.validator_member_name_candidate = "Lui-Jade Rodrigue"
+        self.extracted.validator_apartment_candidate = "104"
+        self.extracted.save()
+
+        OcrReviewView()._sync_existing_bon_paper_bc_data(self.bon)
+        self.bon.refresh_from_db()
+
+        self.assertTrue(self.bon.approver_is_external)
+        self.assertIsNone(self.bon.approver_member)
+        self.assertIsNone(self.bon.approver_apartment)
+        self.assertEqual(self.bon.approver_name_snapshot, "Lui-Jade Rodrigue")
 
     def test_external_supplier_blocks_swap(self):
         """Swapping signers should be blocked for external approvers."""
@@ -1305,6 +1706,14 @@ class DigitalInvoiceDuplicateTests(DuplicateDetectionBaseTest):
         )
         self.assertEqual(len(matches), 0)
 
+    def test_find_matching_totals_ignores_archived_receipts(self):
+        self.existing_receipt.archive("Archived during bon reactivation")
+
+        matches = DuplicateDetectionService.find_matching_totals(
+            self.new_receipt, self.house
+        )
+        self.assertEqual(len(matches), 0)
+
     def test_normalize_confidence_accepts_percent_values(self):
         self.assertEqual(
             DuplicateDetectionService._normalize_confidence("99%"),
@@ -1431,6 +1840,18 @@ class ExportGatingTests(DuplicateDetectionBaseTest):
         )
         self.assertFalse(_bon_is_export_ready(self.existing_bon))
 
+    def test_export_ready_ignores_archived_pending_receipt(self):
+        fake = SimpleUploadedFile("archived-pending.png", b"data", content_type="image/png")
+        receipt = ReceiptFile.objects.create(
+            bon_de_commande=self.existing_bon,
+            file=fake,
+            original_filename="archived-pending.png",
+            content_type="image/png",
+            ocr_status=OcrStatus.PENDING,
+        )
+        receipt.archive("Archived during bon reactivation")
+        self.assertTrue(_bon_is_export_ready(self.existing_bon))
+
     def test_export_ready_no_receipts(self):
         empty_bon = BonDeCommande.objects.create(
             house=self.house, budget_year=self.budget_year,
@@ -1467,6 +1888,87 @@ class ExportGatingTests(DuplicateDetectionBaseTest):
         self.client.login(username="tresorier", password="test123")
         resp = self.client.get(f"/bons/{self.existing_bon.pk}/xlsx/")
         self.assertEqual(resp.status_code, 302)  # redirect back to detail
+
+
+class ExportDuplicateVisualAttachmentTests(DuplicateDetectionBaseTest):
+    def setUp(self):
+        super().setUp()
+        import io
+        from PIL import Image
+
+        def png_bytes(color):
+            buf = io.BytesIO()
+            Image.new("RGB", (80, 80), color).save(buf, format="PNG")
+            return buf.getvalue()
+
+        self.existing_receipt.archive("Replaced with valid export preview image")
+        self.new_receipt.archive("Replaced with valid export preview image")
+
+        self.existing_receipt = ReceiptFile.objects.create(
+            bon_de_commande=self.existing_bon,
+            file=SimpleUploadedFile("receipt1.png", png_bytes((255, 0, 0)), content_type="image/png"),
+            original_filename="receipt1.png",
+            content_type="image/png",
+            ocr_status=OcrStatus.EXTRACTED,
+        )
+        ReceiptExtractedFields.objects.create(
+            receipt_file=self.existing_receipt,
+            total_candidate=Decimal("19.49"),
+            final_total=Decimal("19.49"),
+        )
+
+        self.new_receipt = ReceiptFile.objects.create(
+            bon_de_commande=self.new_bon,
+            file=SimpleUploadedFile("receipt2.png", png_bytes((0, 0, 255)), content_type="image/png"),
+            original_filename="receipt2.png",
+            content_type="image/png",
+            ocr_status=OcrStatus.EXTRACTED,
+        )
+        ReceiptExtractedFields.objects.create(
+            receipt_file=self.new_receipt,
+            total_candidate=Decimal("19.49"),
+            final_total=Decimal("19.49"),
+        )
+
+        self.flag = DuplicateFlag.objects.create(
+            receipt_file=self.new_receipt,
+            suspected_duplicate_receipt=self.existing_receipt,
+            confidence=Decimal("0.95"),
+            gpt_comparison_result="Même achat probable",
+            status=DuplicateFlagStatus.PENDING,
+        )
+
+    def test_generate_bon_pdf_includes_duplicate_warning_and_extra_pages(self):
+        from bons.pdf_service import generate_bon_pdf
+
+        pdf_bytes = generate_bon_pdf(self.new_bon)
+        self.assertGreaterEqual(pdf_bytes.count(b"/Type /Page"), 3)
+        self.assertGreaterEqual(pdf_bytes.count(b"/Subtype /Image"), 2)
+
+    def test_generate_bon_xlsx_creates_duplicate_sheet_with_images(self):
+        import io
+        import zipfile
+        from openpyxl import load_workbook
+        from bons.pdf_service import generate_bon_xlsx
+
+        xlsx_bytes = generate_bon_xlsx(self.new_bon)
+        workbook = load_workbook(io.BytesIO(xlsx_bytes))
+        self.assertIn("Doublons possibles", workbook.sheetnames)
+        duplicate_sheet = workbook["Doublons possibles"]
+        values = [
+            str(value)
+            for row in duplicate_sheet.iter_rows(values_only=True)
+            for value in row
+            if value is not None
+        ]
+        joined_values = " ".join(values)
+        self.assertIn("POSSIBLE DOUBLON", joined_values)
+        self.assertIn("receipt1.png", joined_values)
+        self.assertIn("receipt2.png", joined_values)
+
+        with zipfile.ZipFile(io.BytesIO(xlsx_bytes)) as archive:
+            media_files = [name for name in archive.namelist() if name.startswith("xl/media/")]
+        self.assertGreaterEqual(len(media_files), 2)
 
 
 class AuditTrailTests(DuplicateDetectionBaseTest):

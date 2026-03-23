@@ -1,0 +1,122 @@
+# BC16739 GL Matching Analysis Report
+
+## Executive Summary
+
+The GL matching logic for BC numbers SHOULD work correctly in most cases, but there is ONE CRITICAL BUG that can cause failures when multiple expenses share the same BC number.
+
+---
+
+## 1. How BC Number Matching Works
+
+### 1.1 BC_PATTERN Regex (Line 28)
+
+Pattern: \BC\s*#?\s*(\d{4,7})\ (case-insensitive)
+
+Matches:
+- ✓ 'BC16739' → captures '16739'
+- ✓ 'BC 16739' → captures '16739'
+- ✓ 'BC# 16739' → captures '16739'
+- ✓ '496578-BC 16739-scellant' → captures '16739'
+
+Does NOT match:
+- ✗ 'BC-16739' (dash, not space)
+- ✗ '16739' (no 'BC' prefix)
+- ✗ 'BC 1673' (only 4 digits needed, but usually formatted with 'BC')
+
+### 1.2 _extract_bc_number() Function (Lines 33-36)
+
+Extracts captured group 1 from regex match. Returns empty string if no match.
+
+---
+
+## 2. Matching Flow in match_expenses()
+
+### 2.1 Build BC Lookup (Lines 391-399)
+
+For each Expense with bon_number:
+  - Normalize to digits-only
+  - Store in dict: expenses_by_bc[normalized] = expense
+  - Also store raw form: expenses_by_bc[raw] = expense
+
+EXAMPLE: bon_number='BC16739' creates TWO keys:
+  expenses_by_bc['16739'] = expense
+  expenses_by_bc['BC16739'] = expense
+
+### 2.2 Match GL Entries (Lines 382-388)
+
+For each GL entry with extracted_bc_number:
+  - Normalize to digits-only
+  - Lookup in expenses_by_bc dict using both normalized and raw
+  - If found and not already matched → EXACT match
+
+---
+
+## 3. CRITICAL BUG: Dictionary Overwrite
+
+### Problem (Lines 391-399)
+
+When two expenses have the same BC number, the dictionary lookup uses single values.
+The SECOND expense SILENTLY OVERWRITES the first!
+
+EXAMPLE:
+  Expense 1: bon_number='BC16739', amount=100, id=1
+  Expense 2: bon_number='BC16739', amount=200, id=2
+  GL Entry: extracted_bc_number='16739', debit=100
+
+EXECUTION:
+  expenses_by_bc['16739'] = Expense1 (first iteration)
+  expenses_by_bc['16739'] = Expense2 (second iteration - overwrites!)
+
+RESULT: GL entry matches Expense2 (amount=200) instead of Expense1 (amount=100)!
+        Expense1 becomes INVISIBLE to BC matching.
+
+### Why It's a Bug
+
+Uses dict (single value) instead of dict with lists.
+Compare to expenses_by_amount (lines 385-388):
+  expenses_by_amount.setdefault(key, []).append(exp)  ← Correctly uses list!
+
+### Fix Required
+
+Change to use lists like expenses_by_amount:
+  expenses_by_bc.setdefault(normalized, []).append(exp)
+  expenses_by_bc.setdefault(raw, []).append(exp)
+
+Then update matching logic to iterate through candidates.
+
+---
+
+## 4. Execution Order
+
+1. parse_and_store() → Extracts BC from GL description
+2. enrich_with_ai() → GPT tries to enrich (won't overwrite if already set)
+3. match_expenses() → Uses extracted_bc_number for matching ← BUG HERE
+4. build_reconciliation() → Generates report
+5. analyze_with_ai() → GPT analysis
+
+---
+
+## 5. When BC16739 Matching FAILS
+
+1. GL description doesn't match BC_PATTERN (e.g., 'BC-16739' or no 'BC' prefix)
+2. Expense.bon_number is empty/null
+3. Multiple expenses with same BC number (BUG #3 above)
+4. Amount also doesn't match → falls back to amount matching
+5. Multiple expenses with same amount → tries date proximity (within 60 days)
+
+---
+
+## 6. Recommendations
+
+CRITICAL:
+  - Fix the expenses_by_bc dictionary bug to use lists instead of single values
+  - Test with multiple expenses having same BC number
+
+HIGH:
+  - Add enhanced logging to track why BC matching fails
+  - Add unit tests for duplicate BC scenario
+
+MEDIUM:
+  - Consider warning if BC matches but amount doesn't
+  - Add data validation for bon_number formats
+

@@ -61,6 +61,15 @@
             <p style="margin-top: 1rem; color: var(--negative, #c0392b); font-weight: bold;">
                 ⚠ Cette dépense a été annulée.
             </p>
+            {% if can_manage and not object.is_cancellation %}
+                <form method="post" action="{% url 'budget:expense-reactivate' object.pk %}" style="margin-top: 1rem;"
+                      onsubmit="return confirm('Réactiver cette dépense supprimera son entrée d\\'annulation et la remettra dans la grille comme si elle n\\'avait jamais été annulée. Continuer ?');">
+                    {% csrf_token %}
+                    <button type="submit" class="btn btn-primary">
+                        ↺ Réactiver cette dépense
+                    </button>
+                </form>
+            {% endif %}
         {% endif %}
     </section>
 {% endblock %}

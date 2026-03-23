@@ -14,6 +14,7 @@ import unicodedata
 from accounts.access import RoleRequiredMixin, TreasurerRequiredMixin, check_house_permission
 from .models import (
     BonDeCommande, BonStatus, ReceiptFile, ReceiptExtractedFields, OcrStatus,
+    ReimburseTarget,
 )
 from .forms import (
     BonDeCommandeForm, ReceiptUploadForm, BonValidateForm,
@@ -140,7 +141,7 @@ class BonDetailView(RoleRequiredMixin, DetailView):
 
         ctx = super().get_context_data(**kwargs)
         bon = self.object
-        ctx["receipts"] = bon.receipt_files.all()
+        ctx["receipts"] = bon.active_receipt_files
         ctx["can_manage"] = (
             self.request.user.is_authenticated
             and self.request.user.can_manage_financials
@@ -150,7 +151,7 @@ class BonDetailView(RoleRequiredMixin, DetailView):
         ctx["signer_roles_ambiguous"] = bon.signer_roles_ambiguous
 
         # Duplicate flags for any receipt on this bon
-        receipt_ids = list(bon.receipt_files.values_list("pk", flat=True))
+        receipt_ids = list(bon.active_receipt_files.values_list("pk", flat=True))
         ctx["duplicate_flags"] = list(
             DuplicateFlag.objects.actionable().filter(
                 receipt_file_id__in=receipt_ids,
@@ -170,7 +171,7 @@ class BonDetailView(RoleRequiredMixin, DetailView):
 
         # Amount mismatch warning (paper BC vs invoices)
         if bon.is_paper_bc:
-            for receipt in bon.receipt_files.all():
+            for receipt in bon.active_receipt_files:
                 warning = _get_mismatch_warning(receipt)
                 if warning:
                     ctx["mismatch_warning"] = warning
@@ -292,7 +293,7 @@ class BonUpdateView(TreasurerRequiredMixin, UpdateView):
 
         # Re-run duplicate detection if financial fields changed
         if financial_changed:
-            for receipt in bon.receipt_files.filter(
+            for receipt in bon.active_receipt_files.filter(
                 ocr_status__in=[OcrStatus.EXTRACTED, OcrStatus.CORRECTED]
             ):
                 DuplicateDetectionService.check_and_flag_duplicates(receipt, bon.house)
@@ -375,7 +376,7 @@ class BonValidateView(TreasurerRequiredMixin, FormView):
 
         # Amount mismatch warning (paper BC vs invoices)
         if self.bon.is_paper_bc:
-            for receipt in self.bon.receipt_files.all():
+            for receipt in self.bon.active_receipt_files:
                 warning = _get_mismatch_warning(receipt)
                 if warning:
                     ctx["mismatch_warning"] = warning
@@ -416,6 +417,7 @@ class BonValidateView(TreasurerRequiredMixin, FormView):
                 description=bon.short_description or f"BC {bon.number}",
                 bon_number=bon.number,
                 supplier_name=bon.supplier_name or bon.merchant_name or "",
+                reimburse_to=bon.reimburse_to or "",
                 spent_by_label=bon.purchaser_display_label,
                 amount=bon.total,
                 source_type=ExpenseSourceType.BON_DE_COMMANDE,
@@ -534,13 +536,19 @@ class ReceiptReviewSingleView(TreasurerRequiredMixin, View):
                 "associated_bc_number": ef.final_associated_bc_number or ef.associated_bc_number_candidate or "",
                 "supplier_name": ef.final_supplier_name or ef.supplier_name_candidate or "",
                 "supplier_address": ef.final_supplier_address or ef.supplier_address_candidate or "",
+                "reimburse_to": ef.final_reimburse_to or ef.reimburse_to_candidate or "",
                 "member_name_raw": member_name_raw if (member and not name_mismatch and not name_unreadable) else "",
                 "apartment_number": apt_code,
-                "merchant_name": ef.final_merchant or ef.merchant_candidate,
+                "merchant_name": _merchant_value_for_document(ef, doc_type),
                 "purchase_date": ef.final_purchase_date or ef.purchase_date_candidate,
                 "subtotal": ef.final_subtotal if ef.final_subtotal is not None else ef.subtotal_candidate,
                 "tps": ef.final_tps if ef.final_tps is not None else ef.tps_candidate,
                 "tvq": ef.final_tvq if ef.final_tvq is not None else ef.tvq_candidate,
+                "untaxed_extra_amount": (
+                    ef.final_untaxed_extra_amount
+                    if ef.final_untaxed_extra_amount is not None
+                    else ef.untaxed_extra_amount_candidate
+                ),
                 "total": ef.final_total if ef.final_total is not None else ef.total_candidate,
                 "summary": ef.final_summary or ef.summary_candidate or "",
             })
@@ -551,6 +559,16 @@ class ReceiptReviewSingleView(TreasurerRequiredMixin, View):
                     _paper_bc_signer_initials(bon.house, ef)
                 )
                 initial.update(signer_initials)
+                _supplement_supplier_details_from_invoices(initial, receipt)
+                _supplement_amounts_from_invoices(initial, receipt)
+                reimburse_target = _infer_paper_bc_reimburse_target(
+                    bon.house,
+                    receipt,
+                    ef,
+                    expense_member_name=initial.get("expense_member_name") or "",
+                )
+                if reimburse_target:
+                    initial["reimburse_to"] = reimburse_target
 
             # Pre-select existing bon's sub_budget if not set in extracted data
             if ef.sub_budget_id:
@@ -629,14 +647,33 @@ class ReceiptReviewSingleView(TreasurerRequiredMixin, View):
         ef.final_supplier_name = form.cleaned_data.get("supplier_name") or ""
         ef.final_supplier_address = form.cleaned_data.get("supplier_address") or ""
         _save_paper_bc_extracted_fields(ef, form, bon.house)
+        reimburse_to = form.cleaned_data.get("reimburse_to") or ""
+        if ef.final_document_type == "paper_bc":
+            inferred_reimburse_to = _infer_paper_bc_reimburse_target(
+                bon.house,
+                receipt,
+                ef,
+                expense_member_name=ef.final_expense_member_name,
+            )
+            if inferred_reimburse_to:
+                reimburse_to = inferred_reimburse_to
+        ef.final_reimburse_to = reimburse_to
         ef.final_member_name = selected_member.display_name if selected_member else ""
         ef.final_apartment_number = form.cleaned_data.get("apartment_number") or ""
         ef.final_merchant = form.cleaned_data.get("merchant_name") or ""
         ef.final_purchase_date = form.cleaned_data.get("purchase_date")
-        ef.final_subtotal = form.cleaned_data.get("subtotal")
-        ef.final_tps = form.cleaned_data.get("tps")
-        ef.final_tvq = form.cleaned_data.get("tvq")
-        ef.final_total = form.cleaned_data.get("total")
+        normalized_amounts = _normalize_document_amounts(
+            form.cleaned_data.get("subtotal"),
+            form.cleaned_data.get("tps"),
+            form.cleaned_data.get("tvq"),
+            form.cleaned_data.get("total"),
+            form.cleaned_data.get("untaxed_extra_amount"),
+        )
+        ef.final_subtotal = normalized_amounts["subtotal"]
+        ef.final_tps = normalized_amounts["tps"]
+        ef.final_tvq = normalized_amounts["tvq"]
+        ef.final_untaxed_extra_amount = normalized_amounts["untaxed_extra_amount"]
+        ef.final_total = normalized_amounts["total"]
         ef.final_summary = form.cleaned_data.get("summary") or ""
         ef.sub_budget = form.cleaned_data.get("sub_budget")
         ef.confirmed_by = request.user
@@ -703,6 +740,26 @@ def _resolve_signer_assignment(house, apartment_code: str, signer_name: str):
     return _resolve_member_assignment(house, apartment_code, signer_name)
 
 
+def _resolve_validator_assignment(house, apartment_code: str, validator_name: str):
+    """Resolve the paper-BC validator, allowing external non-members.
+
+    If an OCR-guessed apartment points to a coop member but the handwritten
+    validator name does not credibly match that member, treat the validator as
+    external instead of forcing the house member.
+    """
+    apartment, member = _resolve_signer_assignment(house, apartment_code, validator_name)
+    is_external = False
+    validator_name = (validator_name or "").strip()
+    if validator_name and validator_name.upper() != "ILLISIBLE":
+        if member and not _names_match(validator_name, member.display_name):
+            apartment = None
+            member = None
+            is_external = True
+        elif not member:
+            is_external = True
+    return apartment, member, is_external
+
+
 def _money(value):
     if value in (None, ""):
         return None
@@ -712,7 +769,75 @@ def _money(value):
         return None
 
 
-def _normalize_document_amounts(subtotal=None, tps=None, tvq=None, total=None):
+def _merchant_value_for_document(ef, doc_type: str):
+    merchant_name = (ef.final_merchant or ef.merchant_candidate or "").strip()
+    if merchant_name:
+        return merchant_name
+    if doc_type in {"paper_bc", "invoice"}:
+        return (ef.final_supplier_name or ef.supplier_name_candidate or "").strip()
+    return merchant_name
+
+
+def _paper_bc_payee_name(receipt, ef=None) -> str:
+    """Return the payee written on the paper BC itself.
+
+    The review form may later show supplier details enriched from linked
+    invoices. Reimbursement detection must still use the original payee field
+    from the paper BC, not the invoice-enriched display value.
+    """
+    try:
+        docs = json.loads(receipt.ocr_raw_text or "[]")
+    except (json.JSONDecodeError, TypeError):
+        docs = []
+
+    has_invoice_docs = False
+    for doc in docs:
+        doc_type = str(doc.get("document_type") or "").strip()
+        if doc_type == "paper_bc":
+            payee_name = str(doc.get("supplier_name") or "").strip()
+            if payee_name:
+                return payee_name
+        elif doc_type == "invoice":
+            has_invoice_docs = True
+
+    if ef is None:
+        try:
+            ef = receipt.extracted_fields
+        except ReceiptExtractedFields.DoesNotExist:
+            ef = None
+
+    if not ef:
+        return ""
+
+    candidate_name = (ef.supplier_name_candidate or "").strip()
+    if candidate_name:
+        return candidate_name
+
+    final_name = (ef.final_supplier_name or "").strip()
+    if final_name and not has_invoice_docs:
+        return final_name
+    return ""
+
+
+def _infer_paper_bc_reimburse_target(house, receipt, ef=None, *, expense_member_name: str = "") -> str:
+    """Infer reimbursement target from the paper BC payee."""
+    payee_name = _paper_bc_payee_name(receipt, ef)
+    if not payee_name:
+        return ""
+    if expense_member_name and _names_match(payee_name, expense_member_name):
+        return ReimburseTarget.MEMBER
+    if _match_member_by_name(house, payee_name):
+        return ReimburseTarget.MEMBER
+    return ReimburseTarget.SUPPLIER
+
+
+def _normalize_document_amounts(
+    subtotal=None,
+    tps=None,
+    tvq=None,
+    total=None,
+    untaxed_extra_amount=None,
+):
     """Normalize one document's financials and derive missing taxes/totals when possible.
 
     Québec tax rates used for derivation:
@@ -724,47 +849,73 @@ def _normalize_document_amounts(subtotal=None, tps=None, tvq=None, total=None):
     tps = _money(tps)
     tvq = _money(tvq)
     total = _money(total)
+    untaxed_extra_amount = _money(untaxed_extra_amount)
+    untaxed_extra_for_math = untaxed_extra_amount or Decimal("0.00")
 
     # Case: subtotal + taxes known → derive total
     if subtotal is not None and total is None and tps is not None and tvq is not None:
-        total = (subtotal + tps + tvq).quantize(MONEY_EPSILON)
+        total = (subtotal + tps + tvq + untaxed_extra_for_math).quantize(MONEY_EPSILON)
 
     # Case: total + taxes known → derive subtotal
     if total is not None and subtotal is None and tps is not None and tvq is not None:
-        subtotal = (total - tps - tvq).quantize(MONEY_EPSILON)
+        taxable_total = (total - untaxed_extra_for_math).quantize(MONEY_EPSILON)
+        subtotal = (taxable_total - tps - tvq).quantize(MONEY_EPSILON)
 
     # Case: only total known → derive subtotal and taxes from standard rates
     if total is not None and subtotal is None and tps is None and tvq is None:
+        taxable_total = (total - untaxed_extra_for_math).quantize(MONEY_EPSILON)
+        if taxable_total < Decimal("0.00"):
+            taxable_total = Decimal("0.00")
         combined = Decimal("1") + STANDARD_TPS_RATE + STANDARD_TVQ_RATE
-        subtotal = (total / combined).quantize(MONEY_EPSILON)
+        subtotal = (taxable_total / combined).quantize(MONEY_EPSILON)
         tps = (subtotal * STANDARD_TPS_RATE).quantize(MONEY_EPSILON)
-        tvq = (total - subtotal - tps).quantize(MONEY_EPSILON)
+        tvq = (taxable_total - subtotal - tps).quantize(MONEY_EPSILON)
 
     # Case: subtotal + total known but no taxes → derive taxes
     if total is not None and subtotal is not None:
-        if tps is None and tvq is None and total >= subtotal:
+        taxable_total = (total - untaxed_extra_for_math).quantize(MONEY_EPSILON)
+        if tps is None and tvq is None and taxable_total >= subtotal:
             tps = (subtotal * STANDARD_TPS_RATE).quantize(MONEY_EPSILON)
-            tvq = (total - subtotal - tps).quantize(MONEY_EPSILON)
+            tvq = (taxable_total - subtotal - tps).quantize(MONEY_EPSILON)
             if tvq < Decimal("0.00"):
                 tps = None
                 tvq = None
         elif tps is None and tvq is not None:
-            derived_tps = (total - subtotal - tvq).quantize(MONEY_EPSILON)
+            derived_tps = (taxable_total - subtotal - tvq).quantize(MONEY_EPSILON)
             if derived_tps >= Decimal("0.00"):
                 tps = derived_tps
         elif tvq is None and tps is not None:
-            derived_tvq = (total - subtotal - tps).quantize(MONEY_EPSILON)
+            derived_tvq = (taxable_total - subtotal - tps).quantize(MONEY_EPSILON)
             if derived_tvq >= Decimal("0.00"):
                 tvq = derived_tvq
 
     # Case: subtotal + taxes known → derive total (re-check after derivation)
     if total is None and subtotal is not None and tps is not None and tvq is not None:
-        total = (subtotal + tps + tvq).quantize(MONEY_EPSILON)
+        total = (subtotal + tps + tvq + untaxed_extra_for_math).quantize(MONEY_EPSILON)
 
     return {
         "subtotal": subtotal,
         "tps": tps,
         "tvq": tvq,
+        "untaxed_extra_amount": untaxed_extra_amount,
+        "total": total,
+    }
+
+
+def _standard_tax_breakdown(subtotal, untaxed_extra_amount=None):
+    """Return the expected Quebec tax breakdown for a taxable subtotal."""
+    subtotal = _money(subtotal)
+    if subtotal is None:
+        return None
+    untaxed_extra_amount = _money(untaxed_extra_amount) or Decimal("0.00")
+    tps = (subtotal * STANDARD_TPS_RATE).quantize(MONEY_EPSILON)
+    tvq = (subtotal * STANDARD_TVQ_RATE).quantize(MONEY_EPSILON)
+    total = (subtotal + tps + tvq + untaxed_extra_amount).quantize(MONEY_EPSILON)
+    return {
+        "subtotal": subtotal,
+        "tps": tps,
+        "tvq": tvq,
+        "untaxed_extra_amount": untaxed_extra_amount,
         "total": total,
     }
 
@@ -779,6 +930,11 @@ def _extracted_document_amounts(ef):
         ef.final_tps if ef.final_tps is not None else ef.tps_candidate,
         ef.final_tvq if ef.final_tvq is not None else ef.tvq_candidate,
         ef.final_total if ef.final_total is not None else ef.total_candidate,
+        (
+            ef.final_untaxed_extra_amount
+            if ef.final_untaxed_extra_amount is not None
+            else ef.untaxed_extra_amount_candidate
+        ),
     )
 
 
@@ -800,8 +956,9 @@ def _supplement_amounts_from_invoices(initial, receipt):
     needs_subtotal = initial.get("subtotal") is None
     needs_tps = initial.get("tps") is None
     needs_tvq = initial.get("tvq") is None
+    needs_untaxed_extra = initial.get("untaxed_extra_amount") is None
 
-    if not (needs_subtotal or needs_tps or needs_tvq):
+    if not (needs_subtotal or needs_tps or needs_tvq or needs_untaxed_extra):
         return  # nothing missing
 
     try:
@@ -820,9 +977,116 @@ def _supplement_amounts_from_invoices(initial, receipt):
         initial["tps"] = aggregated["tps"]
     if needs_tvq and aggregated["tvq"] is not None:
         initial["tvq"] = aggregated["tvq"]
+    if needs_untaxed_extra and aggregated["untaxed_extra_amount"] is not None:
+        initial["untaxed_extra_amount"] = aggregated["untaxed_extra_amount"]
     # Also fill total from invoice if BC had none
     if initial.get("total") is None and aggregated["total"] is not None:
         initial["total"] = aggregated["total"]
+
+    subtotal = _money(initial.get("subtotal"))
+    total = _money(initial.get("total"))
+    untaxed_extra_amount = _money(initial.get("untaxed_extra_amount"))
+    invoice_subtotal = aggregated["subtotal"]
+    invoice_untaxed_extra = aggregated["untaxed_extra_amount"]
+
+    # Some paper BC OCRs incorrectly copy the total into the subtotal field
+    # when taxes are omitted on the BC. If the invoice subtotal plus standard
+    # Quebec taxes lands exactly on the BC total, prefer the invoice subtotal.
+    if (
+        total is not None
+        and invoice_subtotal is not None
+        and (initial.get("tps") is None or initial.get("tvq") is None)
+    ):
+        current_breakdown = _standard_tax_breakdown(subtotal, untaxed_extra_amount)
+        invoice_breakdown = _standard_tax_breakdown(
+            invoice_subtotal,
+            invoice_untaxed_extra if invoice_untaxed_extra is not None else untaxed_extra_amount,
+        )
+        current_mismatch = (
+            subtotal is None
+            or current_breakdown is None
+            or abs(current_breakdown["total"] - total) > MONEY_EPSILON
+        )
+        invoice_matches_total = (
+            invoice_breakdown is not None
+            and abs(invoice_breakdown["total"] - total) <= MONEY_EPSILON
+        )
+        if current_mismatch and invoice_matches_total:
+            initial["subtotal"] = invoice_subtotal
+            if initial.get("untaxed_extra_amount") is None and invoice_breakdown["untaxed_extra_amount"] is not None:
+                initial["untaxed_extra_amount"] = invoice_breakdown["untaxed_extra_amount"]
+                untaxed_extra_amount = invoice_breakdown["untaxed_extra_amount"]
+            if initial.get("tps") is None:
+                initial["tps"] = (
+                    aggregated["tps"]
+                    if aggregated["tps"] is not None
+                    else invoice_breakdown["tps"]
+                )
+            if initial.get("tvq") is None:
+                initial["tvq"] = (
+                    aggregated["tvq"]
+                    if aggregated["tvq"] is not None
+                    else invoice_breakdown["tvq"]
+                )
+            return
+    if subtotal is None or total is None:
+        return
+
+    standard_breakdown = _standard_tax_breakdown(subtotal, untaxed_extra_amount)
+    if not standard_breakdown:
+        return
+
+    if abs(standard_breakdown["total"] - total) > MONEY_EPSILON:
+        return
+
+    if initial.get("tps") is None:
+        initial["tps"] = standard_breakdown["tps"]
+    if initial.get("tvq") is None:
+        initial["tvq"] = standard_breakdown["tvq"]
+
+
+def _supplement_supplier_details_from_invoices(initial, receipt):
+    """Prefer supplier name/address from linked invoices for paper BC review.
+
+    For external company reimbursements, the invoice usually contains the real
+    legal name and address, while the paper BC may only contain a partial or
+    handwritten location. When invoice supplier details are available, use
+    them in the review form and keep merchant_name aligned with that supplier.
+    """
+    try:
+        all_docs = json.loads(receipt.ocr_raw_text or "[]")
+    except (json.JSONDecodeError, TypeError):
+        return
+
+    invoices = [d for d in all_docs if d.get("document_type") == "invoice"]
+    if not invoices:
+        return
+
+    def _invoice_supplier_score(doc):
+        supplier_name = str(doc.get("supplier_name") or "").strip()
+        supplier_address = str(doc.get("supplier_address") or "").strip()
+        return (
+            1 if supplier_address else 0,
+            1 if supplier_name else 0,
+            len(supplier_address),
+            len(supplier_name),
+        )
+
+    best_invoice = max(invoices, key=_invoice_supplier_score, default=None)
+    if not best_invoice:
+        return
+
+    invoice_supplier_name = str(best_invoice.get("supplier_name") or "").strip()
+    invoice_supplier_address = str(best_invoice.get("supplier_address") or "").strip()
+    previous_supplier_name = str(initial.get("supplier_name") or "").strip()
+    current_merchant_name = str(initial.get("merchant_name") or "").strip()
+
+    if invoice_supplier_name:
+        initial["supplier_name"] = invoice_supplier_name
+        if not current_merchant_name or current_merchant_name == previous_supplier_name:
+            initial["merchant_name"] = invoice_supplier_name
+    if invoice_supplier_address:
+        initial["supplier_address"] = invoice_supplier_address
 
 
 def _aggregate_extracted_amounts(extracted_fields, *, prefer_invoice_totals=False):
@@ -855,7 +1119,9 @@ def _aggregate_extracted_amounts(extracted_fields, *, prefer_invoice_totals=Fals
     tps = Decimal("0.00")
     tvq = Decimal("0.00")
     total = Decimal("0.00")
+    untaxed_extra_amount = Decimal("0.00")
     has_any_total = False
+    has_any_untaxed_extra = False
     all_subtotals_known = bool(chosen_documents)
     all_tps_known = bool(chosen_documents)
     all_tvq_known = bool(chosen_documents)
@@ -867,6 +1133,9 @@ def _aggregate_extracted_amounts(extracted_fields, *, prefer_invoice_totals=Fals
         else:
             total += doc["total"]
             has_any_total = True
+        if doc["untaxed_extra_amount"] is not None:
+            untaxed_extra_amount += doc["untaxed_extra_amount"]
+            has_any_untaxed_extra = True
 
         if doc["subtotal"] is None:
             all_subtotals_known = False
@@ -889,6 +1158,7 @@ def _aggregate_extracted_amounts(extracted_fields, *, prefer_invoice_totals=Fals
         "subtotal": subtotal.quantize(MONEY_EPSILON) if all_subtotals_known else None,
         "tps": tps.quantize(MONEY_EPSILON) if all_tps_known else None,
         "tvq": tvq.quantize(MONEY_EPSILON) if all_tvq_known else None,
+        "untaxed_extra_amount": untaxed_extra_amount.quantize(MONEY_EPSILON) if has_any_untaxed_extra else None,
         "total": total.quantize(MONEY_EPSILON) if has_any_total and all_totals_known else None,
     }
 
@@ -919,6 +1189,7 @@ def _aggregate_json_document_amounts(documents, *, prefer_invoice_totals=False):
                 doc.get("tps"),
                 doc.get("tvq"),
                 doc.get("total"),
+                doc.get("untaxed_extra_amount"),
             ),
         }
         normalized_documents.append(normalized)
@@ -938,10 +1209,12 @@ def _aggregate_json_document_amounts(documents, *, prefer_invoice_totals=False):
     tps = Decimal("0.00")
     tvq = Decimal("0.00")
     total = Decimal("0.00")
+    untaxed_extra_amount = Decimal("0.00")
     all_subtotals_known = bool(chosen_documents)
     all_tps_known = bool(chosen_documents)
     all_tvq_known = bool(chosen_documents)
     all_totals_known = bool(chosen_documents)
+    has_any_untaxed_extra = False
 
     for doc in chosen_documents:
         if doc["subtotal"] is None:
@@ -960,11 +1233,15 @@ def _aggregate_json_document_amounts(documents, *, prefer_invoice_totals=False):
             all_totals_known = False
         else:
             total += doc["total"]
+        if doc["untaxed_extra_amount"] is not None:
+            untaxed_extra_amount += doc["untaxed_extra_amount"]
+            has_any_untaxed_extra = True
 
     return {
         "subtotal": subtotal.quantize(MONEY_EPSILON) if all_subtotals_known else None,
         "tps": tps.quantize(MONEY_EPSILON) if all_tps_known else None,
         "tvq": tvq.quantize(MONEY_EPSILON) if all_tvq_known else None,
+        "untaxed_extra_amount": untaxed_extra_amount.quantize(MONEY_EPSILON) if has_any_untaxed_extra else None,
         "total": total.quantize(MONEY_EPSILON) if all_totals_known else None,
     }
 
@@ -1008,16 +1285,18 @@ def _paper_bc_signer_initials(house, ef):
     elif purchaser_name and purchaser_name.upper() != "ILLISIBLE":
         purchaser_mismatch = True
 
-    validator_apartment, validator_member = _resolve_signer_assignment(
+    validator_apartment, validator_member, validator_is_external = _resolve_validator_assignment(
         house, validator_apt, validator_name,
     )
     if validator_apartment:
         initial["validator_apartment"] = validator_apartment.code
+    elif validator_is_external:
+        initial["validator_apartment"] = ""
     if validator_member:
         initial["validator_member"] = validator_member.pk
         if validator_name and validator_name.upper() != "ILLISIBLE":
             validator_mismatch = not _names_match(validator_name, validator_member.display_name)
-    elif validator_name and validator_name.upper() != "ILLISIBLE":
+    elif validator_is_external:
         # Validator name exists but doesn't match any member → external supplier
         initial["validator_is_external"] = True
 
@@ -1182,12 +1461,46 @@ def _get_mismatch_warning(receipt):
         bc_total = paper_amounts["total"]
         invoice_total = invoice_amounts["total"]
         bc_number = paper_bcs[0].get("bc_number", "?")
+        paper_untaxed_extra = paper_amounts["untaxed_extra_amount"] or Decimal("0.00")
 
         if bc_total is None:
             return None
 
-        # Invoice amounts couldn't be extracted → warn that verification failed
-        if invoice_total is None:
+        comparable_invoice_values = []
+        invoice_display_total = invoice_total
+
+        def _add_comparable(value):
+            nonlocal invoice_display_total
+            amount = _money(value)
+            if amount is None:
+                return
+            comparable_invoice_values.append(amount)
+            if invoice_display_total is None:
+                invoice_display_total = amount
+
+        _add_comparable(invoice_total)
+        if invoice_total is not None and paper_untaxed_extra:
+            _add_comparable(invoice_total + paper_untaxed_extra)
+
+        invoice_subtotal = invoice_amounts["subtotal"]
+        invoice_tps = invoice_amounts["tps"]
+        invoice_tvq = invoice_amounts["tvq"]
+
+        _add_comparable(invoice_subtotal)
+        if invoice_subtotal is not None and invoice_tps is not None:
+            _add_comparable(invoice_subtotal + invoice_tps)
+        if invoice_subtotal is not None and invoice_tvq is not None:
+            _add_comparable(invoice_subtotal + invoice_tvq)
+        if invoice_subtotal is not None and invoice_tps is not None and invoice_tvq is not None:
+            _add_comparable(invoice_subtotal + invoice_tps + invoice_tvq)
+            if paper_untaxed_extra:
+                _add_comparable(invoice_subtotal + invoice_tps + invoice_tvq + paper_untaxed_extra)
+
+        standard_breakdown = _standard_tax_breakdown(invoice_subtotal, paper_untaxed_extra)
+        if standard_breakdown:
+            _add_comparable(standard_breakdown["total"])
+
+        if not comparable_invoice_values:
             return {
                 "bc_total": f"{bc_total:.2f}",
                 "invoice_total": "N/A",
@@ -1195,22 +1508,12 @@ def _get_mismatch_warning(receipt):
                 "unverifiable": True,
             }
 
-        comparable_invoice_values = [invoice_total]
-        if invoice_amounts["subtotal"] is not None:
-            comparable_invoice_values.append(invoice_amounts["subtotal"])
-        if invoice_amounts["subtotal"] is not None and invoice_amounts["tps"] is not None:
-            comparable_invoice_values.append(
-                (invoice_amounts["subtotal"] + invoice_amounts["tps"]).quantize(MONEY_EPSILON)
-            )
-        if invoice_amounts["subtotal"] is not None and invoice_amounts["tvq"] is not None:
-            comparable_invoice_values.append(
-                (invoice_amounts["subtotal"] + invoice_amounts["tvq"]).quantize(MONEY_EPSILON)
-            )
-
         if not any(abs(bc_total - value) <= MONEY_EPSILON for value in comparable_invoice_values):
             return {
                 "bc_total": f"{bc_total:.2f}",
-                "invoice_total": f"{invoice_total:.2f}",
+                "invoice_total": (
+                    f"{invoice_display_total:.2f}" if invoice_display_total is not None else "N/A"
+                ),
                 "bc_number": bc_number,
             }
     except (ValueError, TypeError):
@@ -1231,7 +1534,7 @@ class OcrReviewView(TreasurerRequiredMixin, View):
 
     def _get_receipt_and_index(self, bon, request):
         """Return (receipts_list, current_receipt, current_index, total)."""
-        receipts = list(bon.receipt_files.order_by("created_at", "pk"))
+        receipts = list(bon.active_receipt_files.order_by("created_at", "pk"))
         total = len(receipts)
         try:
             idx = int(request.GET.get("idx", request.POST.get("idx", 0)))
@@ -1261,6 +1564,7 @@ class OcrReviewView(TreasurerRequiredMixin, View):
             initial["associated_bc_number"] = ef.final_associated_bc_number or ef.associated_bc_number_candidate or ""
             initial["supplier_name"] = ef.final_supplier_name or ef.supplier_name_candidate or ""
             initial["supplier_address"] = ef.final_supplier_address or ef.supplier_address_candidate or ""
+            initial["reimburse_to"] = ef.final_reimburse_to or ef.reimburse_to_candidate or ""
 
             if doc_type == "paper_bc":
                 signer_initials, expense_member_mismatch, validator_member_mismatch, _, _ = (
@@ -1292,19 +1596,33 @@ class OcrReviewView(TreasurerRequiredMixin, View):
 
             initial.update({
                 "apartment_number": apt_code,
-                "merchant_name": ef.final_merchant or ef.merchant_candidate,
+                "merchant_name": _merchant_value_for_document(ef, doc_type),
                 "purchase_date": ef.final_purchase_date or ef.purchase_date_candidate,
                 "subtotal": ef.final_subtotal if ef.final_subtotal is not None else ef.subtotal_candidate,
                 "tps": ef.final_tps if ef.final_tps is not None else ef.tps_candidate,
                 "tvq": ef.final_tvq if ef.final_tvq is not None else ef.tvq_candidate,
+                "untaxed_extra_amount": (
+                    ef.final_untaxed_extra_amount
+                    if ef.final_untaxed_extra_amount is not None
+                    else ef.untaxed_extra_amount_candidate
+                ),
                 "total": ef.final_total if ef.final_total is not None else ef.total_candidate,
                 "summary": ef.final_summary or ef.summary_candidate or "",
             })
 
             # For paper BCs: when subtotal/taxes are missing on the BC,
-            # try to fill them from invoice documents in the same PDF.
+            # try to fill supplier details and amounts from linked invoices.
             if doc_type == "paper_bc":
+                _supplement_supplier_details_from_invoices(initial, receipt)
                 _supplement_amounts_from_invoices(initial, receipt)
+                reimburse_target = _infer_paper_bc_reimburse_target(
+                    bon.house,
+                    receipt,
+                    ef,
+                    expense_member_name=initial.get("expense_member_name") or "",
+                )
+                if reimburse_target:
+                    initial["reimburse_to"] = reimburse_target
         except ReceiptExtractedFields.DoesNotExist:
             initial["document_type"] = "receipt"
 
@@ -1383,14 +1701,33 @@ class OcrReviewView(TreasurerRequiredMixin, View):
         ef.final_supplier_name = form.cleaned_data.get("supplier_name") or ""
         ef.final_supplier_address = form.cleaned_data.get("supplier_address") or ""
         _save_paper_bc_extracted_fields(ef, form, bon.house)
+        reimburse_to = form.cleaned_data.get("reimburse_to") or ""
+        if ef.final_document_type == "paper_bc":
+            inferred_reimburse_to = _infer_paper_bc_reimburse_target(
+                bon.house,
+                current,
+                ef,
+                expense_member_name=ef.final_expense_member_name,
+            )
+            if inferred_reimburse_to:
+                reimburse_to = inferred_reimburse_to
+        ef.final_reimburse_to = reimburse_to
         ef.final_member_name = selected_member.display_name if selected_member else ""
         ef.final_apartment_number = form.cleaned_data.get("apartment_number") or ""
         ef.final_merchant = form.cleaned_data.get("merchant_name") or ""
         ef.final_purchase_date = form.cleaned_data.get("purchase_date")
-        ef.final_subtotal = form.cleaned_data.get("subtotal")
-        ef.final_tps = form.cleaned_data.get("tps")
-        ef.final_tvq = form.cleaned_data.get("tvq")
-        ef.final_total = form.cleaned_data.get("total")
+        normalized_amounts = _normalize_document_amounts(
+            form.cleaned_data.get("subtotal"),
+            form.cleaned_data.get("tps"),
+            form.cleaned_data.get("tvq"),
+            form.cleaned_data.get("total"),
+            form.cleaned_data.get("untaxed_extra_amount"),
+        )
+        ef.final_subtotal = normalized_amounts["subtotal"]
+        ef.final_tps = normalized_amounts["tps"]
+        ef.final_tvq = normalized_amounts["tvq"]
+        ef.final_untaxed_extra_amount = normalized_amounts["untaxed_extra_amount"]
+        ef.final_total = normalized_amounts["total"]
         ef.final_summary = form.cleaned_data.get("summary") or ""
         ef.sub_budget = form.cleaned_data.get("sub_budget")
         ef.confirmed_by = request.user
@@ -1472,6 +1809,7 @@ class OcrReviewView(TreasurerRequiredMixin, View):
                 .exclude(status=BonStatus.VOID)
                 .first()
             )
+            voided_paper_bc = None
 
             if existing_paper_bc:
                 new_total = _aggregate_receipt_amounts(
@@ -1503,37 +1841,114 @@ class OcrReviewView(TreasurerRequiredMixin, View):
                         f"nouveau total : {new_total} $). "
                         f"Veuillez vérifier les montants."
                     )
-
-            # Handle unique number constraint
-            bon_number = bc_number
-            existing = BonDeCommande.objects.filter(number=bon_number).first()
-            if existing:
-                if existing.status == BonStatus.VOID:
-                    BonDeCommande.objects.filter(pk=existing.pk).update(
-                        number=f"_VOID_{existing.pk}_{bon_number}"
+            else:
+                voided_paper_bc = (
+                    BonDeCommande.objects
+                    .filter(
+                        house=house,
+                        is_paper_bc=True,
+                        paper_bc_number=bc_number,
+                        status=BonStatus.VOID,
                     )
-                else:
-                    suffix = 2
-                    while BonDeCommande.objects.filter(number=f"{bc_number}-{suffix}").exists():
-                        suffix += 1
-                    bon_number = f"{bc_number}-{suffix}"
+                    .order_by("-voided_at", "-pk")
+                    .first()
+                )
 
-            bon = BonDeCommande()
-            bon.house = house
-            bon.budget_year = scan_session.budget_year
-            bon.number = bon_number
-            bon.purchase_date = timezone.now().date()
-            bon.short_description = "(en cours de création)"
-            bon.total = 0
-            bon.sub_budget = scan_session.sub_budget
-            bon.purchaser_member = scan_session.purchaser_member
-            bon.created_by = scan_session.created_by
-            bon.status = BonStatus.READY_FOR_VALIDATION
-            bon.is_scan_session = False
-            bon.is_paper_bc = True
-            bon.paper_bc_number = bc_number
-            bon.entered_date = timezone.now().date()
-            super(BonDeCommande, bon).save()
+            if voided_paper_bc:
+                from budget.models import Expense
+
+                bon = voided_paper_bc
+                archived_receipts = list(bon.active_receipt_files.order_by("created_at", "pk"))
+                archive_reason = (
+                    f"Archivé lors de la réactivation du BC {bon.number} "
+                    f"par {request.user.get_username()}"
+                )
+                for archived_receipt in archived_receipts:
+                    archived_receipt.archive(reason=archive_reason)
+
+                Expense.objects.filter(bon_de_commande=bon).delete()
+
+                bon.house = house
+                bon.budget_year = scan_session.budget_year
+                bon.purchase_date = timezone.now().date()
+                bon.short_description = "(en cours de réactivation)"
+                bon.merchant_name = ""
+                bon.supplier_name = ""
+                bon.work_or_delivery_location = ""
+                bon.claimant_address = ""
+                bon.claimant_phone = ""
+                bon.subtotal = None
+                bon.tps = None
+                bon.tvq = None
+                bon.untaxed_extra_amount = None
+                bon.total = 0
+                bon.sub_budget = scan_session.sub_budget
+                bon.purchaser_member = scan_session.purchaser_member
+                bon.purchaser_apartment = None
+                bon.approver_member = None
+                bon.approver_apartment = None
+                bon.approver_is_external = False
+                bon.created_by = scan_session.created_by
+                bon.status = BonStatus.READY_FOR_VALIDATION
+                bon.is_scan_session = False
+                bon.is_paper_bc = True
+                bon.paper_bc_number = bc_number
+                bon.entered_date = timezone.now().date()
+                bon.purchaser_name_snapshot = ""
+                bon.purchaser_unit_snapshot = ""
+                bon.purchaser_phone_snapshot = ""
+                bon.approver_name_snapshot = ""
+                bon.approver_unit_snapshot = ""
+                bon.notes = ""
+                bon.submitted_at = None
+                bon.validated_by = None
+                bon.validated_at = None
+                bon.exported_at = None
+                bon.emailed_at = None
+                bon.reimbursed_at = None
+                bon.voided_at = None
+                bon.void_reason = ""
+                bon.signature_verified = False
+                bon.signature_verified_by = None
+                bon.invoice_amounts_unverified = False
+                bon.save()
+
+                messages.warning(
+                    request,
+                    f"Le BC papier n°{bc_number} correspondait à un bon annulé (BC {bon.number}). "
+                    "Le bon existant a été réactivé avec les nouveaux fichiers pour une nouvelle vérification.",
+                )
+            else:
+                # Handle unique number constraint
+                bon_number = bc_number
+                existing = BonDeCommande.objects.filter(number=bon_number).first()
+                if existing:
+                    if existing.status == BonStatus.VOID:
+                        BonDeCommande.objects.filter(pk=existing.pk).update(
+                            number=f"_VOID_{existing.pk}_{bon_number}"
+                        )
+                    else:
+                        suffix = 2
+                        while BonDeCommande.objects.filter(number=f"{bc_number}-{suffix}").exists():
+                            suffix += 1
+                        bon_number = f"{bc_number}-{suffix}"
+
+                bon = BonDeCommande()
+                bon.house = house
+                bon.budget_year = scan_session.budget_year
+                bon.number = bon_number
+                bon.purchase_date = timezone.now().date()
+                bon.short_description = "(en cours de création)"
+                bon.total = 0
+                bon.sub_budget = scan_session.sub_budget
+                bon.purchaser_member = scan_session.purchaser_member
+                bon.created_by = scan_session.created_by
+                bon.status = BonStatus.READY_FOR_VALIDATION
+                bon.is_scan_session = False
+                bon.is_paper_bc = True
+                bon.paper_bc_number = bc_number
+                bon.entered_date = timezone.now().date()
+                super(BonDeCommande, bon).save()
 
             for r in all_docs:
                 r.bon_de_commande = bon
@@ -1632,6 +2047,9 @@ class OcrReviewView(TreasurerRequiredMixin, View):
                     if (ef.final_document_type or ef.document_type_candidate) == "paper_bc":
                         if ef.final_supplier_name or ef.supplier_name_candidate:
                             update_fields["supplier_name"] = ef.final_supplier_name or ef.supplier_name_candidate
+                            merchant_name = _merchant_value_for_document(ef, "paper_bc")
+                            if merchant_name:
+                                update_fields["merchant_name"] = merchant_name
                         if ef.final_purchase_date or ef.purchase_date_candidate:
                             update_fields["purchase_date"] = ef.final_purchase_date or ef.purchase_date_candidate
                         if ef.sub_budget_id:
@@ -1640,6 +2058,14 @@ class OcrReviewView(TreasurerRequiredMixin, View):
                         purchaser_apt_code = ef.final_expense_apartment or ef.expense_apartment_candidate
                         validator_name = ef.final_validator_member_name or ef.validator_member_name_candidate
                         validator_apt_code = ef.final_validator_apartment or ef.validator_apartment_candidate
+                        reimburse_val = _infer_paper_bc_reimburse_target(
+                            bon.house,
+                            r,
+                            ef,
+                            expense_member_name=purchaser_name,
+                        ) or (ef.final_reimburse_to or ef.reimburse_to_candidate)
+                        if reimburse_val:
+                            update_fields["reimburse_to"] = reimburse_val
 
                         purchaser_apartment, purchaser_member = _resolve_signer_assignment(
                             bon.house, purchaser_apt_code, purchaser_name,
@@ -1649,7 +2075,7 @@ class OcrReviewView(TreasurerRequiredMixin, View):
                         if purchaser_member:
                             update_fields["purchaser_member_id"] = purchaser_member.pk
 
-                        validator_apartment, validator_member = _resolve_signer_assignment(
+                        validator_apartment, validator_member, validator_is_external = _resolve_validator_assignment(
                             bon.house, validator_apt_code, validator_name,
                         )
                         if validator_member and purchaser_member and validator_member.pk == purchaser_member.pk:
@@ -1659,20 +2085,19 @@ class OcrReviewView(TreasurerRequiredMixin, View):
                         update_fields["approver_apartment_id"] = validator_apartment.pk if validator_apartment else None
 
                         # External supplier: name exists but no member match
-                        is_external = bool(
-                            validator_name
-                            and validator_name.upper() != "ILLISIBLE"
-                            and not validator_member
-                        )
+                        is_external = bool(validator_is_external)
                         update_fields["approver_is_external"] = is_external
                         if is_external:
                             update_fields["approver_name_snapshot"] = validator_name.strip()
+                        else:
+                            update_fields["approver_name_snapshot"] = ""
                         break
                 except ReceiptExtractedFields.DoesNotExist:
                     continue
         elif first_ef:
-            if first_ef.final_merchant:
-                update_fields["merchant_name"] = first_ef.final_merchant
+            merchant_name = _merchant_value_for_document(first_ef, _extracted_document_type(first_ef))
+            if merchant_name:
+                update_fields["merchant_name"] = merchant_name
             if first_ef.final_purchase_date:
                 update_fields["purchase_date"] = first_ef.final_purchase_date
             if first_ef.sub_budget_id:
@@ -1703,6 +2128,7 @@ class OcrReviewView(TreasurerRequiredMixin, View):
             update_fields["tps"] = aggregated_amounts["tps"]
         if aggregated_amounts["tvq"] is not None:
             update_fields["tvq"] = aggregated_amounts["tvq"]
+        update_fields["untaxed_extra_amount"] = aggregated_amounts["untaxed_extra_amount"]
 
         # Flag when paper BC has invoices but invoice amounts couldn't be extracted
         if is_paper_bc and not aggregated_amounts.get("using_invoices", True):
@@ -1735,7 +2161,7 @@ class OcrReviewView(TreasurerRequiredMixin, View):
 
     def _sync_existing_bon_paper_bc_data(self, bon):
         """Apply reviewed paper BC metadata to an existing bon."""
-        receipts = list(bon.receipt_files.order_by("created_at", "pk"))
+        receipts = list(bon.active_receipt_files.order_by("created_at", "pk"))
         paper_bc_number = ""
         has_paper_bc = False
         for receipt in receipts:
@@ -1754,6 +2180,8 @@ class OcrReviewView(TreasurerRequiredMixin, View):
             is_paper_bc=True,
             paper_bc_number=paper_bc_number,
         )
+        bon.refresh_from_db()
+        bon.expenses.update(reimburse_to=bon.reimburse_to or "")
 
     def _render(self, request, bon, receipt, form, idx, total, matched_member_name, name_mismatch=False, document_type="receipt", expense_member_mismatch=False, validator_member_mismatch=False, validator_is_external=False):
         mismatch_warning = _get_mismatch_warning(receipt)
@@ -1822,7 +2250,7 @@ class BonCompleteView(TreasurerRequiredMixin, UpdateView):
 
 def _bon_is_export_ready(bon):
     """A bon is export-ready when all its receipts have been reviewed (EXTRACTED or CORRECTED)."""
-    receipts = bon.receipt_files.all()
+    receipts = bon.active_receipt_files
     if not receipts.exists():
         return True  # no receipts = nothing to review
     return not receipts.exclude(

@@ -1,0 +1,99 @@
+{% extends "base.html" %}
+
+{% block title %}Factures associées — {{ expense.description }} | Tresorapide{% endblock %}
+
+{% block main_class %}container container-wide{% endblock %}
+
+{% block content %}
+    <section class="card">
+        <div class="section-heading">
+            <div>
+                <h1>Factures associées</h1>
+                <p class="text-muted">{{ expense.budget_year.label }} — {{ expense.budget_year.house.code }}</p>
+            </div>
+            <div class="quick-links">
+                <a class="button-link" href="{% url 'budget:expense-ledger' expense.budget_year.pk %}">Retour à la grille</a>
+                <a class="button-link" href="{% url 'budget:year-detail' expense.budget_year.pk %}">Retour au budget</a>
+                {% if bon %}
+                    <a class="button-link" href="{% url 'bons:detail' bon.pk %}">Voir le bon</a>
+                {% endif %}
+            </div>
+        </div>
+
+        <dl class="detail-grid">
+            <div>
+                <dt>Date</dt>
+                <dd>{{ expense.entry_date|date:"Y-m-d" }}</dd>
+            </div>
+            <div>
+                <dt>Description</dt>
+                <dd>{{ expense.description }}</dd>
+            </div>
+            <div>
+                <dt>Sous-budget</dt>
+                <dd>{{ expense.sub_budget }}</dd>
+            </div>
+            <div>
+                <dt>Montant</dt>
+                <dd class="money-col">{{ expense.amount|floatformat:2 }} $</dd>
+            </div>
+            <div>
+                <dt>Bon de commande</dt>
+                <dd>{% if bon %}{{ bon.number }}{% else %}Aucun bon lié{% endif %}</dd>
+            </div>
+            <div>
+                <dt>Factures actives</dt>
+                <dd>{{ receipt_count }}</dd>
+            </div>
+        </dl>
+    </section>
+
+    <section class="card">
+        <div class="section-heading">
+            <div>
+                <h2>Reçus / factures</h2>
+                {% if bon %}
+                    <p class="text-muted">Tous les fichiers actifs liés au bon de commande associé à cette dépense.</p>
+                {% else %}
+                    <p class="text-muted">Cette dépense n'est liée à aucun bon de commande, donc aucun reçu ne peut être affiché ici.</p>
+                {% endif %}
+            </div>
+        </div>
+
+        {% if receipts %}
+            <div class="stack">
+                {% for receipt in receipts %}
+                    <article class="card subtle-card" style="margin-bottom: 0;">
+                        <div class="section-heading" style="margin-bottom: 0.75rem;">
+                            <div>
+                                <h3 style="margin: 0 0 0.25rem;">
+                                    <a href="{{ receipt.file.url }}" target="_blank" rel="noopener">{{ receipt.original_filename }}</a>
+                                </h3>
+                                <p class="text-muted" style="margin: 0;">
+                                    {{ receipt.get_ocr_status_display }}{% if receipt.content_type %} — {{ receipt.content_type }}{% endif %}
+                                    {% if receipt.file_size_bytes %} — {{ receipt.file_size_bytes|filesizeformat }}{% endif %}
+                                    — téléversé le {{ receipt.created_at|date:"Y-m-d H:i" }}
+                                </p>
+                            </div>
+                            <a class="button-link" href="{{ receipt.file.url }}" target="_blank" rel="noopener">Ouvrir</a>
+                        </div>
+
+                        {% if receipt.content_type == "application/pdf" %}
+                            <p style="margin: 0.5rem 0 0;">
+                                <a class="button-link" href="{{ receipt.file.url }}" target="_blank" rel="noopener">📄 Ouvrir le PDF</a>
+                            </p>
+                        {% else %}
+                            <div style="margin-top: 0.75rem;">
+                                <img src="{{ receipt.file.url }}"
+                                     alt="{{ receipt.original_filename }}"
+                                     style="max-width: 100%; max-height: 900px; border: 1px solid #ccc; border-radius: 4px;">
+                            </div>
+                        {% endif %}
+                    </article>
+                {% endfor %}
+            </div>
+        {% else %}
+            <p class="empty-state">Aucune facture active associée à cette dépense.</p>
+        {% endif %}
+    </section>
+{% endblock %}

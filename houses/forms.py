@@ -7,12 +7,13 @@ class HouseForm(forms.ModelForm):
     class Meta:
         model = House
         fields = [
-            "code", "name", "account_number", "address",
+            "code", "accounting_code", "name", "account_number", "address",
             "phone", "email", "is_active",
             "treasurer_member", "correspondent_member", "notes",
         ]
         labels = {
             "code": "Code (2 caractères)",
+            "accounting_code": "Code comptable",
             "name": "Nom de la maison",
             "account_number": "Numéro de compte",
             "address": "Adresse",
@@ -25,11 +26,12 @@ class HouseForm(forms.ModelForm):
         }
         widgets = {
             "code": forms.TextInput(attrs={"placeholder": "ex : BB", "maxlength": 2}),
+            "accounting_code": forms.TextInput(attrs={"placeholder": "ex : 13"}),
             "name": forms.TextInput(attrs={"placeholder": "ex : Maison BB"}),
             "account_number": forms.TextInput(attrs={"placeholder": "ex : 13-51200"}),
             "address": forms.Textarea(attrs={"rows": 2, "placeholder": "Adresse complète"}),
             "notes": forms.Textarea(attrs={"rows": 3}),
         }
 
-    ESSENTIAL_FIELDS = ("code", "name", "account_number", "address")
+    ESSENTIAL_FIELDS = ("code", "accounting_code", "name", "account_number", "address")
     DETAIL_FIELDS = ("phone", "email", "is_active", "treasurer_member", "correspondent_member", "notes")

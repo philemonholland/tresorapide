@@ -20,6 +20,18 @@ def _filter_by_house(qs, user, field="house"):
     return qs
 
 
+def _restrict_members_by_house(qs, user):
+    """Admins/gestionnaires/superusers see all; others see own house only."""
+    if user.is_app_admin:
+        return qs
+    if user.house:
+        return qs.filter(
+            residencies__apartment__house=user.house,
+            residencies__end_date__isnull=True,
+        ).distinct()
+    return qs.none()
+
+
 # -- Members -----------------------------------------------------------------
 
 class MemberListView(ViewerRequiredMixin, ListView):
@@ -39,6 +51,9 @@ class MemberListView(ViewerRequiredMixin, ListView):
             ),
         )
 
+        # House-based security: non-admins see only their own house
+        qs = _restrict_members_by_house(qs, self.request.user)
+
         # Activity filter
         show = self.request.GET.get("show", "active")
         if show == "active":
@@ -53,7 +68,7 @@ class MemberListView(ViewerRequiredMixin, ListView):
         elif coop == "no":
             qs = qs.filter(residencies__end_date__isnull=True, residencies__is_coop_member=False).distinct()
 
-        # House filter
+        # House filter (admins can filter any house; non-admins already restricted)
         house_id = self.request.GET.get("house", "")
         if house_id:
             qs = qs.filter(residencies__apartment__house_id=house_id, residencies__end_date__isnull=True).distinct()
@@ -75,7 +90,13 @@ class MemberListView(ViewerRequiredMixin, ListView):
         ctx["coop_filter"] = self.request.GET.get("coop", "")
         ctx["house_filter"] = self.request.GET.get("house", "")
         ctx["sort_field"] = self.request.GET.get("sort", "last_name")
-        ctx["houses"] = House.objects.filter(is_active=True).order_by("code")
+        ctx["can_see_all_houses"] = user.is_app_admin
+        if user.is_app_admin:
+            ctx["houses"] = House.objects.filter(is_active=True).order_by("code")
+        elif user.house:
+            ctx["houses"] = House.objects.filter(pk=user.house_id)
+        else:
+            ctx["houses"] = House.objects.none()
         ctx["can_manage"] = (
             user.is_authenticated and user.can_manage_financials
         )
@@ -105,6 +126,11 @@ class MemberDetailView(ViewerRequiredMixin, DetailView):
     model = Member
     template_name = "members/member_detail.html"
     context_object_name = "member"
+
+    def get_queryset(self):
+        return _restrict_members_by_house(
+            super().get_queryset(), self.request.user,
+        )
 
     def get_context_data(self, **kwargs):
         ctx = super().get_context_data(**kwargs)
@@ -155,15 +181,9 @@ class MemberUpdateView(TreasurerRequiredMixin, UpdateView):
     template_name = "members/member_form.html"
 
     def get_queryset(self):
-        qs = super().get_queryset()
-        user = self.request.user
-        # Treasurer can only edit members in their house
-        if not user.is_gestionnaire and not user.is_app_admin and user.house:
-            qs = qs.filter(
-                residencies__apartment__house=user.house,
-                residencies__end_date__isnull=True,
-            ).distinct()
-        return qs
+        return _restrict_members_by_house(
+            super().get_queryset(), self.request.user,
+        )
 
     def get_form_kwargs(self):
         kwargs = super().get_form_kwargs()

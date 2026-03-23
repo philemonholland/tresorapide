@@ -5,12 +5,10 @@ from core.models import TimeStampedModel, ArchivableModel, NonDestructiveModel
 
 class BonStatus(models.TextChoices):
     DRAFT = "DRAFT", "Brouillon"
-    OCR_PENDING = "OCR_PENDING", "OCR en cours"
     READY_FOR_REVIEW = "READY_FOR_REVIEW", "Prêt pour révision"
     READY_FOR_VALIDATION = "READY_FOR_VALIDATION", "Prêt pour validation"
     VALIDATED = "VALIDATED", "Validé"
-    EXPORTED_PDF = "EXPORTED_PDF", "PDF exporté"
-    EMAILED = "EMAILED", "Envoyé au comptable"
+    SENT_TO_COOP = "SENT_TO_COOP", "Envoyé à la Grande Coop"
     REIMBURSED = "REIMBURSED", "Remboursé"
     VOID = "VOID", "Annulé"
 
@@ -21,6 +19,11 @@ class OcrStatus(models.TextChoices):
     EXTRACTED = "EXTRACTED", "Extrait"
     CORRECTED = "CORRECTED", "Corrigé"
     FAILED = "FAILED", "Échoué"
+
+
+class ReimburseTarget(models.TextChoices):
+    MEMBER = "member", "Membre"
+    SUPPLIER = "supplier", "Fournisseur"
 
 
 def receipt_upload_to(instance, filename):
@@ -63,6 +66,11 @@ class BonDeCommande(TimeStampedModel, NonDestructiveModel):
     short_description = models.CharField(max_length=255)
     merchant_name = models.CharField(max_length=200, blank=True)
     supplier_name = models.CharField(max_length=200, blank=True)
+    reimburse_to = models.CharField(
+        max_length=10, choices=ReimburseTarget.choices,
+        blank=True, default="",
+        help_text="Qui rembourser : le membre ou le fournisseur"
+    )
     work_or_delivery_location = models.CharField(max_length=255, blank=True)
     claimant_address = models.CharField(max_length=255, blank=True)
     claimant_phone = models.CharField(max_length=50, blank=True)
@@ -78,6 +86,10 @@ class BonDeCommande(TimeStampedModel, NonDestructiveModel):
     tvq = models.DecimalField(
         max_digits=10, decimal_places=2, null=True, blank=True,
         help_text="Taxe provinciale (TVQ)"
+    )
+    untaxed_extra_amount = models.DecimalField(
+        max_digits=10, decimal_places=2, null=True, blank=True,
+        help_text="Pourboire, livraison ou autres frais non taxables inclus au total"
     )
     total = models.DecimalField(max_digits=10, decimal_places=2)
 
@@ -170,6 +182,8 @@ class BonDeCommande(TimeStampedModel, NonDestructiveModel):
     def clean(self):
         if self.total is not None and self.total < 0:
             raise ValidationError("Le total ne peut pas être négatif.")
+        if self.untaxed_extra_amount is not None and self.untaxed_extra_amount < 0:
+            raise ValidationError("Les frais non taxables ne peuvent pas être négatifs.")
         if self.sub_budget and self.budget_year:
             if self.sub_budget.budget_year_id != self.budget_year_id:
                 raise ValidationError("Le sous-budget doit appartenir à la même année budgétaire.")
@@ -205,9 +219,14 @@ class BonDeCommande(TimeStampedModel, NonDestructiveModel):
         return f"BC {self.number} · {self.purchaser_name_snapshot or '?'} · ${self.total}"
 
     @property
+    def active_receipt_files(self):
+        """Non-archived receipts currently considered part of this bon."""
+        return self.receipt_files.filter(archived_at__isnull=True)
+
+    @property
     def receipt_files_confirmed_count(self):
         """Count of receipts with confirmed extracted fields."""
-        return self.receipt_files.filter(
+        return self.active_receipt_files.filter(
             ocr_status__in=["CORRECTED"],
         ).count()
 
@@ -283,10 +302,10 @@ class BonDeCommande(TimeStampedModel, NonDestructiveModel):
     @property
     def signer_roles_ambiguous(self) -> bool:
         """Whether any linked paper BC extraction flagged purchaser/validator ambiguity."""
-        return self.receipt_files.filter(
+        return self.active_receipt_files.filter(
             extracted_fields__final_document_type="paper_bc",
             extracted_fields__signer_roles_ambiguous_final=True,
-        ).exists() or self.receipt_files.filter(
+        ).exists() or self.active_receipt_files.filter(
             extracted_fields__document_type_candidate="paper_bc",
             extracted_fields__signer_roles_ambiguous_candidate=True,
         ).exists()
@@ -389,6 +408,10 @@ class ReceiptExtractedFields(TimeStampedModel):
     )
     supplier_name_candidate = models.CharField(max_length=200, blank=True)
     supplier_address_candidate = models.CharField(max_length=300, blank=True)
+    reimburse_to_candidate = models.CharField(
+        max_length=10, blank=True,
+        help_text="member or supplier — extracted from paper BC"
+    )
     expense_member_name_candidate = models.CharField(
         max_length=200, blank=True,
         help_text="Nom de la personne ayant effectué la dépense (signataire du BC papier)"
@@ -417,6 +440,7 @@ class ReceiptExtractedFields(TimeStampedModel):
     subtotal_candidate = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     tps_candidate = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     tvq_candidate = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    untaxed_extra_amount_candidate = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     total_candidate = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     # Treasurer-confirmed final values
     final_document_type = models.CharField(max_length=20, blank=True)
@@ -424,6 +448,7 @@ class ReceiptExtractedFields(TimeStampedModel):
     final_associated_bc_number = models.CharField(max_length=20, blank=True)
     final_supplier_name = models.CharField(max_length=200, blank=True)
     final_supplier_address = models.CharField(max_length=300, blank=True)
+    final_reimburse_to = models.CharField(max_length=10, blank=True)
     final_expense_member_name = models.CharField(max_length=200, blank=True)
     final_expense_apartment = models.CharField(max_length=10, blank=True)
     final_validator_member_name = models.CharField(max_length=200, blank=True)
@@ -437,6 +462,7 @@ class ReceiptExtractedFields(TimeStampedModel):
     final_subtotal = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     final_tps = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     final_tvq = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    final_untaxed_extra_amount = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     final_total = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     # Summary
     summary_candidate = models.CharField(max_length=255, blank=True)
@@ -474,6 +500,8 @@ class DuplicateFlagQuerySet(models.QuerySet):
             | models.Q(suspected_duplicate_receipt__bon_de_commande__is_scan_session=True)
             | models.Q(receipt_file__bon_de_commande__status=BonStatus.VOID)
             | models.Q(suspected_duplicate_receipt__bon_de_commande__status=BonStatus.VOID)
+            | models.Q(receipt_file__archived_at__isnull=False)
+            | models.Q(suspected_duplicate_receipt__archived_at__isnull=False)
         )
 
 

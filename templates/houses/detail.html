@@ -7,20 +7,31 @@
     <div class="section-heading">
         <div>
             <h1>{{ house.code }} — {{ house.name }}</h1>
-            <p class="text-muted">Compte : {{ house.account_number }}</p>
+            <p class="text-muted">
+                {% if house.accounting_code %}Code comptable : {{ house.accounting_code }} · {% endif %}
+                Compte grand livre : {{ house.account_number }}
+            </p>
         </div>
-        {% if can_manage %}
         <div class="quick-links">
-            <a class="btn btn-primary" href="{% url 'houses:edit' house.pk %}">Modifier</a>
             <a class="button-link" href="{% url 'houses:list' %}">Toutes les maisons</a>
+            {% if can_manage %}
+            <a class="btn btn-primary" href="{% url 'houses:edit' house.pk %}">Modifier</a>
+            {% endif %}
         </div>
-        {% endif %}
     </div>
 
     <dl class="detail-grid">
         <div>
+            <dt>Code comptable</dt>
+            <dd>{{ house.accounting_code|default:"—" }}</dd>
+        </div>
+        <div>
+            <dt>Compte grand livre</dt>
+            <dd>{{ house.account_number|default:"—" }}</dd>
+        </div>
+        <div>
             <dt>Adresse</dt>
-            <dd>{{ house.address|default:"—" }}</dd>
+            <dd>{{ house.address|default:"—"|linebreaksbr }}</dd>
         </div>
         <div>
             <dt>Téléphone</dt>
@@ -56,7 +67,7 @@
 <section class="card">
     <h2>Appartements ({{ apartments|length }})</h2>
     <div class="table-responsive">
-        <table class="data-table">
+        <table class="data-table enhanced-table">
             <thead>
                 <tr>
                     <th>Code</th>

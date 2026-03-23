@@ -1,0 +1,90 @@
+{% extends "base.html" %}
+
+{% block title %}Grand Livre — Tresorapide{% endblock %}
+{% block main_class %}container container-wide{% endblock %}
+
+{% block content %}
+    <section class="card">
+        <div class="section-heading">
+            <div>
+                <h1>Grand Livre</h1>
+                <p class="text-muted">Téléversez le Grand Livre du comptable pour le rapprocher avec votre grille de dépenses.</p>
+            </div>
+        </div>
+    </section>
+
+    {# Upload form #}
+    <section class="card">
+        <h2>Téléverser un Grand Livre</h2>
+        <form method="post" action="{% url 'budget:grand-livre-upload' %}" enctype="multipart/form-data">
+            {% csrf_token %}
+            <div style="display:flex;gap:1rem;flex-wrap:wrap;align-items:end;">
+                <div class="form-group" style="margin-bottom:0;">
+                    <label for="budget_year">Année budgétaire</label>
+                    <select name="budget_year" id="budget_year" required>
+                        <option value="">— Sélectionner —</option>
+                        {% for by in budget_years %}
+                            <option value="{{ by.pk }}"{% if by.pk == default_budget_year_pk %} selected{% endif %}>{{ by.house.code }} — {{ by.year }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="form-group" style="margin-bottom:0;">
+                    <label for="file">Fichier Excel (.xlsx)</label>
+                    <input type="file" name="file" id="file" accept=".xlsx,.xls" required>
+                </div>
+                <button type="submit" class="btn btn-primary">Analyser</button>
+            </div>
+        </form>
+    </section>
+
+    {# List of previous uploads #}
+    {% if uploads %}
+        <section class="card">
+            <h2>Historique des analyses</h2>
+            <div class="table-responsive">
+                <table class="data-table enhanced-table">
+                    <thead>
+                        <tr>
+                            <th>Date</th>
+                            <th>Maison</th>
+                            <th>Année</th>
+                            <th>Compte</th>
+                            <th>Entrées</th>
+                            <th class="text-right money-col">Solde GL</th>
+                            <th>Statut</th>
+                            <th>Lumière</th>
+                            <th></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for u in uploads %}
+                            <tr>
+                                <td class="nowrap date-col">{{ u.created_at|date:"Y-m-d H:i" }}</td>
+                                <td>{{ u.budget_year.house.code }}</td>
+                                <td>{{ u.budget_year.year }}</td>
+                                <td>{{ u.account_number|default:"—" }}</td>
+                                <td class="text-center">{{ u.entry_count }}</td>
+                                <td class="text-right nowrap money-col">{% if u.gl_solde_fin is not None %}{{ u.gl_solde_fin|floatformat:2 }} ${% else %}—{% endif %}</td>
+                                <td>
+                                    <span class="badge badge-{{ u.status }}">{{ u.get_status_display }}</span>
+                                </td>
+                                <td class="text-center">
+                                    {% if u.status == 'reconciled' %}
+                                        {% with recon=u.reconciliation %}
+                                            {% if recon.status_light == 'green' %}🟢{% elif recon.status_light == 'yellow' %}🟡{% else %}🔴{% endif %}
+                                        {% endwith %}
+                                    {% else %}
+                                        —
+                                    {% endif %}
+                                </td>
+                                <td>
+                                    <a href="{% url 'budget:grand-livre-detail' u.pk %}">Voir</a>
+                                </td>
+                            </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </section>
+    {% endif %}
+{% endblock %}

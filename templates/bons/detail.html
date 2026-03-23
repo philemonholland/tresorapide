@@ -153,6 +153,10 @@
                 <p>TVQ</p>
             </article>
             <article class="stat-card subtle-card">
+                <h3>{{ bon.untaxed_extra_amount|floatformat:2|default:"—" }}&nbsp;$</h3>
+                <p>Frais non taxables</p>
+            </article>
+            <article class="stat-card subtle-card">
                 <h3>{{ bon.total|floatformat:2 }}&nbsp;$</h3>
                 <p>Total</p>
             </article>
@@ -211,7 +215,7 @@
         </div>
         {% if receipts %}
             <div class="table-responsive">
-                <table class="data-table">
+                <table class="data-table enhanced-table">
                     <thead>
                         <tr>
                             <th>Fichier</th>
@@ -276,7 +280,7 @@
     <section class="card">
         <h2>Journal d'audit</h2>
         <div class="table-responsive">
-            <table class="data-table">
+            <table class="data-table enhanced-table">
                 <thead>
                     <tr>
                         <th>Date</th>

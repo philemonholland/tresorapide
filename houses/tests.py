@@ -1,6 +1,12 @@
+from io import StringIO
+
 from django.test import TestCase
 from django.db import IntegrityError
+from django.core.management import call_command
+from django.urls import reverse
 
+from accounts.models import User
+from houses.coop_directory import COOP_HOUSE_DIRECTORY
 from houses.models import House
 
 
@@ -59,3 +65,63 @@ class HouseMemberFieldsTests(TestCase):
         self.house.correspondent_member = self.member2
         self.house.save()
         self.assertIn(self.house, self.member2.correspondent_of_houses.all())
+
+
+class HouseImportCommandTests(TestCase):
+    def test_import_command_creates_reference_houses(self):
+        output = StringIO()
+        call_command("import_coop_houses", stdout=output)
+
+        self.assertEqual(House.objects.count(), len(COOP_HOUSE_DIRECTORY))
+        bb = House.objects.get(code="BB")
+        self.assertEqual(bb.accounting_code, "13")
+        self.assertEqual(bb.account_number, "13-51200")
+        self.assertEqual(bb.name, "La Pédagogique")
+
+        l_house = House.objects.get(code="L")
+        self.assertIn("433-445, rue de Vimy", l_house.address)
+        self.assertIn("459-461, rue de Vimy", l_house.address)
+        self.assertIn("Import terminé", output.getvalue())
+
+    def test_import_command_updates_existing_house(self):
+        House.objects.create(
+            code="BB",
+            name="Maison BB",
+            account_number="13-51200",
+            address="Ancienne adresse",
+        )
+
+        call_command("import_coop_houses")
+
+        bb = House.objects.get(code="BB")
+        self.assertEqual(bb.name, "La Pédagogique")
+        self.assertEqual(bb.accounting_code, "13")
+        self.assertEqual(bb.address, "1215, rue Kitchener")
+
+
+class HouseVisibilityTests(TestCase):
+    def setUp(self):
+        self.house = House.objects.create(
+            code="BB",
+            name="La Pédagogique",
+            accounting_code="13",
+            account_number="13-51200",
+            address="1215, rue Kitchener",
+        )
+        self.user = User.objects.create_user(
+            username="membre-bb",
+            password="test123",
+            role=User.Role.VIEWER,
+            house=self.house,
+        )
+
+    def test_authenticated_viewer_sees_houses_nav_link(self):
+        self.client.login(username="membre-bb", password="test123")
+        response = self.client.get(reverse("budget:year-list"))
+        self.assertContains(response, reverse("houses:list"))
+
+    def test_house_detail_shows_accounting_code(self):
+        response = self.client.get(reverse("houses:detail", kwargs={"pk": self.house.pk}))
+        self.assertContains(response, "Code comptable")
+        self.assertContains(response, "13")
+        self.assertContains(response, "13-51200")

@@ -6,7 +6,7 @@ body {
 }
 
 .container {
-    width: min(960px, calc(100% - 2rem));
+    width: min(1280px, calc(100% - 2rem));
     margin: 0 auto;
 }
 
@@ -195,11 +195,14 @@ body {
 }
 
 .table-responsive {
+    width: 100%;
+    max-width: 100%;
     overflow-x: auto;
 }
 
 .data-table {
     width: 100%;
+    max-width: 100%;
     border-collapse: collapse;
 }
 
@@ -209,15 +212,27 @@ body {
     text-align: left;
     border-bottom: 1px solid #d8e2ec;
     vertical-align: top;
+    overflow-wrap: anywhere;
 }
 
 .data-table th {
     font-size: 0.92rem;
     color: #4a6077;
+    white-space: nowrap;
+    word-break: keep-all;
+    hyphens: none;
 }
 
 .data-table tbody tr:hover {
     background: #f8fbff;
+}
+
+.data-table td:not(.nowrap) {
+    white-space: normal;
+}
+
+.table-responsive .table-filter-input {
+    max-width: 100%;
 }
 
 .detail-grid {
@@ -332,7 +347,8 @@ body {
 /* ------------------------------------------------------------------ */
 
 .container-wide {
-    width: min(1440px, calc(100% - 2rem));
+    width: min(1800px, calc(100% - 2rem));
+    max-width: 92%;
 }
 
 .budget-excel-layout {
@@ -346,6 +362,11 @@ body {
     overflow-x: auto;
 }
 
+.budget-left,
+.budget-right {
+    min-width: 0;
+}
+
 .budget-right {
     display: flex;
     flex-direction: column;
@@ -357,7 +378,10 @@ body {
 .ledger-table td {
     padding: 0.45rem 0.5rem;
     font-size: 0.88rem;
-    white-space: normal;
+}
+
+.ledger-table td.date-col {
+    white-space: nowrap;
 }
 
 .text-right {
@@ -375,6 +399,12 @@ body {
 .text-negative {
     color: #b91c1c;
     font-weight: 600;
+}
+
+.money-col {
+    width: 1%;
+    white-space: nowrap !important;
+    font-variant-numeric: tabular-nums;
 }
 
 /* Summary panel */
@@ -431,9 +461,41 @@ body {
     background: #f4f7fb;
 }
 
-@media (max-width: 1100px) {
+@media (max-width: 1360px) {
     .budget-excel-layout {
         grid-template-columns: 1fr;
+    }
+}
+
+@media (max-width: 1180px) {
+    .data-table th,
+    .data-table td,
+    .ledger-table th,
+    .ledger-table td,
+    .subbudget-table th,
+    .subbudget-table td {
+        padding: 0.5rem 0.4rem;
+        font-size: 0.82rem;
+    }
+
+    .summary-table td {
+        font-size: 0.82rem;
+    }
+
+    .data-table th.compact-hide,
+    .data-table td.compact-hide {
+        display: none;
+    }
+}
+
+@media (max-width: 780px) {
+    .container,
+    .container-wide {
+        width: calc(100% - 1rem);
+    }
+
+    .card {
+        padding: 1rem;
     }
 }
 

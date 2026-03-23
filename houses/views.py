@@ -15,6 +15,13 @@ class HouseListView(ListView):
     template_name = "houses/list.html"
     context_object_name = "houses"
 
+    def get_queryset(self):
+        return (
+            super().get_queryset()
+            .select_related("treasurer_member", "correspondent_member")
+            .order_by("code")
+        )
+
     def get_context_data(self, **kwargs):
         ctx = super().get_context_data(**kwargs)
         ctx["can_manage"] = (
@@ -29,6 +36,12 @@ class HouseDetailView(DetailView):
     model = House
     template_name = "houses/detail.html"
     context_object_name = "house"
+
+    def get_queryset(self):
+        return super().get_queryset().select_related(
+            "treasurer_member",
+            "correspondent_member",
+        )
 
     def get_context_data(self, **kwargs):
         ctx = super().get_context_data(**kwargs)

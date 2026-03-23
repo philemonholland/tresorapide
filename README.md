@@ -57,6 +57,27 @@ On later runs, the launcher usually reuses the existing `.env`, starts or update
 - `-AcceptDefaults`: automatically accept the launcher's detected or default setup values
 - `-NoBrowser`: leave the browser closed after startup
 
+### Development reset helper
+
+To wipe development transaction data while keeping houses, members, budget years, and sub-budgets, use the root helper next to `Start Tresorapide.cmd`:
+
+```powershell
+& '.\Reset Test Data.cmd'
+& '.\Reset Test Data.cmd' -Yes
+```
+
+This runs Django's `reset_test_data` command inside Docker Compose and removes expenses, bons de commande, OCR data, uploaded receipt files, merchants, and audit entries.
+
+### Coop house directory import
+
+To import or refresh the cooperative house directory from the reference PDF table checked into `infos_coop/`, run:
+
+```powershell
+docker compose exec web python manage.py import_coop_houses
+```
+
+Use `--dry-run` if you only want to preview the changes.
+
 ### Common recovery notes
 
 - **Docker Desktop is not installed:** install Docker Desktop, then rerun `Start Tresorapide.cmd`.

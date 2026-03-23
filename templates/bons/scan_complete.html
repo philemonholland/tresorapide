@@ -51,9 +51,9 @@
                 <p><strong>{{ bon.total|floatformat:2 }} $</strong></p>
             </div>
         </div>
-        {% if bon.receipt_files.exists %}
+        {% if bon.active_receipt_files.exists %}
         <p class="text-muted" style="margin-top: 0.5rem;">
-            📎 {{ bon.receipt_files.count }} reçu{{ bon.receipt_files.count|pluralize:"s" }} attaché{{ bon.receipt_files.count|pluralize:"s" }}
+            📎 {{ bon.active_receipt_files.count }} reçu{{ bon.active_receipt_files.count|pluralize:"s" }} attaché{{ bon.active_receipt_files.count|pluralize:"s" }}
         </p>
         {% endif %}
     </section>

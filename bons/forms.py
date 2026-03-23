@@ -1,3 +1,5 @@
+import datetime
+
 from django import forms
 from django.core.exceptions import ValidationError
 from django.utils import timezone
@@ -27,7 +29,7 @@ class BonDeCommandeForm(forms.ModelForm):
         fields = [
             "budget_year", "purchase_date", "short_description",
             "merchant_name", "supplier_name", "work_or_delivery_location",
-            "sub_budget", "subtotal", "tps", "tvq", "total",
+            "sub_budget", "subtotal", "tps", "tvq", "untaxed_extra_amount", "total",
             "purchaser_member", "purchaser_apartment",
             "approver_member", "approver_apartment",
             "notes",
@@ -43,6 +45,7 @@ class BonDeCommandeForm(forms.ModelForm):
             "subtotal": "Sous-total",
             "tps": "TPS (fédérale)",
             "tvq": "TVQ (provinciale)",
+            "untaxed_extra_amount": "Frais non taxables",
             "total": "Total",
             "purchaser_member": "Acheteur (membre)",
             "purchaser_apartment": "Appartement de l'acheteur",
@@ -59,6 +62,7 @@ class BonDeCommandeForm(forms.ModelForm):
             "subtotal": forms.NumberInput(attrs={"step": "0.01", "placeholder": "0.00"}),
             "tps": forms.NumberInput(attrs={"step": "0.01", "placeholder": "0.00"}),
             "tvq": forms.NumberInput(attrs={"step": "0.01", "placeholder": "0.00"}),
+            "untaxed_extra_amount": forms.NumberInput(attrs={"step": "0.01", "placeholder": "0.00"}),
             "total": forms.NumberInput(attrs={"step": "0.01", "placeholder": "0.00"}),
             "notes": forms.Textarea(attrs={"rows": 3, "placeholder": "Remarques optionnelles"}),
         }
@@ -67,7 +71,7 @@ class BonDeCommandeForm(forms.ModelForm):
     ESSENTIAL_FIELDS = ("purchase_date", "short_description", "total",
                         "sub_budget", "purchaser_member", "budget_year")
     DETAIL_FIELDS = ("merchant_name", "supplier_name", "work_or_delivery_location",
-                     "subtotal", "tps", "tvq",
+                     "subtotal", "tps", "tvq", "untaxed_extra_amount",
                      "purchaser_apartment", "approver_member", "approver_apartment", "notes")
 
     def __init__(self, *args, house=None, **kwargs):
@@ -162,11 +166,18 @@ class MultiReceiptUploadForm(forms.Form):
         widget.attrs["accept"] = ".pdf,.jpg,.jpeg,.png"
         widget.allow_multiple_selected = True
         if house:
-            self.fields["budget_year"].queryset = BudgetYear.objects.filter(
+            qs = BudgetYear.objects.filter(
                 house=house, is_active=True
-            )
+            ).order_by("-year")
+            self.fields["budget_year"].queryset = qs
         else:
-            self.fields["budget_year"].queryset = BudgetYear.objects.filter(is_active=True)
+            qs = BudgetYear.objects.filter(is_active=True).order_by("-year")
+            self.fields["budget_year"].queryset = qs
+        # Pre-select current year budget
+        from datetime import date
+        current_year_by = qs.filter(year=date.today().year).first()
+        if current_year_by and not self.initial.get("budget_year"):
+            self.initial["budget_year"] = current_year_by.pk
 
     def clean_files(self):
         files = self.cleaned_data.get("files", [])
@@ -202,11 +213,17 @@ class OcrReviewForm(forms.Form):
     supplier_address = forms.CharField(
         max_length=300, required=False, label="Adresse du fournisseur",
     )
+    reimburse_to = forms.ChoiceField(
+        choices=[("", "—"), ("member", "Membre"), ("supplier", "Fournisseur")],
+        required=False,
+        label="Rembourser",
+        help_text="Qui doit être remboursé : le membre ou le fournisseur.",
+    )
     expense_member_name = forms.CharField(
         max_length=200, required=False,
         label="Dépense effectuée par",
-        widget=forms.TextInput(attrs={"readonly": "readonly", "class": "text-muted"}),
-        help_text="Nom extrait du signataire (lecture seule)",
+        widget=forms.TextInput(attrs={"readonly": "readonly", "class": "text-muted", "data-editable-when-ambiguous": "true"}),
+        help_text="Nom extrait du signataire (modifiable si l'attribution est ambiguë)",
     )
     expense_apartment = forms.CharField(
         max_length=10, required=False,
@@ -221,8 +238,8 @@ class OcrReviewForm(forms.Form):
     validator_member_name = forms.CharField(
         max_length=200, required=False,
         label="Validé par (signataire)",
-        widget=forms.TextInput(attrs={"readonly": "readonly", "class": "text-muted"}),
-        help_text="Nom extrait du 2e signataire (lecture seule)",
+        widget=forms.TextInput(attrs={"readonly": "readonly", "class": "text-muted", "data-editable-when-ambiguous": "true"}),
+        help_text="Nom extrait du 2e signataire (modifiable si l'attribution est ambiguë)",
     )
     validator_apartment = forms.CharField(
         max_length=10, required=False,
@@ -297,6 +314,12 @@ class OcrReviewForm(forms.Form):
         label="TVQ (provinciale)",
         widget=forms.NumberInput(attrs={"step": "0.01"}),
     )
+    untaxed_extra_amount = forms.DecimalField(
+        max_digits=10, decimal_places=2, required=False,
+        label="Frais non taxables",
+        help_text="Pourboire, livraison ou autres frais non taxables inclus au total.",
+        widget=forms.NumberInput(attrs={"step": "0.01"}),
+    )
     total = forms.DecimalField(
         max_digits=10, decimal_places=2, required=False,
         label="Total",
@@ -306,7 +329,7 @@ class OcrReviewForm(forms.Form):
         max_length=255, required=False,
         label="Résumé des achats",
         widget=forms.TextInput(attrs={"placeholder": "Ex: Quincaillerie - vis et peinture"}),
-        help_text="Résumé généré par l'IA, modifiable par le trésorier.",
+        # help_text="Résumé généré par l'IA, modifiable par le trésorier.",
     )
 
     def clean(self):
@@ -343,6 +366,10 @@ class OcrReviewForm(forms.Form):
                     "associated_bc_number",
                     "Le numéro de BC associé est recommandé pour une facture.",
                 )
+
+        untaxed_extra_amount = cleaned.get("untaxed_extra_amount")
+        if untaxed_extra_amount is not None and untaxed_extra_amount < 0:
+            self.add_error("untaxed_extra_amount", "Les frais non taxables ne peuvent pas être négatifs.")
 
         return cleaned
 
@@ -406,15 +433,10 @@ class BonSearchForm(forms.Form):
         widget=forms.DateInput(format="%Y-%m-%d", attrs={"type": "date"}),
         input_formats=["%Y-%m-%d"],
     )
-    SEARCH_STATUSES = [
-        (v, l) for v, l in BonStatus.choices
-        if v != BonStatus.OCR_PENDING
-    ]
-
     status = forms.ChoiceField(
         required=False,
         label="Statut",
-        choices=[("", "Tous les statuts")] + SEARCH_STATUSES,
+        choices=[("", "Tous")] + list(BonStatus.choices),
     )
 
     def __init__(self, *args, user=None, **kwargs):
@@ -425,6 +447,11 @@ class BonSearchForm(forms.Form):
         self.fields["purchaser"].queryset = Member.objects.filter(
             is_active=True
         ).order_by("last_name", "first_name")
+
+        # Default date range: Jan 1 of current year → today
+        today = datetime.date.today()
+        self.fields["date_from"].initial = datetime.date(today.year, 1, 1)
+        self.fields["date_to"].initial = today
 
         # Pre-select user's house if available
         if user and hasattr(user, 'house') and user.house and not self.is_bound:

@@ -383,13 +383,15 @@ class Expense(TimeStampedModel):
         """Show bon approver/treasurer label when available."""
         if self.bon_de_commande_id:
             return self.bon_de_commande.effective_validator_display_label
+        if self.source_type == ExpenseSourceType.GL_IMPORT:
+            return self.spent_by_label or "—"
         return "—"
 
     @property
     def display_reimburse_label(self) -> str:
         """Show Membre or Fournisseur for the grille column."""
         target = self.reimburse_to
-        if not target and self.bon_de_commande_id:
+        if self.bon_de_commande_id and self.bon_de_commande.reimburse_to:
             target = self.bon_de_commande.reimburse_to
         if target == "member":
             return "Membre"

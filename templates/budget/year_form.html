@@ -2,16 +2,26 @@
 
 {% block title %}{% if object %}Modifier l'année budgétaire{% else %}Créer une année budgétaire{% endif %} | Tresorapide{% endblock %}
 
+{% block main_class %}container container-wide{% endblock %}
+
 {% block extra_head %}
 <style>
+.subbudget-inline-table {
+    width: 100%;
+    table-layout: fixed;
+}
 .subbudget-inline-table input[type="number"],
 .subbudget-inline-table input[type="text"],
+.subbudget-inline-table textarea,
 .subbudget-inline-table select {
     border: 1px solid #c6d2df;
     border-radius: 0.3rem;
     padding: 0.4rem 0.5rem;
     font: inherit;
     font-size: 0.88rem;
+    width: 100%;
+    min-width: 0;
+    box-sizing: border-box;
 }
 .subbudget-inline-table input[type="checkbox"] {
     width: 1.1rem;
@@ -124,7 +134,7 @@
             {% endif %}
 
             <div class="table-responsive">
-                <table class="data-table subbudget-inline-table">
+                <table class="data-table enhanced-table subbudget-inline-table">
                     <thead>
                         <tr>
                             <th style="width:2.5rem;"></th>

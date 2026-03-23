@@ -18,12 +18,13 @@
 
     {% if houses %}
     <div class="table-responsive">
-        <table class="data-table">
+        <table class="data-table enhanced-table">
             <thead>
                 <tr>
                     <th>Code</th>
+                    <th>Code comptable</th>
                     <th>Nom</th>
-                    <th>Compte</th>
+                    <th>Compte grand livre</th>
                     <th>Adresse</th>
                     <th>Trésorier</th>
                     <th>Correspondant</th>
@@ -34,9 +35,10 @@
                 {% for house in houses %}
                 <tr>
                     <td><a href="{% url 'houses:detail' house.pk %}"><strong>{{ house.code }}</strong></a></td>
+                    <td>{{ house.accounting_code|default:"—" }}</td>
                     <td>{{ house.name }}</td>
                     <td>{{ house.account_number }}</td>
-                    <td>{{ house.address|default:"—"|truncatewords:6 }}</td>
+                    <td>{{ house.address|default:"—"|linebreaksbr }}</td>
                     <td>{{ house.treasurer_member.display_name|default:"—" }}</td>
                     <td>{{ house.correspondent_member.display_name|default:"—" }}</td>
                     {% if can_manage %}

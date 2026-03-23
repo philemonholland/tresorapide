@@ -140,6 +140,12 @@
                             {{ form.supplier_address }}
                             {% for error in form.supplier_address.errors %}<p class="error-text">{{ error }}</p>{% endfor %}
                         </div>
+                        <div class="form-group {% if form.reimburse_to.errors %}has-error{% endif %}">
+                            <label for="{{ form.reimburse_to.id_for_label }}">{{ form.reimburse_to.label }}</label>
+                            {{ form.reimburse_to }}
+                            {% if form.reimburse_to.help_text %}<small class="help-text">{{ form.reimburse_to.help_text }}</small>{% endif %}
+                            {% for error in form.reimburse_to.errors %}<p class="error-text">{{ error }}</p>{% endfor %}
+                        </div>
 
                         <hr style="margin: 1rem 0; border-top: 1px solid #ddd;">
                         <p style="font-weight: bold; margin-bottom: 0.5rem;">Dépense effectuée par</p>
@@ -155,13 +161,11 @@
                         </div>
                         {% endif %}
 
-                        {% if form.expense_member_name.value %}
-                        <div class="form-group">
+                        <div class="form-group" id="expense-member-name-group"{% if not form.expense_member_name.value and not signer_roles_ambiguous %} style="display:none;"{% endif %}>
                             <label for="{{ form.expense_member_name.id_for_label }}">{{ form.expense_member_name.label }}</label>
                             {{ form.expense_member_name }}
                             <small class="text-muted">{{ form.expense_member_name.help_text }}</small>
                         </div>
-                        {% endif %}
                         <div class="form-group">
                             <label for="{{ form.expense_apartment.id_for_label }}">{{ form.expense_apartment.label }}</label>
                             {{ form.expense_apartment }}
@@ -192,13 +196,11 @@
                         </div>
                         {% endif %}
 
-                        {% if form.validator_member_name.value %}
-                        <div class="form-group">
+                        <div class="form-group" id="validator-member-name-group"{% if not form.validator_member_name.value and not signer_roles_ambiguous %} style="display:none;"{% endif %}>
                             <label for="{{ form.validator_member_name.id_for_label }}">{{ form.validator_member_name.label }}</label>
                             {{ form.validator_member_name }}
                             <small class="text-muted">{{ form.validator_member_name.help_text }}</small>
                         </div>
-                        {% endif %}
                         <div class="form-group">
                             <label for="{{ form.validator_apartment.id_for_label }}">{{ form.validator_apartment.label }}</label>
                             {{ form.validator_apartment }}
@@ -265,8 +267,24 @@
                         </div>
                     </fieldset>
 
-                    <fieldset style="border: 1px solid #ddd; border-radius: 4px; padding: 1rem; margin-bottom: 1rem;">
+                    <fieldset style="border: 1px solid #ddd; border-radius: 4px; padding: 1rem; margin-bottom: 1rem;{% if mismatch_warning %} background:#fff5f5; border-color:#f5c6cb;{% endif %}">
                         <legend style="font-weight: bold; padding: 0 0.5rem;">Montants</legend>
+
+                        {% if mismatch_warning %}
+                        <div class="message warning" style="margin-bottom: 0.75rem; background:#f8d7da; color:#721c24; border:1px solid #f5c6cb;">
+                            {% if mismatch_warning.unverifiable %}
+                                ⚠️ Les montants des factures n'ont pas pu être extraits automatiquement. Vérifiez les montants avant de confirmer.
+                            {% else %}
+                                ⚠️ Le total du BC ({{ mismatch_warning.bc_total }} $) ne correspond pas aux factures associées ({{ mismatch_warning.invoice_total }} $).
+                            {% endif %}
+                        </div>
+                        {% endif %}
+
+                        <div id="amount-helper-actions" style="display:none; gap:0.5rem; flex-wrap:wrap; margin-bottom:0.75rem;">
+                            <button type="button" id="amount-helper-from-total" class="btn">Calculer sous-total + taxes</button>
+                            <button type="button" id="amount-helper-from-subtotal" class="btn">Calculer taxes + total</button>
+                            <button type="button" id="amount-helper-missing-taxes" class="btn">Calculer taxes manquantes</button>
+                        </div>
 
                         <div class="form-group {% if form.subtotal.errors %}has-error{% endif %}">
                             <label for="{{ form.subtotal.id_for_label }}">{{ form.subtotal.label }}</label>
@@ -282,6 +300,12 @@
                             <label for="{{ form.tvq.id_for_label }}">{{ form.tvq.label }}</label>
                             {{ form.tvq }}
                             {% for error in form.tvq.errors %}<p class="error-text">{{ error }}</p>{% endfor %}
+                        </div>
+                        <div class="form-group {% if form.untaxed_extra_amount.errors %}has-error{% endif %}">
+                            <label for="{{ form.untaxed_extra_amount.id_for_label }}">{{ form.untaxed_extra_amount.label }}</label>
+                            {{ form.untaxed_extra_amount }}
+                            {% if form.untaxed_extra_amount.help_text %}<small class="text-muted">{{ form.untaxed_extra_amount.help_text }}</small>{% endif %}
+                            {% for error in form.untaxed_extra_amount.errors %}<p class="error-text">{{ error }}</p>{% endfor %}
                         </div>
                         <div class="form-group {% if form.total.errors %}has-error{% endif %}">
                             <label for="{{ form.total.id_for_label }}">{{ form.total.label }}</label>
@@ -324,6 +348,15 @@
         var paperBcSection = document.getElementById('paper-bc-section');
         var invoiceSection = document.getElementById('invoice-section');
         var swapButton = document.getElementById('swap-signers-button');
+        var expenseNameGroup = document.getElementById('expense-member-name-group');
+        var validatorNameGroup = document.getElementById('validator-member-name-group');
+        var amountActions = document.getElementById('amount-helper-actions');
+        var amountHelperFromTotal = document.getElementById('amount-helper-from-total');
+        var amountHelperFromSubtotal = document.getElementById('amount-helper-from-subtotal');
+        var amountHelperMissingTaxes = document.getElementById('amount-helper-missing-taxes');
+        var reviewForm = docType.form;
+        var hasMismatchWarning = {% if mismatch_warning %}true{% else %}false{% endif %};
+        var mismatchConfirmMessage = "{% if mismatch_warning %}{% if mismatch_warning.unverifiable %}Les montants des factures n'ont pas pu être extraits automatiquement. Êtes-vous certain de vouloir confirmer malgré cet avertissement ?{% else %}Le total du BC ne correspond pas aux factures associées. Êtes-vous certain de vouloir confirmer malgré cet avertissement ?{% endif %}{% endif %}";
 
         function toggleSections() {
             var val = docType.value;
@@ -335,6 +368,143 @@
 
         function fieldBySuffix(suffix) {
             return document.querySelector('[name="' + prefix + '-' + suffix + '"]');
+        }
+
+        function parseMoney(field) {
+            if (!field) return null;
+            var raw = (field.value || '').trim().replace(',', '.');
+            if (!raw) return null;
+            var value = parseFloat(raw);
+            return Number.isFinite(value) ? value : null;
+        }
+
+        function roundMoney(value) {
+            return Math.round((value + Number.EPSILON) * 100) / 100;
+        }
+
+        function setMoney(field, value) {
+            if (!field || !Number.isFinite(value)) return;
+            field.value = roundMoney(value).toFixed(2);
+        }
+
+        function updateSignerTextLock() {
+            var ambiguous = fieldBySuffix('signer_roles_ambiguous');
+            var expenseName = fieldBySuffix('expense_member_name');
+            var validatorName = fieldBySuffix('validator_member_name');
+            var shouldUnlock = !!(ambiguous && ambiguous.checked);
+
+            [expenseName, validatorName].forEach(function(field) {
+                if (!field) return;
+                if (shouldUnlock) {
+                    field.removeAttribute('readonly');
+                    field.classList.remove('text-muted');
+                } else {
+                    field.setAttribute('readonly', 'readonly');
+                    field.classList.add('text-muted');
+                }
+            });
+
+            if (expenseNameGroup && expenseName) {
+                expenseNameGroup.style.display = (shouldUnlock || expenseName.value) ? '' : 'none';
+            }
+            if (validatorNameGroup && validatorName) {
+                validatorNameGroup.style.display = (shouldUnlock || validatorName.value) ? '' : 'none';
+            }
+        }
+
+        function updateAmountHelpers() {
+            var subtotalField = fieldBySuffix('subtotal');
+            var tpsField = fieldBySuffix('tps');
+            var tvqField = fieldBySuffix('tvq');
+            var totalField = fieldBySuffix('total');
+            if (!subtotalField || !tpsField || !tvqField || !totalField) return;
+
+            var subtotal = parseMoney(subtotalField);
+            var tps = parseMoney(tpsField);
+            var tvq = parseMoney(tvqField);
+            var total = parseMoney(totalField);
+
+            var showFromTotal = total !== null && subtotal === null && tps === null && tvq === null;
+            var showFromSubtotal = subtotal !== null && total === null && tps === null && tvq === null;
+            var showMissingTaxes = subtotal !== null && total !== null && (tps === null || tvq === null);
+
+            if (amountHelperFromTotal) amountHelperFromTotal.style.display = showFromTotal ? '' : 'none';
+            if (amountHelperFromSubtotal) amountHelperFromSubtotal.style.display = showFromSubtotal ? '' : 'none';
+            if (amountHelperMissingTaxes) amountHelperMissingTaxes.style.display = showMissingTaxes ? '' : 'none';
+            if (amountActions) {
+                amountActions.style.display = (showFromTotal || showFromSubtotal || showMissingTaxes) ? 'flex' : 'none';
+            }
+        }
+
+        function calculateFromTotal() {
+            var subtotalField = fieldBySuffix('subtotal');
+            var tpsField = fieldBySuffix('tps');
+            var tvqField = fieldBySuffix('tvq');
+            var totalField = fieldBySuffix('total');
+            var untaxedExtraField = fieldBySuffix('untaxed_extra_amount');
+            var total = parseMoney(totalField);
+            var untaxedExtra = parseMoney(untaxedExtraField) || 0;
+            if (total === null) return;
+            var taxableTotal = roundMoney(total - untaxedExtra);
+            if (taxableTotal < 0) {
+                window.alert("Les frais non taxables ne peuvent pas dépasser le total.");
+                return;
+            }
+            var subtotal = roundMoney(taxableTotal / 1.14975);
+            var tps = roundMoney(subtotal * 0.05);
+            var tvq = roundMoney(taxableTotal - subtotal - tps);
+            if (tvq < 0) {
+                window.alert("Impossible de calculer des taxes cohérentes avec les montants fournis.");
+                return;
+            }
+            setMoney(subtotalField, subtotal);
+            setMoney(tpsField, tps);
+            setMoney(tvqField, tvq);
+            updateAmountHelpers();
+        }
+
+        function calculateFromSubtotal() {
+            var subtotalField = fieldBySuffix('subtotal');
+            var tpsField = fieldBySuffix('tps');
+            var tvqField = fieldBySuffix('tvq');
+            var totalField = fieldBySuffix('total');
+            var untaxedExtraField = fieldBySuffix('untaxed_extra_amount');
+            var subtotal = parseMoney(subtotalField);
+            var untaxedExtra = parseMoney(untaxedExtraField) || 0;
+            if (subtotal === null) return;
+            var tps = roundMoney(subtotal * 0.05);
+            var tvq = roundMoney(subtotal * 0.09975);
+            var total = roundMoney(subtotal + tps + tvq + untaxedExtra);
+            setMoney(tpsField, tps);
+            setMoney(tvqField, tvq);
+            setMoney(totalField, total);
+            updateAmountHelpers();
+        }
+
+        function calculateMissingTaxes() {
+            var subtotalField = fieldBySuffix('subtotal');
+            var tpsField = fieldBySuffix('tps');
+            var tvqField = fieldBySuffix('tvq');
+            var totalField = fieldBySuffix('total');
+            var untaxedExtraField = fieldBySuffix('untaxed_extra_amount');
+            var subtotal = parseMoney(subtotalField);
+            var total = parseMoney(totalField);
+            var untaxedExtra = parseMoney(untaxedExtraField) || 0;
+            if (subtotal === null || total === null) return;
+            var taxableTotal = roundMoney(total - untaxedExtra);
+            if (taxableTotal < subtotal) {
+                window.alert("Le total taxable ne peut pas être inférieur au sous-total.");
+                return;
+            }
+            var tps = roundMoney(subtotal * 0.05);
+            var tvq = roundMoney(taxableTotal - subtotal - tps);
+            if (tvq < 0) {
+                window.alert("Impossible de calculer des taxes cohérentes avec les montants fournis.");
+                return;
+            }
+            setMoney(tpsField, tps);
+            setMoney(tvqField, tvq);
+            updateAmountHelpers();
         }
 
         if (swapButton) {
@@ -366,11 +536,41 @@
                 if (ambiguous) {
                     ambiguous.checked = true;
                 }
+                updateSignerTextLock();
+            });
+        }
+
+        ['subtotal', 'tps', 'tvq', 'untaxed_extra_amount', 'total'].forEach(function(suffix) {
+            var field = fieldBySuffix(suffix);
+            if (!field) return;
+            field.addEventListener('input', updateAmountHelpers);
+            field.addEventListener('change', updateAmountHelpers);
+        });
+        var ambiguousField = fieldBySuffix('signer_roles_ambiguous');
+        if (ambiguousField) {
+            ambiguousField.addEventListener('change', updateSignerTextLock);
+        }
+        if (amountHelperFromTotal) {
+            amountHelperFromTotal.addEventListener('click', calculateFromTotal);
+        }
+        if (amountHelperFromSubtotal) {
+            amountHelperFromSubtotal.addEventListener('click', calculateFromSubtotal);
+        }
+        if (amountHelperMissingTaxes) {
+            amountHelperMissingTaxes.addEventListener('click', calculateMissingTaxes);
+        }
+        if (reviewForm && hasMismatchWarning) {
+            reviewForm.addEventListener('submit', function(event) {
+                if (!window.confirm(mismatchConfirmMessage)) {
+                    event.preventDefault();
+                }
             });
         }
 
         docType.addEventListener('change', toggleSections);
         toggleSections();
+        updateSignerTextLock();
+        updateAmountHelpers();
     });
     </script>
 {% endblock %}

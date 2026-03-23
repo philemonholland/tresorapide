@@ -36,7 +36,9 @@
             <label class="filter-field">
                 <span>Maison</span>
                 <select name="house">
-                    <option value="">Toutes</option>
+                    {% if can_see_all_houses %}
+                        <option value="">Toutes</option>
+                    {% endif %}
                     {% for h in houses %}
                         <option value="{{ h.pk }}"{% if house_filter == h.pk|stringformat:"d" %} selected{% endif %}>{{ h.code }}</option>
                     {% endfor %}

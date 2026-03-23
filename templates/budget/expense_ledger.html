@@ -2,6 +2,8 @@
 
 {% block title %}Grille de dépenses — {{ budget_year.label }} | Tresorapide{% endblock %}
 
+{% block main_class %}container container-wide{% endblock %}
+
 {% block content %}
     <section class="card">
         <div class="section-heading">
@@ -19,6 +21,25 @@
     </section>
 
     <section class="card">
+        <div class="section-heading">
+            <div>
+                <h2>Grille de dépenses</h2>
+            </div>
+            <div style="display:flex;align-items:center;gap:0.8rem;flex-wrap:wrap;">
+                <form method="get" style="margin:0;">
+                    <label style="display:flex;align-items:center;gap:0.4rem;">
+                        <input type="checkbox"
+                               name="show_cancelled"
+                               value="1"
+                               {% if show_cancelled %}checked{% endif %}
+                               onchange="this.form.submit()">
+                        Afficher les dépenses annulées
+                    </label>
+                </form>
+                <a class="button-link" href="{% url 'budget:expense-ledger-pdf' budget_year.pk %}{% if show_cancelled %}?show_cancelled=1{% endif %}" title="Télécharger en PDF">📄 PDF</a>
+                <a class="button-link" href="{% url 'budget:expense-ledger-xlsx' budget_year.pk %}{% if show_cancelled %}?show_cancelled=1{% endif %}" title="Télécharger en Excel">📊 Excel</a>
+            </div>
+        </div>
         {% if ledger_rows %}
             <div class="table-responsive">
                 <table class="data-table enhanced-table"
@@ -29,37 +50,40 @@
                         <tr>
                             <th>Date</th>
                             <th>Description</th>
-                            <th>BC #</th>
-                            <th>Code</th>
+                            <th class="compact-hide">BC #</th>
+                            <th class="compact-hide">Code</th>
                             <th>Fournisseur</th>
+                            <th class="compact-hide">Rembourser</th>
                             <th>Dépensé par</th>
                             <th>Validé par</th>
-                            <th class="text-right">Montant</th>
-                            <th class="text-right">Solde</th>
-                            <th class="text-right">Solde − 15 %</th>
+                            <th class="text-right money-col">Montant</th>
+                            <th class="text-right money-col">Solde</th>
+                            <th class="text-right money-col">Solde − 15 %</th>
                             {% if can_manage %}
                                 <th>Actions</th>
                             {% endif %}
+                            <th>Factures</th>
                         </tr>
                     </thead>
                     <tbody>
                         {% for row in ledger_rows %}
                             <tr data-amount="{{ row.expense.amount }}"
                                 data-trace="{{ row.expense.sub_budget.trace_code }}"
-                                {% if row.expense.is_cancellation %}style="color: var(--negative, #c0392b);"{% elif row.expense.is_cancelled %}style="text-decoration: line-through; opacity: 0.6;"{% endif %}>
-                                <td class="nowrap">{{ row.expense.entry_date|date:"Y-m-d" }}</td>
+                                {% if row.expense.is_cancellation %}style="color: var(--negative, #c0392b);"{% elif row.is_cancelled %}style="text-decoration: line-through; opacity: 0.6;"{% endif %}>
+                                <td class="nowrap date-col">{{ row.expense.entry_date|date:"Y-m-d" }}</td>
                                 <td>
                                     {{ row.expense.description }}
                                     {% if row.expense.is_cancellation %}<strong> [ANNULATION]</strong>{% endif %}
                                 </td>
-                                <td>{{ row.expense.bon_number|default:"—" }}</td>
-                                <td class="text-center">{{ row.expense.sub_budget.trace_code }}</td>
+                                <td class="compact-hide">{{ row.expense.bon_number|default:"—" }}</td>
+                                <td class="text-center compact-hide">{{ row.expense.sub_budget.trace_code }}</td>
                                 <td>{{ row.expense.supplier_name|default:"—" }}</td>
+                                <td class="compact-hide">{{ row.expense.display_reimburse_label }}</td>
                                 <td>{{ row.expense.display_spent_by_label }}</td>
                                 <td>{{ row.expense.display_approved_by_label }}</td>
-                                <td class="text-right nowrap"{% if row.expense.is_cancellation %} style="font-weight: bold;"{% endif %}>{{ row.expense.amount|floatformat:2 }} ${% if row.expense.bon_de_commande.invoice_amounts_unverified %} <span title="Montants de factures non vérifiés par l'OCR" style="color:#c0392b;cursor:help;">⚠️</span>{% endif %}</td>
-                                <td class="text-right nowrap balance-cell">{{ row.balance|floatformat:2 }} $</td>
-                                <td class="text-right nowrap balance-15-cell">{{ row.balance_minus_imprevues|floatformat:2 }} $</td>
+                                <td class="text-right nowrap money-col"{% if row.expense.is_cancellation %} style="font-weight: bold;"{% endif %}>{{ row.expense.amount|floatformat:2 }} ${% if row.expense.bon_de_commande.invoice_amounts_unverified %} <span title="Montants de factures non vérifiés par l'OCR" style="color:#c0392b;cursor:help;">⚠️</span>{% endif %}</td>
+                                <td class="text-right nowrap money-col balance-cell">{{ row.balance|floatformat:2 }} $</td>
+                                <td class="text-right nowrap money-col balance-15-cell">{{ row.balance_minus_imprevues|floatformat:2 }} $</td>
                                 {% if can_manage %}
                                     <td>
                                         {% if not row.expense.is_cancellation %}
@@ -67,6 +91,11 @@
                                         {% endif %}
                                     </td>
                                 {% endif %}
+                                <td class="nowrap">
+                                    <a href="{% url 'budget:expense-receipts' row.expense.pk %}">
+                                        Voir{% if row.receipt_count %} ({{ row.receipt_count }}){% endif %}
+                                    </a>
+                                </td>
                             </tr>
                         {% endfor %}
                     </tbody>

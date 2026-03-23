@@ -1,11 +1,32 @@
 from decimal import Decimal
-from django.db.models import Sum, Q
+from django.db.models import Exists, OuterRef, Sum
 
 from .models import BudgetYear, SubBudget, Expense
 
 
 class BudgetCalculationService:
     """Reproduce the Excel budget formulas in service-layer code."""
+
+    @staticmethod
+    def _running_balance_expenses(budget_year):
+        """Return expense rows in ledger order with a cheap cancellation marker."""
+        reversal_exists = Expense.objects.filter(reversal_of_id=OuterRef("pk"))
+        return (
+            Expense.objects.filter(
+                budget_year=budget_year
+            ).select_related(
+                "sub_budget",
+                "bon_de_commande",
+                "bon_de_commande__purchaser_member",
+                "bon_de_commande__purchaser_apartment",
+                "bon_de_commande__approver_member",
+                "bon_de_commande__approver_apartment",
+                "bon_de_commande__validated_by",
+                "bon_de_commande__validated_by__member",
+            ).annotate(
+                has_reversal=Exists(reversal_exists)
+            ).order_by("entry_date", "created_at", "id")
+        )
 
     @staticmethod
     def base_values(budget_year):
@@ -90,7 +111,7 @@ class BudgetCalculationService:
         return result
 
     @staticmethod
-    def running_balances(budget_year):
+    def running_balances(budget_year, *, include_cancelled=True):
         """
         Compute running balance and balance-minus-imprevues for
         the expense ledger in deterministic order.
@@ -99,23 +120,13 @@ class BudgetCalculationService:
         imprevues = budget_total * budget_year.imprevues_rate
         budget_minus_imprevues = budget_total - imprevues
 
-        expenses = Expense.objects.filter(
-            budget_year=budget_year
-        ).select_related(
-            "sub_budget",
-            "bon_de_commande",
-            "bon_de_commande__purchaser_member",
-            "bon_de_commande__purchaser_apartment",
-            "bon_de_commande__approver_member",
-            "bon_de_commande__approver_apartment",
-            "bon_de_commande__validated_by",
-            "bon_de_commande__validated_by__member",
-        ).order_by("entry_date", "created_at", "id")
-
         result = []
         cumulative = Decimal("0")
         cumulative_non_imprevues = Decimal("0")
-        for exp in expenses:
+        for exp in BudgetCalculationService._running_balance_expenses(budget_year):
+            is_cancelled = bool(getattr(exp, "has_reversal", False))
+            if not include_cancelled and (exp.is_cancellation or is_cancelled):
+                continue
             cumulative += exp.amount
             if exp.sub_budget.trace_code != 0:
                 cumulative_non_imprevues += exp.amount
@@ -123,6 +134,7 @@ class BudgetCalculationService:
                 "expense": exp,
                 "balance": budget_total - cumulative,
                 "balance_minus_imprevues": budget_minus_imprevues - cumulative_non_imprevues,
+                "is_cancelled": is_cancelled,
             })
         return result
 

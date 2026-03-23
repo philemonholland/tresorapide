@@ -7,7 +7,7 @@ from django.urls import reverse
 
 from accounts.models import User
 from houses.models import House
-from budget.models import BudgetYear, SubBudget, Expense
+from budget.models import BudgetYear, SubBudget, Expense, ExpenseSourceType
 from budget.services import BudgetCalculationService
 from budget.views import BudgetYearCreateView
 from bons.models import BonDeCommande, BonStatus, ReceiptFile, OcrStatus
@@ -370,6 +370,24 @@ class BudgetLedgerSignerDisplayTests(TestCase):
         self.assertContains(response, "Validé par")
         self.assertContains(response, "202 / Marylin Lamarche")
         self.assertContains(response, "203 / René Côté")
+
+    def test_expense_ledger_shows_chce_for_gl_imported_entries(self):
+        Expense.objects.create(
+            budget_year=self.by,
+            sub_budget=self.sub_budget,
+            entry_date=date(2026, 1, 9),
+            description="Entrée GL importée",
+            bon_number="16739",
+            supplier_name="PARENT",
+            spent_by_label="CHCE",
+            amount=Decimal("19.49"),
+            validated_gl=True,
+            source_type=ExpenseSourceType.GL_IMPORT,
+        )
+
+        self.client.login(username="tresorier", password="test123")
+        response = self.client.get(reverse("budget:expense-ledger", kwargs={"budget_year_pk": self.by.pk}))
+        self.assertContains(response, "CHCE", count=2)
 
 
 class ExpenseDateEditTests(TestCase):
