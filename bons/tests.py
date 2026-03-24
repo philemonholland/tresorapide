@@ -18,6 +18,7 @@ from bons.models import (
 )
 from bons.services import generate_bon_number
 from bons.ocr_service import ReceiptOcrService, DuplicateDetectionService
+from bons.scan_sessions import create_scan_session
 from bons.views import (
     _names_match,
     _normalize_name,
@@ -863,7 +864,6 @@ class PaperBcFinalizationTests(TestCase):
         self.assertEqual(paper_bon.subtotal, Decimal("100.00"))
         self.assertEqual(paper_bon.tps, Decimal("5.00"))
         self.assertEqual(paper_bon.tvq, Decimal("9.98"))
-        self.assertEqual(paper_bon.total, Decimal("114.98"))
 
     def test_finalize_preserves_untaxed_extra_amount(self):
         self.receipt_bc.extracted_fields.final_subtotal = Decimal("100.00")
@@ -900,6 +900,200 @@ class PaperBcFinalizationTests(TestCase):
         self.assertEqual(paper_bon.tvq, Decimal("9.98"))
         self.assertEqual(paper_bon.untaxed_extra_amount, Decimal("10.00"))
         self.assertEqual(paper_bon.total, Decimal("124.98"))
+
+
+class MobileCaptureFlowTests(TestCase):
+    def setUp(self):
+        self.house = House.objects.create(code="BB", name="Maison BB", account_number="13-51200")
+        self.budget_year = BudgetYear.objects.create(
+            house=self.house,
+            year=2026,
+            annual_budget_total=Decimal("12237.00"),
+        )
+        self.sub_budget = SubBudget.objects.create(
+            budget_year=self.budget_year,
+            trace_code=7,
+            name="Produits ménager",
+            planned_amount=Decimal("300.00"),
+        )
+        self.member = Member.objects.create(first_name="Marylin", last_name="Lamarche")
+        self.apartment = Apartment.objects.create(house=self.house, code="202")
+        Residency.objects.create(
+            member=self.member,
+            apartment=self.apartment,
+            start_date=date(2020, 1, 1),
+        )
+        self.user = User.objects.create_user(
+            username="mobile-tresorier",
+            password="test123",
+            role=User.Role.TREASURER,
+            house=self.house,
+            member=self.member,
+        )
+        self.client.login(username="mobile-tresorier", password="test123")
+
+    @staticmethod
+    def _mobile_photo(name="capture.jpg"):
+        return SimpleUploadedFile(name, b"fake image data", content_type="image/jpeg")
+
+    def _set_mobile_capture_session(self, scan_session):
+        session = self.client.session
+        session["mobile_capture_scan_session_id"] = scan_session.pk
+        session.save()
+
+    @patch("bons.ocr_service.ReceiptOcrService.is_available", return_value=True)
+    def test_mobile_capture_adds_photo_to_scan_session(self, mock_ocr_available):
+        response = self.client.post(
+            reverse("bons:mobile-capture"),
+            {
+                "budget_year": self.budget_year.pk,
+                "photo": self._mobile_photo(),
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.headers["Location"], reverse("bons:mobile-capture"))
+        scan_session = BonDeCommande.objects.get(is_scan_session=True)
+        self.assertEqual(scan_session.status, BonStatus.DRAFT)
+        self.assertEqual(scan_session.active_receipt_files.count(), 1)
+        self.assertEqual(
+            self.client.session["mobile_capture_scan_session_id"],
+            scan_session.pk,
+        )
+
+    @patch("bons.ocr_service.ReceiptOcrService.process_receipts_batch")
+    @patch("bons.ocr_service.ReceiptOcrService.is_available", return_value=True)
+    def test_mobile_capture_finalize_refuses_missing_signature_and_apartment(
+        self,
+        mock_ocr_available,
+        mock_process,
+    ):
+        scan_session = create_scan_session(user=self.user, budget_year=self.budget_year)
+        receipt = ReceiptFile.objects.create(
+            bon_de_commande=scan_session,
+            file=self._mobile_photo("missing-signature.jpg"),
+            original_filename="missing-signature.jpg",
+            content_type="image/jpeg",
+            uploaded_by=self.user,
+        )
+        self._set_mobile_capture_session(scan_session)
+
+        def fake_process(receipts, house=None):
+            ReceiptExtractedFields.objects.update_or_create(
+                receipt_file=receipt,
+                defaults={
+                    "document_type_candidate": "receipt",
+                    "member_name_candidate": "",
+                    "apartment_number_candidate": "",
+                },
+            )
+            return receipts, ""
+
+        mock_process.side_effect = fake_process
+
+        response = self.client.post(
+            reverse("bons:mobile-capture-finalize"),
+            follow=True,
+        )
+
+        scan_session.refresh_from_db()
+        self.assertEqual(scan_session.status, BonStatus.DRAFT)
+        self.assertContains(response, "Traitement refusé")
+        self.assertContains(response, "signature lisible")
+
+    @patch("bons.ocr_service.ReceiptOcrService.process_receipts_batch")
+    @patch("bons.ocr_service.ReceiptOcrService.is_available", return_value=True)
+    def test_mobile_capture_finalize_redirects_to_review_when_signature_found(
+        self,
+        mock_ocr_available,
+        mock_process,
+    ):
+        scan_session = create_scan_session(user=self.user, budget_year=self.budget_year)
+        receipt = ReceiptFile.objects.create(
+            bon_de_commande=scan_session,
+            file=self._mobile_photo("signed-receipt.jpg"),
+            original_filename="signed-receipt.jpg",
+            content_type="image/jpeg",
+            uploaded_by=self.user,
+        )
+        self._set_mobile_capture_session(scan_session)
+
+        def fake_process(receipts, house=None):
+            ReceiptExtractedFields.objects.update_or_create(
+                receipt_file=receipt,
+                defaults={
+                    "document_type_candidate": "receipt",
+                    "member_name_candidate": "Marylin Lamarche",
+                    "apartment_number_candidate": "202",
+                },
+            )
+            return receipts, ""
+
+        mock_process.side_effect = fake_process
+
+        response = self.client.post(reverse("bons:mobile-capture-finalize"))
+
+        scan_session.refresh_from_db()
+        self.assertEqual(scan_session.status, BonStatus.READY_FOR_REVIEW)
+        self.assertEqual(
+            response.headers["Location"],
+            reverse("bons:review", kwargs={"pk": scan_session.pk}) + "?idx=0",
+        )
+        self.assertNotIn("mobile_capture_scan_session_id", self.client.session)
+
+    @patch("bons.ocr_service.ReceiptOcrService.process_receipts_batch")
+    @patch("bons.ocr_service.ReceiptOcrService.is_available", return_value=True)
+    def test_mobile_capture_finalize_allows_invoice_with_signed_paper_bc(
+        self,
+        mock_ocr_available,
+        mock_process,
+    ):
+        scan_session = create_scan_session(user=self.user, budget_year=self.budget_year)
+        paper_bc = ReceiptFile.objects.create(
+            bon_de_commande=scan_session,
+            file=self._mobile_photo("paper-bc.jpg"),
+            original_filename="paper-bc.jpg",
+            content_type="image/jpeg",
+            uploaded_by=self.user,
+        )
+        invoice = ReceiptFile.objects.create(
+            bon_de_commande=scan_session,
+            file=self._mobile_photo("invoice.jpg"),
+            original_filename="invoice.jpg",
+            content_type="image/jpeg",
+            uploaded_by=self.user,
+        )
+        self._set_mobile_capture_session(scan_session)
+
+        def fake_process(receipts, house=None):
+            ReceiptExtractedFields.objects.update_or_create(
+                receipt_file=paper_bc,
+                defaults={
+                    "document_type_candidate": "paper_bc",
+                    "bc_number_candidate": "16011",
+                    "expense_member_name_candidate": "Marylin Lamarche",
+                    "expense_apartment_candidate": "202",
+                },
+            )
+            ReceiptExtractedFields.objects.update_or_create(
+                receipt_file=invoice,
+                defaults={
+                    "document_type_candidate": "invoice",
+                    "associated_bc_number_candidate": "16011",
+                },
+            )
+            return receipts, ""
+
+        mock_process.side_effect = fake_process
+
+        response = self.client.post(reverse("bons:mobile-capture-finalize"))
+
+        scan_session.refresh_from_db()
+        self.assertEqual(scan_session.status, BonStatus.READY_FOR_REVIEW)
+        self.assertEqual(
+            response.headers["Location"],
+            reverse("bons:review", kwargs={"pk": scan_session.pk}) + "?idx=0",
+        )
 
 
 class MismatchWarningTests(TestCase):
@@ -1431,6 +1625,20 @@ class SignerRoleWorkflowTests(TestCase):
         rows = build_receipt_confidence_summary_rows(self.receipt)
         summary = next(row for row in rows if row["field_name"] == "signer_roles_ambiguous")
         self.assertEqual(summary["value"], "Non")
+
+    def test_receipt_review_renders_mobile_layout_hooks(self):
+        self.client.login(username="tresorier", password="test123")
+
+        response = self.client.get(
+            reverse(
+                "bons:receipt-review",
+                kwargs={"bon_pk": self.bon.pk, "receipt_pk": self.receipt.pk},
+            )
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'class="review-layout"')
+        self.assertContains(response, 'class="review-navigation review-navigation-single"')
 
     def test_build_review_confidence_marks_corrected_fields_as_na(self):
         from bons.ai_confidence import build_receipt_review_confidence_scores

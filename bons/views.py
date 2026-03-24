@@ -12,24 +12,32 @@ import json
 import unicodedata
 
 from accounts.access import RoleRequiredMixin, TreasurerRequiredMixin, check_house_permission
+from core.device import apply_site_mode_preference
 from .models import (
     BonDeCommande, BonStatus, ReceiptFile, ReceiptExtractedFields, OcrStatus,
     ReimburseTarget,
 )
 from .forms import (
     BonDeCommandeForm, ReceiptUploadForm, BonValidateForm,
-    BonExportConfigureForm, MultiReceiptUploadForm, OcrReviewForm, BonSearchForm,
+    BonExportConfigureForm, MultiReceiptUploadForm, MobileReceiptCaptureForm,
+    OcrReviewForm, BonSearchForm,
 )
 from .ai_confidence import (
     build_receipt_confidence_summary_rows,
     build_receipt_review_confidence_badges,
     build_receipt_review_confidence_scores,
 )
+from .scan_sessions import (
+    add_receipts_to_scan_session,
+    create_scan_session,
+    default_budget_year_for_house,
+)
 from .services import generate_bon_number
 
 MONEY_EPSILON = Decimal("0.01")
 STANDARD_TPS_RATE = Decimal("0.05")
 STANDARD_TVQ_RATE = Decimal("0.09975")
+MOBILE_CAPTURE_SESSION_KEY = "mobile_capture_scan_session_id"
 
 REVIEW_CONFIDENCE_KEYS = (
     "document_type",
@@ -76,6 +84,139 @@ def _receipt_confidence_summaries(receipts) -> list[dict]:
 
 def _query_param_is_true(value) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _first_non_empty(*values) -> str:
+    for value in values:
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _set_mobile_capture_session(request, scan_session) -> None:
+    request.session[MOBILE_CAPTURE_SESSION_KEY] = scan_session.pk
+
+
+def _clear_mobile_capture_session(request) -> None:
+    request.session.pop(MOBILE_CAPTURE_SESSION_KEY, None)
+
+
+def _get_mobile_capture_session(request):
+    session_id = request.session.get(MOBILE_CAPTURE_SESSION_KEY)
+    if not session_id:
+        return None
+    scan_session = _filter_by_house(
+        BonDeCommande.objects.filter(
+            pk=session_id,
+            is_scan_session=True,
+            status=BonStatus.DRAFT,
+        ).select_related("budget_year", "sub_budget", "created_by"),
+        request.user,
+    ).first()
+    if scan_session is None:
+        _clear_mobile_capture_session(request)
+    return scan_session
+
+
+def _receipt_has_mobile_signature_pair(extracted_fields) -> bool:
+    signature_pairs = (
+        (
+            _first_non_empty(
+                extracted_fields.final_member_name,
+                extracted_fields.member_name_candidate,
+            ),
+            _first_non_empty(
+                extracted_fields.final_apartment_number,
+                extracted_fields.apartment_number_candidate,
+            ),
+        ),
+        (
+            _first_non_empty(
+                extracted_fields.final_expense_member_name,
+                extracted_fields.expense_member_name_candidate,
+            ),
+            _first_non_empty(
+                extracted_fields.final_expense_apartment,
+                extracted_fields.expense_apartment_candidate,
+            ),
+        ),
+        (
+            _first_non_empty(
+                extracted_fields.final_validator_member_name,
+                extracted_fields.validator_member_name_candidate,
+            ),
+            _first_non_empty(
+                extracted_fields.final_validator_apartment,
+                extracted_fields.validator_apartment_candidate,
+            ),
+        ),
+    )
+    return any(name and apartment for name, apartment in signature_pairs)
+
+
+def _mobile_capture_signature_issues(receipts) -> list[str]:
+    signed_bc_numbers = set()
+    extracted_map = {}
+
+    for receipt in receipts:
+        try:
+            extracted_fields = receipt.extracted_fields
+        except ReceiptExtractedFields.DoesNotExist:
+            continue
+        extracted_map[receipt.pk] = extracted_fields
+        document_type = _first_non_empty(
+            extracted_fields.final_document_type,
+            extracted_fields.document_type_candidate,
+            "receipt",
+        )
+        if (
+            document_type == "paper_bc"
+            and _receipt_has_mobile_signature_pair(extracted_fields)
+        ):
+            bc_number = _first_non_empty(
+                extracted_fields.final_bc_number,
+                extracted_fields.bc_number_candidate,
+            )
+            if bc_number:
+                signed_bc_numbers.add(bc_number)
+
+    issues: list[str] = []
+    for receipt in receipts:
+        extracted_fields = extracted_map.get(receipt.pk)
+        if extracted_fields is None:
+            issues.append(
+                f"« {receipt.original_filename} » n'a pas pu être lu automatiquement. "
+                "La signature avec numéro d'appartement est obligatoire."
+            )
+            continue
+
+        document_type = _first_non_empty(
+            extracted_fields.final_document_type,
+            extracted_fields.document_type_candidate,
+            "receipt",
+        )
+        if document_type == "invoice":
+            associated_bc_number = _first_non_empty(
+                extracted_fields.final_associated_bc_number,
+                extracted_fields.associated_bc_number_candidate,
+            )
+            if associated_bc_number and associated_bc_number in signed_bc_numbers:
+                continue
+            issues.append(
+                f"« {receipt.original_filename} » est une facture sans bon de commande "
+                "papier signé avec numéro d'appartement."
+            )
+            continue
+
+        if _receipt_has_mobile_signature_pair(extracted_fields):
+            continue
+
+        issues.append(
+            f"« {receipt.original_filename} » doit contenir une signature lisible "
+            "avec numéro d'appartement."
+        )
+    return issues
 
 
 def _normalize_name(name: str) -> str:
@@ -1564,46 +1705,20 @@ class ReceiptUploadWizardView(TreasurerRequiredMixin, FormView):
             messages.error(self.request, "Veuillez sélectionner au moins un fichier.")
             return self.form_invalid(form)
 
-        from budget.models import SubBudget
-        default_sub = SubBudget.objects.filter(
-            budget_year=budget_year, is_active=True
-        ).order_by("sort_order", "trace_code").first()
-
-        # Create a temporary DRAFT bon to hold all uploaded receipts
-        temp_bon = BonDeCommande()
-        temp_bon.house = house
-        temp_bon.budget_year = budget_year
-        temp_bon.number = generate_bon_number(house, budget_year.year)
-        temp_bon.purchase_date = timezone.now().date()
-        temp_bon.short_description = "(en cours de création)"
-        temp_bon.total = 0
-        temp_bon.sub_budget = default_sub
-        # Use user's own member or a placeholder
-        if user.member_id:
-            temp_bon.purchaser_member = user.member
-        else:
-            from members.models import Member
-            temp_bon.purchaser_member = Member.objects.filter(is_active=True).first()
-        temp_bon.created_by = user
-        temp_bon.status = BonStatus.DRAFT
-        temp_bon.is_scan_session = True
-        temp_bon.entered_date = timezone.now().date()
-        super(BonDeCommande, temp_bon).save()
+        try:
+            temp_bon = create_scan_session(user=user, budget_year=budget_year)
+        except ValueError as exc:
+            messages.error(self.request, str(exc))
+            return self.form_invalid(form)
 
         from .ocr_service import ReceiptOcrService
         ocr_available = ReceiptOcrService.is_available()
         errors = []
-        receipt_objs = []
-
-        for f in files:
-            receipt = ReceiptFile.objects.create(
-                bon_de_commande=temp_bon,
-                file=f,
-                original_filename=f.name,
-                content_type=getattr(f, "content_type", ""),
-                uploaded_by=user,
-            )
-            receipt_objs.append(receipt)
+        receipt_objs = add_receipts_to_scan_session(
+            temp_bon,
+            files,
+            uploaded_by=user,
+        )
 
         # Single batch API call for all receipts
         if ocr_available and receipt_objs:
@@ -1630,6 +1745,177 @@ class ReceiptUploadWizardView(TreasurerRequiredMixin, FormView):
         )
         # Redirect to review first receipt
         return redirect(reverse("bons:review", kwargs={"pk": temp_bon.pk}) + "?idx=0")
+
+
+class MobileCaptureHomeView(TreasurerRequiredMixin, FormView):
+    """Handheld-first capture flow that accumulates one photo at a time."""
+
+    template_name = "bons/mobile_capture.html"
+    form_class = MobileReceiptCaptureForm
+
+    def dispatch(self, request, *args, **kwargs):
+        apply_site_mode_preference(request)
+        if str(request.GET.get("site_mode") or "").strip().lower() == "desktop":
+            return redirect("home")
+        return super().dispatch(request, *args, **kwargs)
+
+    def get_form_kwargs(self):
+        kwargs = super().get_form_kwargs()
+        scan_session = _get_mobile_capture_session(self.request)
+        kwargs["house"] = self.request.user.house
+        kwargs["locked_budget_year"] = (
+            scan_session.budget_year if scan_session else None
+        )
+        return kwargs
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        scan_session = _get_mobile_capture_session(self.request)
+        from .ocr_service import ReceiptOcrService
+
+        captured_receipts = []
+        if scan_session is not None:
+            captured_receipts = list(
+                scan_session.active_receipt_files.order_by("created_at", "pk")
+            )
+
+        context.update(
+            {
+                "compact_handheld_mode": True,
+                "hide_site_nav": True,
+                "scan_session": scan_session,
+                "captured_receipts": captured_receipts,
+                "captured_count": len(captured_receipts),
+                "ocr_available": ReceiptOcrService.is_available(),
+                "has_budget_year_choices": bool(
+                    context["form"].fields["budget_year"].queryset.exists()
+                ),
+                "default_budget_year": default_budget_year_for_house(
+                    self.request.user.house
+                ),
+                "full_site_url": f"{reverse('home')}?site_mode=desktop",
+            }
+        )
+        context["can_add_mobile_photo"] = context["ocr_available"] and (
+            context["has_budget_year_choices"] or scan_session is not None
+        )
+        return context
+
+    def form_valid(self, form):
+        from .ocr_service import ReceiptOcrService
+
+        if not ReceiptOcrService.is_available():
+            messages.error(
+                self.request,
+                "La capture mobile exige l'analyse OCR. Ouvrez le site complet si vous devez téléverser sans GPT.",
+            )
+            return redirect("bons:mobile-capture")
+
+        scan_session = _get_mobile_capture_session(self.request)
+        budget_year = scan_session.budget_year if scan_session else form.cleaned_data["budget_year"]
+        if budget_year is None:
+            messages.error(
+                self.request,
+                "Aucune année budgétaire active n'est disponible pour cette maison.",
+            )
+            return redirect("bons:mobile-capture")
+
+        if scan_session is None:
+            try:
+                scan_session = create_scan_session(
+                    user=self.request.user,
+                    budget_year=budget_year,
+                )
+            except ValueError as exc:
+                messages.error(self.request, str(exc))
+                return redirect("bons:mobile-capture")
+            _set_mobile_capture_session(self.request, scan_session)
+
+        add_receipts_to_scan_session(
+            scan_session,
+            [form.cleaned_data["photo"]],
+            uploaded_by=self.request.user,
+        )
+        messages.success(
+            self.request,
+            "Photo ajoutée. Voulez-vous en prendre une autre ou lancer l'analyse ?",
+        )
+        return redirect("bons:mobile-capture")
+
+
+class MobileCaptureFinalizeView(TreasurerRequiredMixin, View):
+    """Run the existing OCR review pipeline once handheld capture is complete."""
+
+    def post(self, request):
+        scan_session = _get_mobile_capture_session(request)
+        if scan_session is None:
+            messages.error(request, "Aucune capture mobile en cours.")
+            return redirect("bons:mobile-capture")
+
+        receipts = list(scan_session.active_receipt_files.order_by("created_at", "pk"))
+        if not receipts:
+            messages.error(request, "Prenez au moins une photo avant de continuer.")
+            return redirect("bons:mobile-capture")
+
+        from .ocr_service import ReceiptOcrService
+
+        if not ReceiptOcrService.is_available():
+            messages.error(
+                request,
+                "La capture mobile ne peut pas continuer sans analyse OCR.",
+            )
+            return redirect("bons:mobile-capture")
+
+        _, error_message = ReceiptOcrService.process_receipts_batch(
+            receipts,
+            house=request.user.house,
+        )
+        if error_message:
+            messages.warning(request, error_message)
+
+        issues = _mobile_capture_signature_issues(receipts)
+        if issues:
+            BonDeCommande.objects.filter(pk=scan_session.pk).update(
+                status=BonStatus.DRAFT,
+            )
+            messages.error(
+                request,
+                "Traitement refusé: chaque capture doit permettre d'identifier la signature requise avec un numéro d'appartement, ou être liée à un BC papier signé.",
+            )
+            for issue in issues:
+                messages.error(request, issue)
+            return redirect("bons:mobile-capture")
+
+        BonDeCommande.objects.filter(pk=scan_session.pk).update(
+            status=BonStatus.READY_FOR_REVIEW,
+        )
+        _clear_mobile_capture_session(request)
+        messages.success(
+            request,
+            f"{len(receipts)} photo(s) prêtes. Vérifiez maintenant les données extraites.",
+        )
+        return redirect(reverse("bons:review", kwargs={"pk": scan_session.pk}) + "?idx=0")
+
+
+class MobileCaptureResetView(TreasurerRequiredMixin, View):
+    """Discard the current handheld capture session while preserving an audit trail."""
+
+    def post(self, request):
+        scan_session = _get_mobile_capture_session(request)
+        if scan_session is not None:
+            archive_reason = (
+                f"Capture mobile abandonnée par {request.user.get_username()}"
+            )
+            for receipt in scan_session.active_receipt_files.order_by("created_at", "pk"):
+                receipt.archive(reason=archive_reason)
+            BonDeCommande.objects.filter(pk=scan_session.pk).update(
+                status=BonStatus.VOID,
+                void_reason="Capture mobile abandonnée",
+                voided_at=timezone.now(),
+            )
+            messages.info(request, "La capture mobile a été réinitialisée.")
+        _clear_mobile_capture_session(request)
+        return redirect("bons:mobile-capture")
 
 
 # ---------------------------------------------------------------------------

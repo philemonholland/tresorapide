@@ -7,6 +7,7 @@ from django.db import connections, models
 from django.db.models import Count, Q
 from django.db.utils import DatabaseError
 from django.http import HttpResponse
+from django.shortcuts import redirect
 from django.urls import reverse
 from django.views.generic import TemplateView
 from rest_framework import status
@@ -17,12 +18,23 @@ from rest_framework.views import APIView
 
 from accounts.access import AdminRequiredMixin, user_has_minimum_role
 from accounts.models import User
+from core.device import (
+    apply_site_mode_preference,
+    handheld_capture_enabled_for_request,
+    handheld_capture_enabled_for_user,
+)
 
 
 class HomeView(TemplateView):
     """Render the landing page or authenticated transparency dashboard."""
 
     template_name = "core/home.html"
+
+    def get(self, request, *args: object, **kwargs: object):
+        apply_site_mode_preference(request)
+        if handheld_capture_enabled_for_request(request):
+            return redirect("bons:mobile-capture")
+        return super().get(request, *args, **kwargs)
 
     def get_context_data(self, **kwargs: object) -> dict[str, object]:
         context = super().get_context_data(**kwargs)
@@ -32,6 +44,7 @@ class HomeView(TemplateView):
             'docker compose --env-file ".env" exec web python manage.py createsuperuser'
         )
         context["show_dashboard"] = user_has_minimum_role(user, User.Role.VIEWER)
+        context["show_mobile_capture_link"] = handheld_capture_enabled_for_user(user)
         if not context["show_dashboard"]:
             return context
 

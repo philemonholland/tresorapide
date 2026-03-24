@@ -1,0 +1,151 @@
+{% extends "base.html" %}
+
+{% block title %}Capture mobile | Tresorapide{% endblock %}
+
+{% block content %}
+    <section class="card mobile-capture-shell">
+        <div class="section-heading">
+            <div>
+                <h1>Capture mobile</h1>
+                <p class="text-muted">
+                    Prenez une photo d'un reçu ou d'un bon de commande, puis ajoutez-en d'autres au besoin.
+                    Quand vous avez terminé, nous lancerons le même flux OCR et de révision que sur le site web.
+                </p>
+            </div>
+            <a class="button-link" href="{{ full_site_url }}">Voir le site complet</a>
+        </div>
+
+        {% if not ocr_available %}
+            <div class="message warning">
+                ⚠️ L'analyse OCR est requise pour la capture mobile.
+                Ouvrez le site complet si vous devez téléverser sans validation GPT.
+            </div>
+        {% elif not has_budget_year_choices and not scan_session %}
+            <div class="message warning">
+                ⚠️ Aucune année budgétaire active n'est disponible pour cette maison.
+            </div>
+        {% endif %}
+
+        <div class="mobile-capture-summary">
+            {% if scan_session %}
+                <div class="mini-stat">
+                    <span class="stat-value">{{ captured_count }}</span>
+                    <span class="stat-label">Photo{{ captured_count|pluralize:"s" }} capturée{{ captured_count|pluralize:"s" }}</span>
+                </div>
+                <div class="mini-stat">
+                    <span class="stat-value">{{ scan_session.budget_year.label }}</span>
+                    <span class="stat-label">Année budgétaire</span>
+                </div>
+            {% elif default_budget_year %}
+                <div class="mini-stat">
+                    <span class="stat-value">{{ default_budget_year.label }}</span>
+                    <span class="stat-label">Année par défaut</span>
+                </div>
+            {% endif %}
+        </div>
+
+        <div class="message info">
+            📌 Signature avec numéro d'appartement obligatoire. Les factures seules seront refusées
+            si elles ne sont pas accompagnées d'un bon de commande papier signé dans la même capture.
+        </div>
+
+        <form method="post" enctype="multipart/form-data" class="stack mobile-capture-form" id="mobile-capture-form">
+            {% csrf_token %}
+            {{ form.non_field_errors }}
+            {% if scan_session %}
+                {{ form.budget_year }}
+                <p class="text-muted">
+                    Session en cours pour l'année <strong>{{ scan_session.budget_year.label }}</strong>.
+                </p>
+            {% else %}
+                <div class="form-group {% if form.budget_year.errors %}has-error{% endif %}">
+                    <label for="{{ form.budget_year.id_for_label }}">
+                        {{ form.budget_year.label }}{% if form.budget_year.field.required %} <span class="required">*</span>{% endif %}
+                    </label>
+                    {{ form.budget_year }}
+                    {% for error in form.budget_year.errors %}<p class="error-text">{{ error }}</p>{% endfor %}
+                </div>
+            {% endif %}
+
+            <div class="form-group {% if form.photo.errors %}has-error{% endif %}">
+                <label for="{{ form.photo.id_for_label }}">{{ form.photo.label }}</label>
+                {{ form.photo }}
+                {% if form.photo.help_text %}<p class="help-text">{{ form.photo.help_text }}</p>{% endif %}
+                {% for error in form.photo.errors %}<p class="error-text">{{ error }}</p>{% endfor %}
+            </div>
+
+            <div class="mobile-capture-toolbar">
+                <button
+                    type="button"
+                    class="btn btn-primary btn-lg mobile-capture-trigger"
+                    {% if not can_add_mobile_photo %}disabled{% endif %}
+                >
+                    📷 Prendre une photo
+                </button>
+            </div>
+        </form>
+
+        {% if captured_count %}
+            <div class="mobile-capture-toolbar">
+                <form method="post" action="{% url 'bons:mobile-capture-finalize' %}">
+                    {% csrf_token %}
+                    <button type="submit" class="btn btn-success btn-lg">J'ai terminé</button>
+                </form>
+                <form method="post" action="{% url 'bons:mobile-capture-reset' %}">
+                    {% csrf_token %}
+                    <button type="submit" class="button-link">Recommencer</button>
+                </form>
+            </div>
+        {% endif %}
+    </section>
+
+    {% if captured_receipts %}
+        <section class="card">
+            <div class="section-heading">
+                <div>
+                    <h2>Photos en attente</h2>
+                    <p class="text-muted">Après chaque photo, vous pouvez en prendre une autre ou lancer l'analyse.</p>
+                </div>
+            </div>
+
+            <div class="mobile-photo-list">
+                {% for receipt in captured_receipts %}
+                    <article class="mobile-photo-card">
+                        <div class="mobile-photo-thumb">
+                            {% if receipt.content_type == "application/pdf" %}
+                                <span class="mobile-photo-fallback">📄</span>
+                            {% else %}
+                                <img src="{{ receipt.file.url }}" alt="{{ receipt.original_filename }}">
+                            {% endif %}
+                        </div>
+                        <div class="mobile-photo-meta">
+                            <h3>{{ receipt.original_filename }}</h3>
+                            <p class="text-muted">
+                                Ajoutée le {{ receipt.created_at|date:"Y-m-d H:i" }}
+                            </p>
+                        </div>
+                    </article>
+                {% endfor %}
+            </div>
+        </section>
+    {% endif %}
+
+    <script>
+    document.addEventListener('DOMContentLoaded', function() {
+        var fileInput = document.querySelector('#mobile-capture-form input[type="file"]');
+        var trigger = document.querySelector('.mobile-capture-trigger');
+        var form = document.getElementById('mobile-capture-form');
+        if (!fileInput || !trigger || !form) return;
+
+        fileInput.classList.add('mobile-camera-input');
+        trigger.addEventListener('click', function() {
+            fileInput.click();
+        });
+        fileInput.addEventListener('change', function() {
+            if (fileInput.files && fileInput.files.length > 0) {
+                form.submit();
+            }
+        });
+    });
+    </script>
+{% endblock %}

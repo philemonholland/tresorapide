@@ -106,6 +106,9 @@ class BonDeCommandeForm(forms.ModelForm):
 ALLOWED_RECEIPT_TYPES = {
     "application/pdf", "image/jpeg", "image/png",
 }
+ALLOWED_MOBILE_CAPTURE_TYPES = {
+    "image/jpeg", "image/png",
+}
 MAX_RECEIPT_SIZE = 10 * 1024 * 1024  # 10 MB
 
 
@@ -121,6 +124,25 @@ def _validate_receipt_file(f):
             "Seuls les PDF, JPEG et PNG sont acceptés."
         )
     return f
+
+
+def _validate_mobile_capture_file(f):
+    """Server-side validation for handheld capture photos."""
+    _validate_receipt_file(f)
+    if f.content_type not in ALLOWED_MOBILE_CAPTURE_TYPES:
+        raise forms.ValidationError(
+            "La capture mobile accepte seulement les photos JPEG ou PNG."
+        )
+    return f
+
+
+def _budget_year_queryset(house):
+    if house:
+        return BudgetYear.objects.filter(
+            house=house,
+            is_active=True,
+        ).order_by("-year")
+    return BudgetYear.objects.filter(is_active=True).order_by("-year")
 
 
 class ReceiptUploadForm(forms.Form):
@@ -188,14 +210,8 @@ class MultiReceiptUploadForm(forms.Form):
         widget.attrs["multiple"] = True
         widget.attrs["accept"] = ".pdf,.jpg,.jpeg,.png"
         widget.allow_multiple_selected = True
-        if house:
-            qs = BudgetYear.objects.filter(
-                house=house, is_active=True
-            ).order_by("-year")
-            self.fields["budget_year"].queryset = qs
-        else:
-            qs = BudgetYear.objects.filter(is_active=True).order_by("-year")
-            self.fields["budget_year"].queryset = qs
+        qs = _budget_year_queryset(house)
+        self.fields["budget_year"].queryset = qs
         # Pre-select current year budget
         from datetime import date
         current_year_by = qs.filter(year=date.today().year).first()
@@ -207,6 +223,45 @@ class MultiReceiptUploadForm(forms.Form):
         for f in files:
             _validate_receipt_file(f)
         return files
+
+
+class MobileReceiptCaptureForm(forms.Form):
+    """Capture one handheld photo at a time into a scan session."""
+
+    budget_year = forms.ModelChoiceField(
+        queryset=BudgetYear.objects.none(),
+        label="Année budgétaire",
+        empty_label="— Sélectionnez —",
+    )
+    photo = forms.FileField(
+        label="Photo",
+        help_text=(
+            "Photo JPEG ou PNG. La signature avec numéro d'appartement doit être lisible."
+        ),
+        widget=forms.FileInput(
+            attrs={
+                "accept": "image/jpeg,image/png,image/*",
+                "capture": "environment",
+            }
+        ),
+        required=True,
+    )
+
+    def __init__(self, *args, house=None, locked_budget_year=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        qs = _budget_year_queryset(house)
+        self.fields["budget_year"].queryset = qs
+        if locked_budget_year is not None:
+            self.initial["budget_year"] = locked_budget_year.pk
+            self.fields["budget_year"].widget = forms.HiddenInput()
+        else:
+            current_year = timezone.now().year
+            current_year_by = qs.filter(year=current_year).first()
+            if current_year_by and not self.initial.get("budget_year"):
+                self.initial["budget_year"] = current_year_by.pk
+
+    def clean_photo(self):
+        return _validate_mobile_capture_file(self.cleaned_data["photo"])
 
 
 class OcrReviewForm(forms.Form):

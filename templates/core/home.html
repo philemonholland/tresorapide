@@ -23,6 +23,12 @@
 
         {# ── Quick action buttons ── #}
         <div class="action-grid">
+            {% if show_mobile_capture_link %}
+            <a class="action-card" href="{% url 'bons:mobile-capture' %}?site_mode=mobile">
+                <span class="action-icon">📷</span>
+                Capture mobile
+            </a>
+            {% endif %}
             <a class="action-card" href="{% url 'bons:create' %}">
                 <span class="action-icon">📝</span>
                 Nouveau bon de commande

@@ -64,21 +64,20 @@
         <form method="post" class="stack">
             {% csrf_token %}
 
-            <div style="display: flex; gap: 2rem; flex-wrap: wrap;">
+            <div class="review-layout">
                 <!-- Receipt image -->
-                <div style="flex: 1; min-width: 250px;">
+                <div class="review-preview-panel">
                     {% if receipt.content_type == "application/pdf" %}
                         <p>
                             <a href="{{ receipt.file.url }}" target="_blank" class="btn">📄 Ouvrir le PDF</a>
                         </p>
                     {% else %}
-                        <img src="{{ receipt.file.url }}" alt="{{ receipt.original_filename }}"
-                             style="max-width: 100%; max-height: 600px; border: 1px solid #ccc; border-radius: 4px;">
+                        <img src="{{ receipt.file.url }}" alt="{{ receipt.original_filename }}" class="review-preview-image">
                     {% endif %}
                 </div>
 
                 <!-- Extracted data form -->
-                <div style="flex: 1; min-width: 300px;">
+                <div class="review-form-panel">
                     {{ form.non_field_errors }}
 
                     {# Hidden document_type field #}
@@ -134,7 +133,7 @@
                         </div>
 
                         <hr style="margin: 1rem 0; border-top: 1px solid #ddd;">
-                        <div style="display:flex; justify-content:space-between; align-items:center; gap:1rem; flex-wrap:wrap;">
+                        <div class="review-inline-header">
                             <p style="font-weight: bold; margin-bottom: 0.5rem;">Validé par</p>
                             {% if form.validator_member_name.value or form.validator_apartment.value or form.validator_member.value or signer_roles_ambiguous %}
                             <button type="button" id="swap-signers-button" class="btn">
@@ -307,8 +306,9 @@
                 </div>
             </div>
 
-            <div style="display: flex; justify-content: flex-end; margin-top: 1.5rem; padding-top: 1rem; border-top: 1px solid #eee;">
-                <button type="submit" class="btn btn-primary">
+            <div class="review-navigation review-navigation-single">
+                <span></span>
+                <button type="submit" class="btn btn-primary btn-lg">
                     ✓ Confirmer les données
                 </button>
             </div>

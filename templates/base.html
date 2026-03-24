@@ -8,17 +8,18 @@
     <link rel="stylesheet" href="{% static 'css/site.css' %}?v=3">
     {% block extra_head %}{% endblock %}
 </head>
-<body>
-    <header class="site-header">
-        <div class="container header-layout">
-            <div>
-                <a class="brand" href="{% url 'home' %}">Tresorapide</a>
-                <p class="tagline">Espace trésorier — coopérative d'habitation</p>
-            </div>
-            <div class="header-actions">
-                <nav class="site-nav">
-                    <a href="{% url 'home' %}">Tableau de bord</a>
-                    <a href="{% url 'budget:year-list' %}">Budget</a>
+    <body class="{% if compact_handheld_mode %}handheld-mode{% endif %}">
+        <header class="site-header{% if compact_handheld_mode %} site-header-compact{% endif %}">
+            <div class="container header-layout">
+                <div>
+                    <a class="brand" href="{% url 'home' %}">Tresorapide</a>
+                    <p class="tagline">Espace trésorier — coopérative d'habitation</p>
+                </div>
+                <div class="header-actions">
+                    {% if not hide_site_nav %}
+                    <nav class="site-nav">
+                        <a href="{% url 'home' %}">Tableau de bord</a>
+                        <a href="{% url 'budget:year-list' %}">Budget</a>
                     {% if request.user.is_authenticated and request.user.can_manage_financials %}
                         <a href="{% url 'budget:grand-livre-list' %}">Grand Livre</a>
                     {% endif %}
@@ -36,9 +37,10 @@
                         {% if request.user.is_app_admin or request.user.is_staff or request.user.is_superuser %}
                             <a href="{% url 'admin-setup' %}">Admin</a>
                         {% endif %}
+                        {% endif %}
+                    </nav>
                     {% endif %}
-                </nav>
-                <div class="user-nav">
+                    <div class="user-nav">
                     {% if request.user.is_authenticated %}
                         <span class="nav-text">
                             {{ request.user.get_username }} ({{ request.user.get_role_display|default:"Utilisateur" }})
