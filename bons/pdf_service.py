@@ -28,6 +28,8 @@ from reportlab.platypus import (
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
 
+from .ai_confidence import build_receipt_confidence_summary_rows
+
 
 COOP_NAME = "COOPÉRATIVE D'HABITATION\nDES CANTONS DE L'EST"
 COOP_ADDRESS = "548, rue Dufferin, Sherbrooke (Québec) J1H 4N1"
@@ -68,6 +70,15 @@ def _duplicate_flags_for_bon(bon):
             "suspected_duplicate_receipt__bon_de_commande",
         )
     )
+
+
+def _bon_ai_confidence_summaries(bon):
+    summaries = []
+    for receipt in bon.active_receipt_files.order_by("created_at", "pk"):
+        rows = build_receipt_confidence_summary_rows(receipt)
+        if rows:
+            summaries.append((receipt, rows))
+    return summaries
 
 
 def _pil_image_to_png_bytes(image_obj) -> bytes:
@@ -132,7 +143,7 @@ def _scaled_xlsx_image(image_bytes, max_width=320, max_height=420):
     return image
 
 
-def generate_bon_pdf(bon) -> bytes:
+def generate_bon_pdf(bon, *, include_ai_confidence: bool = False) -> bytes:
     """Generate a PDF for a BonDeCommande matching the paper form layout."""
     buf = io.BytesIO()
     doc = SimpleDocTemplate(
@@ -509,11 +520,58 @@ def generate_bon_pdf(bon) -> bytes:
                 elements.append(Spacer(1, 0.2 * cm))
                 elements.append(_scaled_reportlab_image(preview_bytes, 17 * cm, 22 * cm))
 
+    if include_ai_confidence:
+        confidence_summaries = _bon_ai_confidence_summaries(bon)
+        for receipt, rows in confidence_summaries:
+            elements.append(PageBreak())
+            elements.append(Paragraph(
+                f"CONFIANCE IA — {receipt.original_filename}",
+                style_title,
+            ))
+            elements.append(Spacer(1, 0.2 * cm))
+            elements.append(Paragraph(
+                "<font size='8'>Les scores 0-9 indiquent le niveau de confiance de l'IA. "
+                "NA signifie que l'information n'a pas ete trouvee sur le document.</font>",
+                style_small,
+            ))
+            elements.append(Spacer(1, 0.3 * cm))
+
+            confidence_rows = [[
+                Paragraph("<b>Champ</b>", style_bold),
+                Paragraph("<b>Valeur</b>", style_bold),
+                Paragraph("<b>Confiance IA</b>", style_bold),
+            ]]
+            for row in rows:
+                confidence_rows.append(
+                    [
+                        Paragraph(row["label"], style_normal),
+                        Paragraph(str(row["value"]), style_normal),
+                        Paragraph(
+                            f'{row["confidence"]["display"]} - {row["confidence"]["tooltip"]}',
+                            style_normal,
+                        ),
+                    ]
+                )
+
+            confidence_table = Table(
+                confidence_rows,
+                colWidths=[5.5 * cm, 7.5 * cm, 5 * cm],
+            )
+            confidence_table.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#d8edff")),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("TOPPADDING", (0, 0), (-1, -1), 4),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+            ]))
+            elements.append(confidence_table)
+
     doc.build(elements)
     return buf.getvalue()
 
 
-def generate_bon_xlsx(bon) -> bytes:
+def generate_bon_xlsx(bon, *, include_ai_confidence: bool = False) -> bytes:
     """Generate an XLSX file for a BonDeCommande."""
     from openpyxl import Workbook
     from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
@@ -745,6 +803,51 @@ def generate_bon_xlsx(bon) -> bytes:
                 for visual_row in range(image_anchor_row, image_anchor_row + 24):
                     dup_ws.row_dimensions[visual_row].height = 24
                 row = image_anchor_row + 25
+
+    if include_ai_confidence:
+        confidence_summaries = _bon_ai_confidence_summaries(bon)
+        if confidence_summaries:
+            conf_ws = wb.create_sheet("Confiance IA")
+            conf_ws.column_dimensions["A"].width = 28
+            conf_ws.column_dimensions["B"].width = 28
+            conf_ws.column_dimensions["C"].width = 12
+            conf_ws.column_dimensions["D"].width = 40
+
+            conf_ws.merge_cells("A1:D1")
+            conf_ws["A1"] = f"BC {bon.number} - Confiance IA"
+            conf_ws["A1"].font = title_font
+            conf_ws["A1"].alignment = Alignment(horizontal="center")
+
+            conf_row = 3
+            for receipt, rows in confidence_summaries:
+                conf_ws.merge_cells(start_row=conf_row, start_column=1, end_row=conf_row, end_column=4)
+                conf_ws.cell(conf_row, 1, receipt.original_filename).font = bold
+                conf_row += 1
+
+                headers = ["Champ", "Valeur", "Score", "Signification"]
+                for col, header in enumerate(headers, 1):
+                    cell = conf_ws.cell(row=conf_row, column=col, value=header)
+                    cell.font = header_font
+                    cell.fill = header_fill
+                    cell.border = border_thin
+                conf_row += 1
+
+                for summary_row in rows:
+                    conf_ws.cell(row=conf_row, column=1, value=summary_row["label"]).border = border_thin
+                    conf_ws.cell(row=conf_row, column=2, value=str(summary_row["value"])).border = border_thin
+                    conf_ws.cell(
+                        row=conf_row,
+                        column=3,
+                        value=summary_row["confidence"]["display"],
+                    ).border = border_thin
+                    conf_ws.cell(
+                        row=conf_row,
+                        column=4,
+                        value=summary_row["confidence"]["tooltip"],
+                    ).border = border_thin
+                    conf_row += 1
+
+                conf_row += 1
 
     buf = io.BytesIO()
     wb.save(buf)

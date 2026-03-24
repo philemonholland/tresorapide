@@ -18,13 +18,64 @@ from .models import (
 )
 from .forms import (
     BonDeCommandeForm, ReceiptUploadForm, BonValidateForm,
-    MultiReceiptUploadForm, OcrReviewForm, BonSearchForm,
+    BonExportConfigureForm, MultiReceiptUploadForm, OcrReviewForm, BonSearchForm,
+)
+from .ai_confidence import (
+    build_receipt_confidence_summary_rows,
+    build_receipt_review_confidence_badges,
+    build_receipt_review_confidence_scores,
 )
 from .services import generate_bon_number
 
 MONEY_EPSILON = Decimal("0.01")
 STANDARD_TPS_RATE = Decimal("0.05")
 STANDARD_TVQ_RATE = Decimal("0.09975")
+
+REVIEW_CONFIDENCE_KEYS = (
+    "document_type",
+    "bc_number",
+    "associated_bc_number",
+    "supplier_name",
+    "supplier_address",
+    "reimburse_to",
+    "expense_member_name",
+    "expense_apartment",
+    "validator_member_name",
+    "validator_apartment",
+    "signer_roles_ambiguous",
+    "member_name_raw",
+    "apartment_number",
+    "merchant_name",
+    "purchase_date",
+    "subtotal",
+    "tps",
+    "tvq",
+    "untaxed_extra_amount",
+    "total",
+    "summary",
+)
+
+
+def _build_review_confidence_values(source: dict) -> dict:
+    return {key: source.get(key) for key in REVIEW_CONFIDENCE_KEYS}
+
+
+def _receipt_confidence_summaries(receipts) -> list[dict]:
+    summaries = []
+    for receipt in receipts:
+        rows = build_receipt_confidence_summary_rows(receipt)
+        if rows:
+            summaries.append(
+                {
+                    "receipt": receipt,
+                    "rows": rows,
+                }
+            )
+    return summaries
+
+
+def _query_param_is_true(value) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _normalize_name(name: str) -> str:
@@ -141,14 +192,17 @@ class BonDetailView(RoleRequiredMixin, DetailView):
 
         ctx = super().get_context_data(**kwargs)
         bon = self.object
-        ctx["receipts"] = bon.active_receipt_files
+        receipts = list(bon.active_receipt_files.order_by("created_at", "pk"))
+        ctx["receipts"] = receipts
         ctx["can_manage"] = (
             self.request.user.is_authenticated
             and self.request.user.can_manage_financials
         )
         ctx["upload_form"] = ReceiptUploadForm()
         ctx["export_ready"] = _bon_is_export_ready(bon)
+        ctx["export_config_url"] = reverse("bons:export-configure", kwargs={"pk": bon.pk})
         ctx["signer_roles_ambiguous"] = bon.signer_roles_ambiguous
+        ctx["receipt_confidence_summaries"] = _receipt_confidence_summaries(receipts)
 
         # Duplicate flags for any receipt on this bon
         receipt_ids = list(bon.active_receipt_files.values_list("pk", flat=True))
@@ -360,6 +414,8 @@ class BonValidateView(TreasurerRequiredMixin, FormView):
     def get_context_data(self, **kwargs):
         ctx = super().get_context_data(**kwargs)
         ctx["bon"] = self.bon
+        receipts = list(self.bon.active_receipt_files.order_by("created_at", "pk"))
+        ctx["receipt_confidence_summaries"] = _receipt_confidence_summaries(receipts)
         # Show how many bons still need validation in the same house/year
         pending_count = (
             BonDeCommande.objects
@@ -513,7 +569,7 @@ class ReceiptReviewSingleView(TreasurerRequiredMixin, View):
             ef = receipt.extracted_fields
             doc_type = ef.final_document_type or ef.document_type_candidate or "receipt"
             apt_code = ef.final_apartment_number or ef.apartment_number_candidate
-            member_name_raw = ef.final_member_name or ef.member_name_candidate
+            member_name_raw = ef.member_name_candidate
 
             apartment, member = _resolve_member_assignment(
                 bon.house, apt_code, member_name_raw,
@@ -603,6 +659,11 @@ class ReceiptReviewSingleView(TreasurerRequiredMixin, View):
             "validator_is_external": bool(initial.get("validator_is_external")),
             "document_type": doc_type,
             "mismatch_warning": mismatch_warning,
+            "review_field_confidences": build_receipt_review_confidence_badges(
+                receipt,
+                _build_review_confidence_values(initial),
+                document_type=doc_type,
+            ),
             "signer_roles_ambiguous": bool(initial.get("signer_roles_ambiguous")),
         }
 
@@ -636,6 +697,14 @@ class ReceiptReviewSingleView(TreasurerRequiredMixin, View):
             messages.error(request, "Veuillez corriger les erreurs ci-dessous.")
             ctx = self._get_context(request, bon, receipt)
             ctx["form"] = form
+            ctx["review_field_confidences"] = build_receipt_review_confidence_badges(
+                receipt,
+                {
+                    key: form.data.get(f"{prefix}-{key}")
+                    for key in REVIEW_CONFIDENCE_KEYS
+                },
+                document_type=form.data.get(f"{prefix}-document_type", ctx.get("document_type", "receipt")),
+            )
             return TemplateResponse(request, self.template_name, ctx)
 
         # Save confirmed fields
@@ -678,6 +747,35 @@ class ReceiptReviewSingleView(TreasurerRequiredMixin, View):
         ef.sub_budget = form.cleaned_data.get("sub_budget")
         ef.confirmed_by = request.user
         ef.confirmed_at = timezone.now()
+        ef.final_confidence_scores = build_receipt_review_confidence_scores(
+            receipt,
+            _build_review_confidence_values(
+                {
+                    "document_type": ef.final_document_type,
+                    "bc_number": ef.final_bc_number,
+                    "associated_bc_number": ef.final_associated_bc_number,
+                    "supplier_name": ef.final_supplier_name,
+                    "supplier_address": ef.final_supplier_address,
+                    "reimburse_to": ef.final_reimburse_to,
+                    "expense_member_name": ef.final_expense_member_name,
+                    "expense_apartment": ef.final_expense_apartment,
+                    "validator_member_name": ef.final_validator_member_name,
+                    "validator_apartment": ef.final_validator_apartment,
+                    "signer_roles_ambiguous": ef.signer_roles_ambiguous_final,
+                    "member_name_raw": ef.member_name_candidate,
+                    "apartment_number": ef.final_apartment_number,
+                    "merchant_name": ef.final_merchant,
+                    "purchase_date": ef.final_purchase_date,
+                    "subtotal": ef.final_subtotal,
+                    "tps": ef.final_tps,
+                    "tvq": ef.final_tvq,
+                    "untaxed_extra_amount": ef.final_untaxed_extra_amount,
+                    "total": ef.final_total,
+                    "summary": ef.final_summary,
+                }
+            ),
+            document_type=ef.final_document_type,
+        )
         ef.save()
 
         if receipt.ocr_status in (OcrStatus.EXTRACTED, OcrStatus.NOT_REQUESTED, OcrStatus.FAILED):
@@ -1573,7 +1671,7 @@ class OcrReviewView(TreasurerRequiredMixin, View):
                 initial.update(signer_initials)
 
             apt_code = ef.final_apartment_number or ef.apartment_number_candidate
-            member_name_raw = ef.final_member_name or ef.member_name_candidate
+            member_name_raw = ef.member_name_candidate
 
             # Only do member matching for receipts
             if doc_type == "receipt":
@@ -1732,6 +1830,35 @@ class OcrReviewView(TreasurerRequiredMixin, View):
         ef.sub_budget = form.cleaned_data.get("sub_budget")
         ef.confirmed_by = request.user
         ef.confirmed_at = timezone.now()
+        ef.final_confidence_scores = build_receipt_review_confidence_scores(
+            current,
+            _build_review_confidence_values(
+                {
+                    "document_type": ef.final_document_type,
+                    "bc_number": ef.final_bc_number,
+                    "associated_bc_number": ef.final_associated_bc_number,
+                    "supplier_name": ef.final_supplier_name,
+                    "supplier_address": ef.final_supplier_address,
+                    "reimburse_to": ef.final_reimburse_to,
+                    "expense_member_name": ef.final_expense_member_name,
+                    "expense_apartment": ef.final_expense_apartment,
+                    "validator_member_name": ef.final_validator_member_name,
+                    "validator_apartment": ef.final_validator_apartment,
+                    "signer_roles_ambiguous": ef.signer_roles_ambiguous_final,
+                    "member_name_raw": ef.member_name_candidate,
+                    "apartment_number": ef.final_apartment_number,
+                    "merchant_name": ef.final_merchant,
+                    "purchase_date": ef.final_purchase_date,
+                    "subtotal": ef.final_subtotal,
+                    "tps": ef.final_tps,
+                    "tvq": ef.final_tvq,
+                    "untaxed_extra_amount": ef.final_untaxed_extra_amount,
+                    "total": ef.final_total,
+                    "summary": ef.final_summary,
+                }
+            ),
+            document_type=ef.final_document_type,
+        )
         ef.save()
 
         # Auto-save merchant to Merchant table (dedup by name)
@@ -2185,6 +2312,13 @@ class OcrReviewView(TreasurerRequiredMixin, View):
 
     def _render(self, request, bon, receipt, form, idx, total, matched_member_name, name_mismatch=False, document_type="receipt", expense_member_mismatch=False, validator_member_mismatch=False, validator_is_external=False):
         mismatch_warning = _get_mismatch_warning(receipt)
+        review_values = {}
+        for key in REVIEW_CONFIDENCE_KEYS:
+            bound_field_name = f"{form.prefix}-{key}" if form.prefix else key
+            if form.is_bound:
+                review_values[key] = form.data.get(bound_field_name)
+            else:
+                review_values[key] = form.initial.get(key)
         return TemplateResponse(request, self.template_name, {
             "bon": bon,
             "receipt": receipt,
@@ -2199,6 +2333,11 @@ class OcrReviewView(TreasurerRequiredMixin, View):
             "validator_is_external": validator_is_external,
             "document_type": document_type,
             "mismatch_warning": mismatch_warning,
+            "review_field_confidences": build_receipt_review_confidence_badges(
+                receipt,
+                review_values,
+                document_type=document_type,
+            ),
             "signer_roles_ambiguous": bool(form["signer_roles_ambiguous"].value()),
             "prev_url": (
                 reverse("bons:review", kwargs={"pk": bon.pk}) + f"?idx={idx - 1}"
@@ -2275,10 +2414,51 @@ class BonExportPdfView(RoleRequiredMixin, View):
                 "être révisés avant de pouvoir exporter ce bon de commande."
             )
             return redirect(reverse("bons:detail", kwargs={"pk": pk}))
-        pdf_bytes = generate_bon_pdf(bon)
+        pdf_bytes = generate_bon_pdf(
+            bon,
+            include_ai_confidence=_query_param_is_true(
+                request.GET.get("include_ai_confidence")
+            ),
+        )
         response = HttpResponse(pdf_bytes, content_type="application/pdf")
         response["Content-Disposition"] = f'attachment; filename="BC_{bon.number}.pdf"'
         return response
+
+
+class BonExportConfigureView(RoleRequiredMixin, FormView):
+    """Choose bon export format and optional AI confidence inclusion."""
+
+    template_name = "bons/export_configure.html"
+    form_class = BonExportConfigureForm
+    min_role = 10
+
+    def dispatch(self, request, *args, **kwargs):
+        self.bon = get_object_or_404(
+            _filter_by_house(BonDeCommande.objects.all(), request.user),
+            pk=self.kwargs["pk"],
+        )
+        if not _bon_is_export_ready(self.bon):
+            messages.error(
+                request,
+                "L'exportation n'est pas disponible : tous les reçus doivent "
+                "être révisés avant de pouvoir exporter ce bon de commande.",
+            )
+            return redirect(reverse("bons:detail", kwargs={"pk": self.bon.pk}))
+        return super().dispatch(request, *args, **kwargs)
+
+    def get_context_data(self, **kwargs):
+        ctx = super().get_context_data(**kwargs)
+        ctx["bon"] = self.bon
+        return ctx
+
+    def form_valid(self, form):
+        format_name = form.cleaned_data["export_format"]
+        include_ai_confidence = form.cleaned_data.get("include_ai_confidence", False)
+        view_name = "bons:export-pdf" if format_name == "pdf" else "bons:export-xlsx"
+        export_url = reverse(view_name, kwargs={"pk": self.bon.pk})
+        if include_ai_confidence:
+            export_url += "?include_ai_confidence=1"
+        return redirect(export_url)
 
 
 class BonExportXlsxView(RoleRequiredMixin, View):
@@ -2298,7 +2478,12 @@ class BonExportXlsxView(RoleRequiredMixin, View):
                 "être révisés avant de pouvoir exporter ce bon de commande."
             )
             return redirect(reverse("bons:detail", kwargs={"pk": pk}))
-        xlsx_bytes = generate_bon_xlsx(bon)
+        xlsx_bytes = generate_bon_xlsx(
+            bon,
+            include_ai_confidence=_query_param_is_true(
+                request.GET.get("include_ai_confidence")
+            ),
+        )
         response = HttpResponse(
             xlsx_bytes,
             content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

@@ -14,6 +14,12 @@ from pathlib import Path
 
 from django.conf import settings
 
+from .ai_confidence import (
+    DUPLICATE_FIELD_CONFIDENCE_KEYS,
+    OCR_FIELD_CONFIDENCE_KEYS,
+    build_complete_ai_confidence_scores,
+)
+
 logger = logging.getLogger(__name__)
 
 try:
@@ -86,7 +92,30 @@ Retourne UNIQUEMENT un tableau JSON. Chaque élément = un document distinct:
     "tvq": 0.00,
     "untaxed_extra_amount": 0.00,
     "total": 0.00,
-    "summary": "Courte description des achats"
+    "summary": "Courte description des achats",
+    "field_confidence_scores": {
+      "document_type": 8,
+      "bc_number": 9,
+      "associated_bc_number": "NA",
+      "supplier_name": 7,
+      "supplier_address": 6,
+      "reimburse_to": 7,
+      "expense_member_name": 5,
+      "expense_apartment": 6,
+      "validator_member_name": 4,
+      "validator_apartment": "NA",
+      "signer_roles_ambiguous": 5,
+      "member_name": 7,
+      "apartment_number": 8,
+      "merchant": 9,
+      "purchase_date": 8,
+      "subtotal": 9,
+      "tps": 8,
+      "tvq": 8,
+      "untaxed_extra_amount": "NA",
+      "total": 9,
+      "summary": 7
+    }
   }
 ]
 
@@ -153,6 +182,9 @@ prix × quantité comme subtotal.
   joints toriques, cartouches/robinet et rondelle pour maison B"
 - Exemple de bon resume: "Joints toriques, cartouches/robinet et rondelle"
 - Les montants en nombre décimal (pas de $).
+- field_confidence_scores: pour CHAQUE champ ci-dessus, retourne un score 0..9
+  représentant ton niveau de confiance pour cette information précise. Si
+  l'information n'est pas trouvée, retourne "NA" et non 0.
 - Retourne UNIQUEMENT le JSON, sans texte additionnel.
 """
 
@@ -507,6 +539,10 @@ class ReceiptOcrService:
             "untaxed_extra_amount": cls._safe_decimal(data.get("untaxed_extra_amount")),
             "total": cls._safe_decimal(data.get("total")),
             "summary": str(data.get("summary") or "").strip(),
+            "field_confidence_scores": build_complete_ai_confidence_scores(
+                data.get("field_confidence_scores"),
+                allowed_keys=OCR_FIELD_CONFIDENCE_KEYS,
+            ),
         }
 
     @classmethod
@@ -595,6 +631,10 @@ class ReceiptOcrService:
             "untaxed_extra_amount": None,
             "total": None,
             "summary": "",
+            "field_confidence_scores": build_complete_ai_confidence_scores(
+                {},
+                allowed_keys=OCR_FIELD_CONFIDENCE_KEYS,
+            ),
         }
 
     # ── Batch processing pipeline ────────────────────────────────────────
@@ -666,6 +706,7 @@ class ReceiptOcrService:
                     receipt_file=receipt_obj,
                     engine_name=f"openai-{model}",
                     raw_text=json.dumps(file_results, default=str),
+                    raw_json=file_results,
                 )
 
                 # Primary extracted fields: use the first result (paper_bc if
@@ -700,6 +741,7 @@ class ReceiptOcrService:
                         "untaxed_extra_amount_candidate": primary.get("untaxed_extra_amount"),
                         "total_candidate": primary.get("total"),
                         "summary_candidate": primary.get("summary", ""),
+                        "candidate_confidence_scores": primary.get("field_confidence_scores", {}),
                     },
                 )
 
@@ -751,8 +793,15 @@ Réponds UNIQUEMENT avec un JSON valide :
 {
   "is_same_purchase": true/false,
   "confidence": 0.0 à 1.0,
-  "reasoning": "Explication courte de ta décision"
+  "reasoning": "Explication courte de ta décision",
+  "field_confidence_scores": {
+    "is_same_purchase": 0 à 9,
+    "confidence": 0 à 9,
+    "reasoning": 0 à 9
+  }
 }
+
+Si une information manque, utilise "NA" dans field_confidence_scores plutôt que 0.
 """
 
 
@@ -879,6 +928,10 @@ class DuplicateDetectionService:
                 "is_same_purchase": False,
                 "confidence": 0.0,
                 "reasoning": "Service OpenAI non disponible",
+                "field_confidence_scores": build_complete_ai_confidence_scores(
+                    {},
+                    allowed_keys=DUPLICATE_FIELD_CONFIDENCE_KEYS,
+                ),
             }
 
         img1_b64 = cls._receipt_to_base64(receipt_file_new)
@@ -889,6 +942,10 @@ class DuplicateDetectionService:
                 "is_same_purchase": False,
                 "confidence": 0.0,
                 "reasoning": "Impossible de convertir les images pour comparaison",
+                "field_confidence_scores": build_complete_ai_confidence_scores(
+                    {},
+                    allowed_keys=DUPLICATE_FIELD_CONFIDENCE_KEYS,
+                ),
             }
 
         try:
@@ -942,6 +999,10 @@ class DuplicateDetectionService:
                 "is_same_purchase": bool(result.get("is_same_purchase", False)),
                 "confidence": confidence,
                 "reasoning": str(result.get("reasoning", "")),
+                "field_confidence_scores": build_complete_ai_confidence_scores(
+                    result.get("field_confidence_scores"),
+                    allowed_keys=DUPLICATE_FIELD_CONFIDENCE_KEYS,
+                ),
             }
 
         except Exception as e:
@@ -950,6 +1011,10 @@ class DuplicateDetectionService:
                 "is_same_purchase": False,
                 "confidence": 0.0,
                 "reasoning": f"Erreur lors de la comparaison : {str(e)[:200]}",
+                "field_confidence_scores": build_complete_ai_confidence_scores(
+                    {},
+                    allowed_keys=DUPLICATE_FIELD_CONFIDENCE_KEYS,
+                ),
             }
 
     @classmethod
@@ -993,6 +1058,7 @@ class DuplicateDetectionService:
                 suspected_duplicate_receipt=existing_receipt,
                 confidence=Decimal(str(round(comparison["confidence"], 2))),
                 gpt_comparison_result=comparison["reasoning"],
+                field_confidence_scores=comparison.get("field_confidence_scores", {}),
                 status=status,
             )
             created_flags.append(flag)

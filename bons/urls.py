@@ -18,6 +18,7 @@ urlpatterns = [
     path("<int:pk>/complete/", views.BonCompleteView.as_view(), name="complete"),
     path("<int:pk>/validate/", views.BonValidateView.as_view(), name="validate"),
     path("<int:pk>/delete/", views.BonDeleteView.as_view(), name="delete"),
+    path("<int:pk>/export/", views.BonExportConfigureView.as_view(), name="export-configure"),
     path("<int:pk>/pdf/", views.BonExportPdfView.as_view(), name="export-pdf"),
     path("<int:pk>/xlsx/", views.BonExportXlsxView.as_view(), name="export-xlsx"),
     path("<int:bon_pk>/receipts/upload/", views.ReceiptUploadToExistingView.as_view(), name="receipt-upload"),

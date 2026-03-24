@@ -1,0 +1,9 @@
+{% if field_confidence %}
+<span
+    class="ai-confidence-badge {{ field_confidence.css_class }}"
+    title="{{ field_confidence.tooltip }}"
+    aria-label="{{ field_confidence.tooltip }}"
+>
+    {{ field_confidence.display }}
+</span>
+{% endif %}

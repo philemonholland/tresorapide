@@ -161,6 +161,26 @@ class ReceiptOcrParseTests(TestCase):
         self.assertEqual(r["member_name"], "Abla")
         self.assertEqual(r["apartment_number"], "207")
 
+    def test_parse_batch_normalizes_field_confidence_scores(self):
+        raw = json.dumps([{
+            "filename": "recu1.png",
+            "merchant": "DOLLARAMA",
+            "purchase_date": "2025-01-15",
+            "total": 4.31,
+            "field_confidence_scores": {
+                "merchant": 8,
+                "purchase_date": "7",
+                "total": 9,
+            },
+        }])
+        results = ReceiptOcrService._parse_batch_response(raw, ["recu1.png"])
+        scores = results[0]["field_confidence_scores"]
+        self.assertEqual(scores["merchant"], 8)
+        self.assertEqual(scores["purchase_date"], 7)
+        self.assertEqual(scores["total"], 9)
+        self.assertEqual(scores["member_name"], "NA")
+        self.assertEqual(scores["summary"], "NA")
+
     def test_parse_batch_empty(self):
         results = ReceiptOcrService._parse_batch_response("", ["a.png"])
         self.assertEqual(len(results), 1)
@@ -1334,6 +1354,22 @@ class SignerRoleWorkflowTests(TestCase):
         self.assertEqual(form.initial["supplier_name"], "Quincaillerie Parent Enr.")
         self.assertEqual(form.initial["reimburse_to"], "member")
 
+    def test_confidence_summary_prefers_confirmed_false_signer_ambiguity(self):
+        from bons.ai_confidence import build_receipt_confidence_summary_rows
+
+        self.extracted.signer_roles_ambiguous_candidate = True
+        self.extracted.signer_roles_ambiguous_final = False
+        self.extracted.final_confidence_scores = {"signer_roles_ambiguous": 4}
+        self.extracted.save(update_fields=[
+            "signer_roles_ambiguous_candidate",
+            "signer_roles_ambiguous_final",
+            "final_confidence_scores",
+        ])
+
+        rows = build_receipt_confidence_summary_rows(self.receipt)
+        summary = next(row for row in rows if row["field_name"] == "signer_roles_ambiguous")
+        self.assertEqual(summary["value"], "Non")
+
     def test_receipt_review_syncs_member_reimbursement_from_paper_bc_payee(self):
         self.client.login(username="tresorier", password="test123")
         prefix = f"receipt_{self.receipt.pk}"
@@ -1730,6 +1766,11 @@ class DigitalInvoiceDuplicateTests(DuplicateDetectionBaseTest):
             "is_same_purchase": True,
             "confidence": 0.95,
             "reasoning": "Same merchant, date, and amount",
+            "field_confidence_scores": {
+                "is_same_purchase": 9,
+                "confidence": 8,
+                "reasoning": 7,
+            },
         }
         flags = DuplicateDetectionService.check_and_flag_duplicates(
             self.new_receipt, self.house
@@ -1740,6 +1781,8 @@ class DigitalInvoiceDuplicateTests(DuplicateDetectionBaseTest):
         self.assertEqual(flag.suspected_duplicate_receipt, self.existing_receipt)
         self.assertEqual(flag.confidence, Decimal("0.95"))
         self.assertEqual(flag.status, DuplicateFlagStatus.CONFIRMED_DUPLICATE)
+        self.assertEqual(flag.field_confidence_scores["is_same_purchase"], 9)
+        self.assertEqual(flag.field_confidence_scores["reasoning"], 7)
 
     @patch.object(DuplicateDetectionService, "compare_with_gpt")
     def test_check_and_flag_pending_if_low_confidence(self, mock_gpt):
@@ -1970,6 +2013,62 @@ class ExportDuplicateVisualAttachmentTests(DuplicateDetectionBaseTest):
             media_files = [name for name in archive.namelist() if name.startswith("xl/media/")]
         self.assertGreaterEqual(len(media_files), 2)
 
+    def test_generate_bon_pdf_adds_confidence_page_when_requested(self):
+        from bons.pdf_service import generate_bon_pdf
+
+        extracted = self.new_receipt.extracted_fields
+        extracted.final_document_type = "receipt"
+        extracted.final_merchant = "RONA"
+        extracted.final_total = Decimal("19.49")
+        extracted.final_confidence_scores = {
+            "merchant_name": 8,
+            "total": 9,
+        }
+        extracted.save(update_fields=[
+            "final_document_type",
+            "final_merchant",
+            "final_total",
+            "final_confidence_scores",
+        ])
+
+        pdf_bytes = generate_bon_pdf(self.new_bon, include_ai_confidence=True)
+        self.assertGreaterEqual(pdf_bytes.count(b"/Type /Page"), 4)
+
+    def test_generate_bon_xlsx_adds_confidence_sheet_when_requested(self):
+        import io
+        from openpyxl import load_workbook
+        from bons.pdf_service import generate_bon_xlsx
+
+        extracted = self.new_receipt.extracted_fields
+        extracted.final_document_type = "receipt"
+        extracted.final_merchant = "RONA"
+        extracted.final_total = Decimal("19.49")
+        extracted.final_confidence_scores = {
+            "merchant_name": 8,
+            "total": 9,
+        }
+        extracted.save(update_fields=[
+            "final_document_type",
+            "final_merchant",
+            "final_total",
+            "final_confidence_scores",
+        ])
+
+        xlsx_bytes = generate_bon_xlsx(self.new_bon, include_ai_confidence=True)
+        workbook = load_workbook(io.BytesIO(xlsx_bytes))
+        self.assertIn("Confiance IA", workbook.sheetnames)
+        confidence_sheet = workbook["Confiance IA"]
+        values = [
+            str(value)
+            for row in confidence_sheet.iter_rows(values_only=True)
+            for value in row
+            if value is not None
+        ]
+        joined_values = " ".join(values)
+        self.assertIn("Confiance IA", joined_values)
+        self.assertIn("Marchand", joined_values)
+        self.assertIn("RONA", joined_values)
+
 
 class AuditTrailTests(DuplicateDetectionBaseTest):
     """Test that edits create audit log entries."""
@@ -2142,13 +2241,33 @@ class DetailViewDuplicateTests(DuplicateDetectionBaseTest):
         self.assertContains(resp, "Confiance : 95%")
         self.assertNotContains(resp, "Confiance : 1%")
 
-    def test_detail_shows_export_links_when_ready(self):
+    def test_detail_shows_export_link_when_ready(self):
         self.client.login(username="tresorier", password="test123")
         resp = self.client.get(f"/bons/{self.existing_bon.pk}/")
-        self.assertContains(resp, "📄 PDF")
-        self.assertContains(resp, "📊 Excel")
-        # Links should be active (not greyed out)
-        self.assertContains(resp, f'href="/bons/{self.existing_bon.pk}/pdf/"')
+        self.assertContains(resp, "Exporter")
+        self.assertContains(resp, f'href="/bons/{self.existing_bon.pk}/export/"')
+
+    def test_export_configure_screen_shows_ai_confidence_option(self):
+        self.client.login(username="tresorier", password="test123")
+        resp = self.client.get(f"/bons/{self.existing_bon.pk}/export/")
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, "Configurer l'export")
+        self.assertContains(resp, "Inclure les scores de confiance IA")
+
+    def test_export_configure_redirects_with_ai_confidence_flag(self):
+        self.client.login(username="tresorier", password="test123")
+        resp = self.client.post(
+            f"/bons/{self.existing_bon.pk}/export/",
+            {
+                "export_format": "xlsx",
+                "include_ai_confidence": "on",
+            },
+        )
+        self.assertEqual(resp.status_code, 302)
+        self.assertEqual(
+            resp["Location"],
+            f"/bons/{self.existing_bon.pk}/xlsx/?include_ai_confidence=1",
+        )
 
     def test_detail_disables_export_when_not_ready(self):
         from bons.models import ReceiptFile, OcrStatus

@@ -78,11 +78,9 @@
             <div class="quick-links">
                 <a class="button-link" href="{% url 'bons:list' %}">Retour à la liste</a>
                 {% if export_ready %}
-                    <a class="button-link" href="{% url 'bons:export-pdf' bon.pk %}">📄 PDF</a>
-                    <a class="button-link" href="{% url 'bons:export-xlsx' bon.pk %}">📊 Excel</a>
+                    <a class="button-link" href="{{ export_config_url }}">Exporter</a>
                 {% else %}
-                    <span class="button-link" style="opacity:0.5;cursor:not-allowed;" title="Tous les reçus doivent être révisés avant l'exportation">📄 PDF</span>
-                    <span class="button-link" style="opacity:0.5;cursor:not-allowed;" title="Tous les reçus doivent être révisés avant l'exportation">📊 Excel</span>
+                    <span class="button-link" style="opacity:0.5;cursor:not-allowed;" title="Tous les reçus doivent être révisés avant l'exportation">Exporter</span>
                 {% endif %}
                 {% if can_manage and bon.status != "VALIDATED" and bon.status != "REIMBURSED" and bon.status != "VOID" %}
                     <a class="button-link" href="{% url 'bons:edit' bon.pk %}">Modifier</a>
@@ -201,6 +199,8 @@
             </div>
         </div>
     </section>
+
+    {% include "bons/_receipt_confidence_summaries.html" %}
 
     {% if bon.notes %}
     <section class="card">

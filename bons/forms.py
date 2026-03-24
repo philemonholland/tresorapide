@@ -141,6 +141,29 @@ class BonValidateForm(forms.Form):
     )
 
 
+class BonExportConfigureForm(forms.Form):
+    """Choose bon export format and optional AI confidence inclusion."""
+
+    EXPORT_FORMAT_CHOICES = [
+        ("pdf", "PDF"),
+        ("xlsx", "Excel"),
+    ]
+
+    export_format = forms.ChoiceField(
+        choices=EXPORT_FORMAT_CHOICES,
+        initial="pdf",
+        label="Format d'export",
+    )
+    include_ai_confidence = forms.BooleanField(
+        required=False,
+        label="Inclure les scores de confiance IA",
+        help_text=(
+            "Ajoute une section ou une feuille distincte avec les scores 0-9 ou NA "
+            "associés aux champs issus de l'IA."
+        ),
+    )
+
+
 # ---------------------------------------------------------------------------
 # OCR workflow forms
 # ---------------------------------------------------------------------------

@@ -467,6 +467,16 @@ class ReceiptExtractedFields(TimeStampedModel):
     # Summary
     summary_candidate = models.CharField(max_length=255, blank=True)
     final_summary = models.CharField(max_length=255, blank=True)
+    candidate_confidence_scores = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Scores de confiance IA 0-9 ou NA pour les champs candidats extraits.",
+    )
+    final_confidence_scores = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Scores de confiance IA affichables pour les valeurs finales confirmées.",
+    )
     sub_budget = models.ForeignKey(
         "budget.SubBudget", on_delete=models.SET_NULL,
         null=True, blank=True, related_name="receipt_fields",
@@ -527,6 +537,11 @@ class DuplicateFlag(TimeStampedModel):
     gpt_comparison_result = models.TextField(
         blank=True,
         help_text="Raw GPT response from image comparison",
+    )
+    field_confidence_scores = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Scores de confiance IA 0-9 ou NA pour les champs JSON de comparaison GPT.",
     )
     status = models.CharField(
         max_length=25,

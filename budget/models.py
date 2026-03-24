@@ -102,6 +102,14 @@ class GrandLivreEntry(TimeStampedModel):
         default=GLMatchConfidence.UNMATCHED,
     )
     match_notes = models.TextField(blank=True)
+    ai_metadata = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text=(
+            "Métadonnées JSON issues de l'IA, incluant les scores de confiance "
+            "par champ pour l'analyse et le rapprochement sémantique."
+        ),
+    )
     extracted_apartment = models.CharField(max_length=20, blank=True)
     extracted_bc_number = models.CharField(max_length=30, blank=True)
     is_validated = models.BooleanField(default=False)

@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+
+{% block title %}Exporter BC {{ bon.number }} | Tresorapide{% endblock %}
+
+{% block content %}
+    <section class="card">
+        <div class="section-heading">
+            <div>
+                <h1>Configurer l'export</h1>
+                <p class="text-muted">BC {{ bon.number }} — choisissez le format et les options.</p>
+            </div>
+            <a class="button-link" href="{% url 'bons:detail' bon.pk %}">Retour au bon</a>
+        </div>
+    </section>
+
+    <section class="card">
+        <form method="post" class="stack">
+            {% csrf_token %}
+
+            <div class="form-group {% if form.export_format.errors %}has-error{% endif %}">
+                <label for="{{ form.export_format.id_for_label }}">{{ form.export_format.label }}</label>
+                {{ form.export_format }}
+                {% for error in form.export_format.errors %}<p class="error-text">{{ error }}</p>{% endfor %}
+            </div>
+
+            <div class="form-group {% if form.include_ai_confidence.errors %}has-error{% endif %}">
+                <label for="{{ form.include_ai_confidence.id_for_label }}">
+                    {{ form.include_ai_confidence }}
+                    <span>{{ form.include_ai_confidence.label }}</span>
+                </label>
+                {% if form.include_ai_confidence.help_text %}
+                    <p class="help-text">{{ form.include_ai_confidence.help_text }}</p>
+                {% endif %}
+                {% for error in form.include_ai_confidence.errors %}<p class="error-text">{{ error }}</p>{% endfor %}
+            </div>
+
+            <button type="submit">Générer l'export</button>
+        </form>
+    </section>
+{% endblock %}

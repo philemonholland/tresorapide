@@ -1,0 +1,37 @@
+{% if receipt_confidence_summaries %}
+<section class="card">
+    <div class="section-heading">
+        <div>
+            <h2>Confiance IA</h2>
+            <p class="text-muted">
+                Les pastilles indiquent la confiance de l'IA pour les champs conservés dans la révision.
+                <strong>NA</strong> signifie que l'information n'a pas été trouvée sur le document.
+            </p>
+        </div>
+    </div>
+
+    {% for summary in receipt_confidence_summaries %}
+        <h3>{{ summary.receipt.original_filename }}</h3>
+        <div class="table-responsive" style="margin-bottom: 1rem;">
+            <table class="data-table enhanced-table">
+                <thead>
+                    <tr>
+                        <th>Champ</th>
+                        <th>Valeur</th>
+                        <th>Confiance IA</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for row in summary.rows %}
+                        <tr>
+                            <td>{{ row.label }}</td>
+                            <td>{{ row.value }}</td>
+                            <td>{% include "bons/_ai_confidence_badge.html" with field_confidence=row.confidence only %}</td>
+                        </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    {% endfor %}
+</section>
+{% endif %}

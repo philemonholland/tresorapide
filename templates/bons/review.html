@@ -59,6 +59,11 @@
             </div>
         {% endif %}
 
+        <p class="text-muted" style="margin-bottom: 1rem;">
+            Les pastilles colorées indiquent la confiance de l'IA de 0 (pas du tout confiante) à 9 (très confiante).
+            <strong>NA</strong> signifie que l'information n'a pas été trouvée sur le document.
+        </p>
+
         <form method="post" class="stack" action="?idx={{ current_idx }}">
             {% csrf_token %}
             <input type="hidden" name="idx" value="{{ current_idx }}">
@@ -82,7 +87,7 @@
 
                     {# Document type selector #}
                     <div class="form-group" style="margin-bottom: 1rem;">
-                        <label for="{{ form.document_type.id_for_label }}">{{ form.document_type.label }}</label>
+                        <label for="{{ form.document_type.id_for_label }}">{{ form.document_type.label }}{% include "bons/_ai_confidence_badge.html" with field_confidence=review_field_confidences.document_type only %}</label>
                         {{ form.document_type }}
                         {% for error in form.document_type.errors %}<p class="error-text">{{ error }}</p>{% endfor %}
                     </div>
@@ -98,7 +103,7 @@
                         {% endif %}
 
                         <div class="form-group {% if form.apartment_number.errors %}has-error{% endif %}">
-                            <label for="{{ form.apartment_number.id_for_label }}">{{ form.apartment_number.label }}</label>
+                            <label for="{{ form.apartment_number.id_for_label }}">{{ form.apartment_number.label }}{% include "bons/_ai_confidence_badge.html" with field_confidence=review_field_confidences.apartment_number only %}</label>
                             {{ form.apartment_number }}
                             {% for error in form.apartment_number.errors %}<p class="error-text">{{ error }}</p>{% endfor %}
                         </div>
@@ -108,7 +113,7 @@
                             </div>
                         {% elif form.member_name_raw.value %}
                             <div class="form-group">
-                                <label for="{{ form.member_name_raw.id_for_label }}">{{ form.member_name_raw.label }}</label>
+                                <label for="{{ form.member_name_raw.id_for_label }}">{{ form.member_name_raw.label }}{% include "bons/_ai_confidence_badge.html" with field_confidence=review_field_confidences.member_name_raw only %}</label>
                                 {{ form.member_name_raw }}
                                 <small class="text-muted">{{ form.member_name_raw.help_text }}</small>
                             </div>
@@ -126,22 +131,22 @@
                         <legend style="font-weight: bold; padding: 0 0.5rem;">Bon de commande papier</legend>
 
                         <div class="form-group {% if form.bc_number.errors %}has-error{% endif %}">
-                            <label for="{{ form.bc_number.id_for_label }}">{{ form.bc_number.label }} <span style="color:red">*</span></label>
+                            <label for="{{ form.bc_number.id_for_label }}">{{ form.bc_number.label }} <span style="color:red">*</span>{% include "bons/_ai_confidence_badge.html" with field_confidence=review_field_confidences.bc_number only %}</label>
                             {{ form.bc_number }}
                             {% for error in form.bc_number.errors %}<p class="error-text">{{ error }}</p>{% endfor %}
                         </div>
                         <div class="form-group {% if form.supplier_name.errors %}has-error{% endif %}">
-                            <label for="{{ form.supplier_name.id_for_label }}">{{ form.supplier_name.label }}</label>
+                            <label for="{{ form.supplier_name.id_for_label }}">{{ form.supplier_name.label }}{% include "bons/_ai_confidence_badge.html" with field_confidence=review_field_confidences.supplier_name only %}</label>
                             {{ form.supplier_name }}
                             {% for error in form.supplier_name.errors %}<p class="error-text">{{ error }}</p>{% endfor %}
                         </div>
                         <div class="form-group {% if form.supplier_address.errors %}has-error{% endif %}">
-                            <label for="{{ form.supplier_address.id_for_label }}">{{ form.supplier_address.label }}</label>
+                            <label for="{{ form.supplier_address.id_for_label }}">{{ form.supplier_address.label }}{% include "bons/_ai_confidence_badge.html" with field_confidence=review_field_confidences.supplier_address only %}</label>
                             {{ form.supplier_address }}
                             {% for error in form.supplier_address.errors %}<p class="error-text">{{ error }}</p>{% endfor %}
                         </div>
                         <div class="form-group {% if form.reimburse_to.errors %}has-error{% endif %}">
-                            <label for="{{ form.reimburse_to.id_for_label }}">{{ form.reimburse_to.label }}</label>
+                            <label for="{{ form.reimburse_to.id_for_label }}">{{ form.reimburse_to.label }}{% include "bons/_ai_confidence_badge.html" with field_confidence=review_field_confidences.reimburse_to only %}</label>
                             {{ form.reimburse_to }}
                             {% if form.reimburse_to.help_text %}<small class="help-text">{{ form.reimburse_to.help_text }}</small>{% endif %}
                             {% for error in form.reimburse_to.errors %}<p class="error-text">{{ error }}</p>{% endfor %}
@@ -162,12 +167,12 @@
                         {% endif %}
 
                         <div class="form-group" id="expense-member-name-group"{% if not form.expense_member_name.value and not signer_roles_ambiguous %} style="display:none;"{% endif %}>
-                            <label for="{{ form.expense_member_name.id_for_label }}">{{ form.expense_member_name.label }}</label>
+                            <label for="{{ form.expense_member_name.id_for_label }}">{{ form.expense_member_name.label }}{% include "bons/_ai_confidence_badge.html" with field_confidence=review_field_confidences.expense_member_name only %}</label>
                             {{ form.expense_member_name }}
                             <small class="text-muted">{{ form.expense_member_name.help_text }}</small>
                         </div>
                         <div class="form-group">
-                            <label for="{{ form.expense_apartment.id_for_label }}">{{ form.expense_apartment.label }}</label>
+                            <label for="{{ form.expense_apartment.id_for_label }}">{{ form.expense_apartment.label }}{% include "bons/_ai_confidence_badge.html" with field_confidence=review_field_confidences.expense_apartment only %}</label>
                             {{ form.expense_apartment }}
                         </div>
                         <div class="form-group {% if form.expense_member.errors %}has-error{% endif %}">
@@ -197,12 +202,12 @@
                         {% endif %}
 
                         <div class="form-group" id="validator-member-name-group"{% if not form.validator_member_name.value and not signer_roles_ambiguous %} style="display:none;"{% endif %}>
-                            <label for="{{ form.validator_member_name.id_for_label }}">{{ form.validator_member_name.label }}</label>
+                            <label for="{{ form.validator_member_name.id_for_label }}">{{ form.validator_member_name.label }}{% include "bons/_ai_confidence_badge.html" with field_confidence=review_field_confidences.validator_member_name only %}</label>
                             {{ form.validator_member_name }}
                             <small class="text-muted">{{ form.validator_member_name.help_text }}</small>
                         </div>
                         <div class="form-group">
-                            <label for="{{ form.validator_apartment.id_for_label }}">{{ form.validator_apartment.label }}</label>
+                            <label for="{{ form.validator_apartment.id_for_label }}">{{ form.validator_apartment.label }}{% include "bons/_ai_confidence_badge.html" with field_confidence=review_field_confidences.validator_apartment only %}</label>
                             {{ form.validator_apartment }}
                         </div>
                         <div class="form-group {% if form.validator_member.errors %}has-error{% endif %}">
@@ -216,7 +221,7 @@
                             {% if form.validator_is_external.help_text %}<br><small class="text-muted">{{ form.validator_is_external.help_text }}</small>{% endif %}
                         </div>
                         <div class="form-group">
-                            <label for="{{ form.signer_roles_ambiguous.id_for_label }}">{{ form.signer_roles_ambiguous.label }}</label>
+                            <label for="{{ form.signer_roles_ambiguous.id_for_label }}">{{ form.signer_roles_ambiguous.label }}{% include "bons/_ai_confidence_badge.html" with field_confidence=review_field_confidences.signer_roles_ambiguous only %}</label>
                             {{ form.signer_roles_ambiguous }}
                             {% if form.signer_roles_ambiguous.help_text %}<small class="text-muted">{{ form.signer_roles_ambiguous.help_text }}</small>{% endif %}
                         </div>
@@ -228,12 +233,12 @@
                         <legend style="font-weight: bold; padding: 0 0.5rem;">Facture liée</legend>
 
                         <div class="form-group {% if form.associated_bc_number.errors %}has-error{% endif %}">
-                            <label for="{{ form.associated_bc_number.id_for_label }}">{{ form.associated_bc_number.label }}</label>
+                            <label for="{{ form.associated_bc_number.id_for_label }}">{{ form.associated_bc_number.label }}{% include "bons/_ai_confidence_badge.html" with field_confidence=review_field_confidences.associated_bc_number only %}</label>
                             {{ form.associated_bc_number }}
                             {% for error in form.associated_bc_number.errors %}<p class="error-text">{{ error }}</p>{% endfor %}
                         </div>
                         <div class="form-group {% if form.supplier_name.errors %}has-error{% endif %}">
-                            <label>{{ form.supplier_name.label }}</label>
+                            <label>{{ form.supplier_name.label }}{% include "bons/_ai_confidence_badge.html" with field_confidence=review_field_confidences.supplier_name only %}</label>
                             {# supplier_name already rendered above; show read-only display here #}
                             <input type="text" value="{{ form.supplier_name.value|default_if_none:'' }}" readonly class="text-muted"
                                    style="background:#f8f9fa;border:1px solid #ddd;padding:0.4rem;border-radius:4px;width:100%;">
@@ -250,17 +255,17 @@
                             {% for error in form.sub_budget.errors %}<p class="error-text">{{ error }}</p>{% endfor %}
                         </div>
                         <div class="form-group {% if form.merchant_name.errors %}has-error{% endif %}">
-                            <label for="{{ form.merchant_name.id_for_label }}">{{ form.merchant_name.label }}</label>
+                            <label for="{{ form.merchant_name.id_for_label }}">{{ form.merchant_name.label }}{% include "bons/_ai_confidence_badge.html" with field_confidence=review_field_confidences.merchant_name only %}</label>
                             {{ form.merchant_name }}
                             {% for error in form.merchant_name.errors %}<p class="error-text">{{ error }}</p>{% endfor %}
                         </div>
                         <div class="form-group {% if form.purchase_date.errors %}has-error{% endif %}">
-                            <label for="{{ form.purchase_date.id_for_label }}">{{ form.purchase_date.label }}</label>
+                            <label for="{{ form.purchase_date.id_for_label }}">{{ form.purchase_date.label }}{% include "bons/_ai_confidence_badge.html" with field_confidence=review_field_confidences.purchase_date only %}</label>
                             {{ form.purchase_date }}
                             {% for error in form.purchase_date.errors %}<p class="error-text">{{ error }}</p>{% endfor %}
                         </div>
                         <div class="form-group {% if form.summary.errors %}has-error{% endif %}">
-                            <label for="{{ form.summary.id_for_label }}">{{ form.summary.label }}</label>
+                            <label for="{{ form.summary.id_for_label }}">{{ form.summary.label }}{% include "bons/_ai_confidence_badge.html" with field_confidence=review_field_confidences.summary only %}</label>
                             {{ form.summary }}
                             {% if form.summary.help_text %}<small class="text-muted">{{ form.summary.help_text }}</small>{% endif %}
                             {% for error in form.summary.errors %}<p class="error-text">{{ error }}</p>{% endfor %}
@@ -287,28 +292,28 @@
                         </div>
 
                         <div class="form-group {% if form.subtotal.errors %}has-error{% endif %}">
-                            <label for="{{ form.subtotal.id_for_label }}">{{ form.subtotal.label }}</label>
+                            <label for="{{ form.subtotal.id_for_label }}">{{ form.subtotal.label }}{% include "bons/_ai_confidence_badge.html" with field_confidence=review_field_confidences.subtotal only %}</label>
                             {{ form.subtotal }}
                             {% for error in form.subtotal.errors %}<p class="error-text">{{ error }}</p>{% endfor %}
                         </div>
                         <div class="form-group {% if form.tps.errors %}has-error{% endif %}">
-                            <label for="{{ form.tps.id_for_label }}">{{ form.tps.label }}</label>
+                            <label for="{{ form.tps.id_for_label }}">{{ form.tps.label }}{% include "bons/_ai_confidence_badge.html" with field_confidence=review_field_confidences.tps only %}</label>
                             {{ form.tps }}
                             {% for error in form.tps.errors %}<p class="error-text">{{ error }}</p>{% endfor %}
                         </div>
                         <div class="form-group {% if form.tvq.errors %}has-error{% endif %}">
-                            <label for="{{ form.tvq.id_for_label }}">{{ form.tvq.label }}</label>
+                            <label for="{{ form.tvq.id_for_label }}">{{ form.tvq.label }}{% include "bons/_ai_confidence_badge.html" with field_confidence=review_field_confidences.tvq only %}</label>
                             {{ form.tvq }}
                             {% for error in form.tvq.errors %}<p class="error-text">{{ error }}</p>{% endfor %}
                         </div>
                         <div class="form-group {% if form.untaxed_extra_amount.errors %}has-error{% endif %}">
-                            <label for="{{ form.untaxed_extra_amount.id_for_label }}">{{ form.untaxed_extra_amount.label }}</label>
+                            <label for="{{ form.untaxed_extra_amount.id_for_label }}">{{ form.untaxed_extra_amount.label }}{% include "bons/_ai_confidence_badge.html" with field_confidence=review_field_confidences.untaxed_extra_amount only %}</label>
                             {{ form.untaxed_extra_amount }}
                             {% if form.untaxed_extra_amount.help_text %}<small class="text-muted">{{ form.untaxed_extra_amount.help_text }}</small>{% endif %}
                             {% for error in form.untaxed_extra_amount.errors %}<p class="error-text">{{ error }}</p>{% endfor %}
                         </div>
                         <div class="form-group {% if form.total.errors %}has-error{% endif %}">
-                            <label for="{{ form.total.id_for_label }}">{{ form.total.label }}</label>
+                            <label for="{{ form.total.id_for_label }}">{{ form.total.label }}{% include "bons/_ai_confidence_badge.html" with field_confidence=review_field_confidences.total only %}</label>
                             {{ form.total }}
                             {% for error in form.total.errors %}<p class="error-text">{{ error }}</p>{% endfor %}
                         </div>

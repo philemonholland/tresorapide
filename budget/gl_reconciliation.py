@@ -7,7 +7,7 @@ extracts apartment/BC numbers from GL descriptions, and performs balance checks.
 import json
 import logging
 import re
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import List, Optional
 
 from django.conf import settings
@@ -24,6 +24,8 @@ from .services import BudgetCalculationService
 
 logger = logging.getLogger(__name__)
 CHCE_LABEL = "CHCE"
+AI_CONFIDENCE_MISSING = "NA"
+GL_PARSE_CONFIDENCE_KEYS = ("bc_number", "apartment", "description_clean")
 
 # ── Regex patterns for extracting BC/apartment from GL descriptions ──
 BC_PATTERN = re.compile(r"BC\s*#?\s*(\d{4,7})", re.IGNORECASE)
@@ -41,6 +43,35 @@ def _extract_apartment(description: str) -> str:
     """Extract apartment from GL description like 'tuyauéchangeur#104'."""
     m = APT_PATTERN.search(description)
     return m.group(1) if m else ""
+
+
+def _normalize_ai_confidence_score(value):
+    if value in (None, ""):
+        return AI_CONFIDENCE_MISSING
+    if isinstance(value, str) and value.strip().upper() == AI_CONFIDENCE_MISSING:
+        return AI_CONFIDENCE_MISSING
+    try:
+        score = Decimal(str(value)).quantize(
+            Decimal("1"),
+            rounding=ROUND_HALF_UP,
+        )
+    except (InvalidOperation, TypeError, ValueError):
+        return AI_CONFIDENCE_MISSING
+    score = min(max(score, Decimal("0")), Decimal("9"))
+    return int(score)
+
+
+def _build_complete_ai_confidence_scores(raw_value, *, allowed_keys):
+    raw_scores = raw_value if isinstance(raw_value, dict) else {}
+    return {
+        str(key): _normalize_ai_confidence_score(raw_scores.get(str(key)))
+        for key in allowed_keys
+    }
+
+
+def _entry_ai_metadata(entry):
+    metadata = entry.ai_metadata if isinstance(entry.ai_metadata, dict) else {}
+    return dict(metadata)
 
 
 def _sort_expense_match_candidates(candidates, entry_date=None):
@@ -96,7 +127,17 @@ codée par le comptable. Tu dois extraire:
 3. Une description propre en français, reformulée en une phrase courte et claire
 
 Format de réponse JSON (tableau) :
-[{"row": N, "bc_number": "16482" ou "", "apartment": "104" ou "", "description_clean": "Scellant, mortier et truelle"}]
+[{
+  "row": N,
+  "bc_number": "16482" ou "",
+  "apartment": "104" ou "",
+  "description_clean": "Scellant, mortier et truelle",
+  "field_confidence_scores": {
+    "bc_number": 0..9 ou "NA",
+    "apartment": 0..9 ou "NA",
+    "description_clean": 0..9 ou "NA"
+  }
+}]
 
 Exemples de descriptions codées:
 - "496578-BC 16482-scellant, mortier, truelle" → BC=16482, apt=, desc="Scellant, mortier et truelle"
@@ -107,7 +148,8 @@ Exemples de descriptions codées:
 - "060768-inspection visuelle (extincteurs)" → BC=, apt=, desc="Inspection visuelle des extincteurs"
 - "511888-BC137940-Colleplomberie#102" → BC=137940, apt=102, desc="Colle de plomberie"
 
-Réponds UNIQUEMENT avec le JSON, sans markdown."""
+Réponds UNIQUEMENT avec le JSON, sans markdown.
+Si une information est absente, utilise "NA" dans field_confidence_scores plutôt que 0."""
 
     try:
         client = OpenAI(api_key=api_key)
@@ -126,7 +168,17 @@ Réponds UNIQUEMENT avec le JSON, sans markdown."""
             raw = re.sub(r"^```(?:json)?\s*", "", raw)
             raw = re.sub(r"\s*```$", "", raw)
         parsed = json.loads(raw)
-        row_map = {item["row"]: item for item in parsed}
+        row_map = {}
+        if isinstance(parsed, list):
+            for item in parsed:
+                if not isinstance(item, dict) or "row" not in item:
+                    continue
+                normalized_item = dict(item)
+                normalized_item["field_confidence_scores"] = _build_complete_ai_confidence_scores(
+                    item.get("field_confidence_scores"),
+                    allowed_keys=GL_PARSE_CONFIDENCE_KEYS,
+                )
+                row_map[item["row"]] = normalized_item
 
         for e in entries:
             gpt = row_map.get(e["row_number"], {})
@@ -136,6 +188,15 @@ Réponds UNIQUEMENT avec le JSON, sans markdown."""
                 e["extracted_apartment"] = gpt["apartment"]
             if gpt.get("description_clean"):
                 e["description_clean"] = gpt["description_clean"]
+            e["ai_metadata"] = {
+                "parse_field_confidence_scores": gpt.get(
+                    "field_confidence_scores",
+                    _build_complete_ai_confidence_scores(
+                        None,
+                        allowed_keys=GL_PARSE_CONFIDENCE_KEYS,
+                    ),
+                ),
+            }
     except Exception:
         logger.exception("GPT enrichment of GL entries failed")
 
@@ -151,7 +212,8 @@ def _try_gpt_batch_match(
     Each GL entry has: id, description, amount, bc_number
     Each expense has: id, description, amount, bon_number
 
-    Returns list of dicts: [{"gl_id": int, "expense_id": int, "confidence": float}, ...]
+    Returns list of dicts:
+    [{"gl_id": int, "expense_id": int, "confidence": float, "confidence_score": 0..9|"NA"}, ...]
     """
     if not unmatched_gl or not unmatched_expenses:
         return []
@@ -180,10 +242,15 @@ Trouve les paires qui représentent la MÊME transaction. Pour confirmer une cor
 Ne force pas de correspondance si les montants ne sont pas identiques.
 Ne force pas de correspondance si les descriptions sont clairement incompatibles (produits différents, services différents).
 
-Réponds UNIQUEMENT avec un tableau JSON :
-[{"gl_id": N, "expense_id": N, "confidence": 0.9}]
-Si aucune correspondance n'est trouvée, réponds [].
-Pas de texte autour, seulement le JSON."""
+    Réponds UNIQUEMENT avec un tableau JSON :
+    [{
+      "gl_id": N,
+      "expense_id": N,
+      "confidence": 0.9,
+      "confidence_score": 0..9 ou "NA"
+    }]
+    Si aucune correspondance n'est trouvée, réponds [].
+    Pas de texte autour, seulement le JSON."""
 
     payload = json.dumps({
         "entries_gl": unmatched_gl,
@@ -207,12 +274,19 @@ Pas de texte autour, seulement le JSON."""
             raw = re.sub(r"\s*```$", "", raw)
         parsed = json.loads(raw)
         if isinstance(parsed, list):
-            return [
-                m for m in parsed
-                if isinstance(m, dict)
-                and "gl_id" in m and "expense_id" in m
-                and m.get("confidence", 0) >= 0.7
-            ]
+            normalized = []
+            for m in parsed:
+                if (
+                    isinstance(m, dict)
+                    and "gl_id" in m and "expense_id" in m
+                    and m.get("confidence", 0) >= 0.7
+                ):
+                    item = dict(m)
+                    item["confidence_score"] = _normalize_ai_confidence_score(
+                        m.get("confidence_score")
+                    )
+                    normalized.append(item)
+            return normalized
         return []
     except Exception:
         logger.exception("GPT batch match failed")
@@ -227,7 +301,8 @@ def _try_gpt_anomaly_analysis(
 ) -> list:
     """Use GPT to analyze anomalies and return structured recommendations.
 
-    Returns a list of dicts: [{"type": str, "severity": str, "message": str}, ...]
+    Returns a list of dicts:
+    [{"type": str, "severity": str, "message": str, "confidence_score": 0..9|"NA"}, ...]
     These are appended to the existing anomalies list.
     """
     try:
@@ -261,6 +336,7 @@ Retourne un tableau JSON d'avertissements structurés. Chaque objet doit avoir :
 - "type": catégorie courte (ex: "balance_mismatch", "missing_expense", "wrong_house", "timing_issue", "duplicate_risk", "recommendation")
 - "severity": "high", "medium", ou "info"
 - "message": phrase claire en français, concise, adressée au trésorier (pas de jargon comptable complexe)
+- "confidence_score": score de confiance 0..9 pour cet avertissement, ou "NA" si non applicable
 
 Concentre-toi sur :
 1. Vérifications prioritaires que le trésorier devrait faire
@@ -295,6 +371,9 @@ Retourne UNIQUEMENT le tableau JSON, sans texte autour."""
                         "type": item.get("type", "recommendation"),
                         "severity": item.get("severity", "info"),
                         "message": str(item["message"]),
+                        "confidence_score": _normalize_ai_confidence_score(
+                            item.get("confidence_score")
+                        ),
                     })
             return valid
         return []
@@ -380,10 +459,27 @@ class GrandLivreReconciliationService:
                 entry.extracted_bc_number = data["extracted_bc_number"]
             if data.get("extracted_apartment") and not entry.extracted_apartment:
                 entry.extracted_apartment = data["extracted_apartment"]
+            metadata = _entry_ai_metadata(entry)
+            metadata["parse_field_confidence_scores"] = data.get(
+                "ai_metadata",
+                {},
+            ).get(
+                "parse_field_confidence_scores",
+                _build_complete_ai_confidence_scores(
+                    None,
+                    allowed_keys=GL_PARSE_CONFIDENCE_KEYS,
+                ),
+            )
+            entry.ai_metadata = metadata
 
         GrandLivreEntry.objects.bulk_update(
             entries,
-            ["description_clean", "extracted_bc_number", "extracted_apartment"],
+            [
+                "description_clean",
+                "extracted_bc_number",
+                "extracted_apartment",
+                "ai_metadata",
+            ],
         )
 
     @staticmethod
@@ -543,7 +639,20 @@ class GrandLivreReconciliationService:
                     if entry and exp and exp.id not in matched_expense_ids:
                         entry.matched_expense = exp
                         entry.match_confidence = GLMatchConfidence.PROBABLE
-                        entry.match_notes = f"Correspondance sémantique (confiance {gm.get('confidence', '?')})"
+                        score_display = gm.get("confidence_score", AI_CONFIDENCE_MISSING)
+                        entry.match_notes = (
+                            "Correspondance sémantique "
+                            f"(confiance {gm.get('confidence', '?')}; score IA {score_display}/9)"
+                            if score_display != AI_CONFIDENCE_MISSING
+                            else f"Correspondance sémantique (confiance {gm.get('confidence', '?')}; score IA NA)"
+                        )
+                        metadata = _entry_ai_metadata(entry)
+                        metadata["semantic_match"] = {
+                            "expense_id": exp.id,
+                            "confidence": gm.get("confidence"),
+                            "confidence_score": score_display,
+                        }
+                        entry.ai_metadata = metadata
                         entry.needs_import = False
                         matched_expense_ids.add(exp.id)
             except Exception:
@@ -551,7 +660,13 @@ class GrandLivreReconciliationService:
 
         GrandLivreEntry.objects.bulk_update(
             gl_entries,
-            ["matched_expense_id", "match_confidence", "match_notes", "needs_import"],
+            [
+                "matched_expense_id",
+                "match_confidence",
+                "match_notes",
+                "ai_metadata",
+                "needs_import",
+            ],
         )
 
         return matched_expense_ids
