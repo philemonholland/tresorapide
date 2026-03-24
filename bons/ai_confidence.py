@@ -437,14 +437,17 @@ def build_receipt_review_confidence_scores(
     for field_name in REVIEW_FIELD_ORDER:
         if field_name not in values:
             continue
+        current_value = values.get(field_name)
         score = _find_review_field_confidence_score(
             documents,
             field_name=field_name,
-            current_value=values.get(field_name),
+            current_value=current_value,
             document_type=document_type,
         )
         if score is not None:
             score_map[field_name] = score
+        elif not _is_empty_match_value(field_name, current_value):
+            score_map[field_name] = AI_CONFIDENCE_MISSING
     return score_map
 
 

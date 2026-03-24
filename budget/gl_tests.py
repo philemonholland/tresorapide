@@ -1,8 +1,10 @@
 """Tests for Grand Livre parser, reconciliation, and views."""
+import json
 import os
 import tempfile
 from datetime import date
 from decimal import Decimal
+from unittest.mock import MagicMock, patch
 
 from django.test import TestCase, RequestFactory
 from django.core.files.uploadedfile import SimpleUploadedFile
@@ -329,6 +331,88 @@ class GLReconciliationTests(TestCase):
         self.assertIsNotNone(entry.matched_expense)
         self.assertEqual(entry.extracted_bc_number, "16482")
 
+    @patch("openai.OpenAI")
+    def test_enrich_with_ai_accepts_string_row_identifiers(self, mock_openai):
+        from budget.gl_reconciliation import GrandLivreReconciliationService as Svc
+
+        transactions = [
+            {
+                "date": date(2025, 5, 1),
+                "source": "PARENT",
+                "description": "496578-BC 16482-scellant",
+                "debit": 41.86,
+            },
+        ]
+        upload = self._create_upload_with_entries(transactions)
+        Svc.parse_and_store(upload)
+        entry = upload.entries.first()
+
+        mock_openai.return_value.chat.completions.create.return_value = MagicMock(
+            choices=[
+                MagicMock(
+                    message=MagicMock(
+                        content=json.dumps([
+                            {
+                                "row": str(entry.row_number),
+                                "bc_number": "16482",
+                                "apartment": "104",
+                                "description_clean": "Scellant et mortier",
+                                "field_confidence_scores": {
+                                    "bc_number": "8",
+                                    "apartment": "7",
+                                    "description_clean": 9,
+                                },
+                            }
+                        ])
+                    )
+                )
+            ]
+        )
+
+        with self.settings(OPENAI_API_KEY="test-key"):
+            Svc.enrich_with_ai(upload)
+
+        entry.refresh_from_db()
+        self.assertEqual(entry.extracted_bc_number, "16482")
+        self.assertEqual(entry.extracted_apartment, "104")
+        self.assertEqual(entry.description_clean, "Scellant et mortier")
+        self.assertEqual(entry.ai_metadata["parse_field_confidence_scores"]["bc_number"], 8)
+        self.assertEqual(entry.ai_metadata["parse_field_confidence_scores"]["description_clean"], 9)
+
+    @patch("openai.OpenAI")
+    def test_enrich_with_ai_preserves_existing_parse_metadata_on_gpt_failure(self, mock_openai):
+        from budget.gl_reconciliation import GrandLivreReconciliationService as Svc
+
+        transactions = [
+            {
+                "period": "2025-14",
+                "date": date(2025, 1, 7),
+                "source": "SANY",
+                "description": "4999081-BC 16482-Nettoyants",
+                "debit": 19.49,
+            },
+        ]
+        upload = self._create_upload_with_entries(transactions)
+        Svc.parse_and_store(upload)
+        entry = upload.entries.first()
+        entry.ai_metadata = {
+            "parse_field_confidence_scores": {
+                "bc_number": 8,
+                "apartment": "NA",
+                "description_clean": 7,
+            }
+        }
+        entry.save(update_fields=["ai_metadata"])
+
+        mock_openai.return_value.chat.completions.create.side_effect = RuntimeError("boom")
+
+        with self.settings(OPENAI_API_KEY="test-key"):
+            Svc.enrich_with_ai(upload)
+
+        entry.refresh_from_db()
+        self.assertEqual(entry.ai_metadata["parse_field_confidence_scores"]["bc_number"], 8)
+        self.assertEqual(entry.ai_metadata["parse_field_confidence_scores"]["description_clean"], 7)
+
     def test_match_by_bc_number_when_first_transaction_shares_account_row(self):
         from budget.gl_reconciliation import GrandLivreReconciliationService as Svc
 
@@ -401,6 +485,92 @@ class GLReconciliationTests(TestCase):
         self.assertEqual(entry.matched_expense_id, original.id)
         self.assertNotEqual(entry.matched_expense_id, duplicate.id)
         self.assertEqual(entry.match_confidence, GLMatchConfidence.EXACT)
+
+    def test_match_expenses_clears_stale_semantic_match_metadata_on_exact_match(self):
+        from budget.gl_reconciliation import GrandLivreReconciliationService as Svc
+
+        expense = self._add_expense(
+            "Bon de commande pour mortier",
+            41.86,
+            bon_number="16482",
+            entry_date=date(2025, 5, 1),
+            sub=self.sub_misc,
+        )
+        transactions = [
+            {"date": date(2025, 5, 1), "source": "PARENT", "description": "496578-BC 16482-mortier", "debit": 41.86},
+        ]
+        upload = self._create_upload_with_entries(transactions)
+        Svc.parse_and_store(upload)
+        entry = upload.entries.first()
+        entry.ai_metadata = {
+            "semantic_match": {
+                "expense_id": 999999,
+                "confidence": 0.91,
+                "confidence_score": 8,
+            }
+        }
+        entry.save(update_fields=["ai_metadata"])
+
+        Svc.match_expenses(upload)
+
+        entry.refresh_from_db()
+        self.assertEqual(entry.matched_expense_id, expense.id)
+        self.assertEqual(entry.match_confidence, GLMatchConfidence.EXACT)
+        self.assertNotIn("semantic_match", entry.ai_metadata)
+
+    @patch("openai.OpenAI")
+    def test_gpt_semantic_match_accepts_string_identifiers(self, mock_openai):
+        from budget.gl_reconciliation import GrandLivreReconciliationService as Svc
+
+        target_expense = self._add_expense(
+            "Bon de commande pour nettoyant",
+            19.49,
+            sub=self.sub_misc,
+        )
+        self._add_expense(
+            "Autre depense nettoyant",
+            19.49,
+            sub=self.sub_misc,
+        )
+
+        transactions = [
+            {
+                "date": None,
+                "source": "SANY",
+                "description": "NUBIOCAL 900ML",
+                "debit": 19.49,
+            },
+        ]
+        upload = self._create_upload_with_entries(transactions)
+        Svc.parse_and_store(upload)
+        entry = upload.entries.first()
+
+        mock_openai.return_value.chat.completions.create.return_value = MagicMock(
+            choices=[
+                MagicMock(
+                    message=MagicMock(
+                        content=json.dumps([
+                            {
+                                "gl_id": str(entry.pk),
+                                "expense_id": str(target_expense.pk),
+                                "confidence": "0.91",
+                                "confidence_score": "8",
+                            }
+                        ])
+                    )
+                )
+            ]
+        )
+
+        with self.settings(OPENAI_API_KEY="test-key"):
+            Svc.match_expenses(upload)
+
+        entry.refresh_from_db()
+        self.assertEqual(entry.matched_expense_id, target_expense.id)
+        self.assertEqual(entry.match_confidence, GLMatchConfidence.PROBABLE)
+        self.assertIn("score IA 8/9", entry.match_notes)
+        self.assertEqual(entry.ai_metadata["semantic_match"]["expense_id"], target_expense.id)
+        self.assertEqual(entry.ai_metadata["semantic_match"]["confidence_score"], 8)
 
     def test_build_reconciliation_balanced(self):
         from budget.gl_reconciliation import GrandLivreReconciliationService as Svc

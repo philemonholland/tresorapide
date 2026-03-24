@@ -996,7 +996,7 @@ class DuplicateDetectionService:
             result = json.loads(raw)
             confidence = cls._normalize_confidence(result.get("confidence", 0.0))
             return {
-                "is_same_purchase": bool(result.get("is_same_purchase", False)),
+                "is_same_purchase": ReceiptOcrService._safe_bool(result.get("is_same_purchase", False)),
                 "confidence": confidence,
                 "reasoning": str(result.get("reasoning", "")),
                 "field_confidence_scores": build_complete_ai_confidence_scores(

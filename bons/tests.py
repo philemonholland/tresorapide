@@ -931,6 +931,19 @@ class MismatchWarningTests(TestCase):
         self.assertAlmostEqual(float(warning["bc_total"]), 19.49)
         self.assertAlmostEqual(float(warning["invoice_total"]), 16.95)
 
+    def test_mismatch_warning_ignores_invoices_for_other_bc_numbers(self):
+        from bons.views import _get_mismatch_warning
+        from unittest.mock import MagicMock
+
+        receipt = MagicMock()
+        receipt.ocr_raw_text = json.dumps([
+            {"document_type": "paper_bc", "bc_number": "16739", "total": 19.49},
+            {"document_type": "invoice", "associated_bc_number": "16739", "total": 19.49},
+            {"document_type": "paper_bc", "bc_number": "17186", "total": 54.58},
+            {"document_type": "invoice", "associated_bc_number": "17186", "total": 54.58},
+        ])
+        self.assertIsNone(_get_mismatch_warning(receipt))
+
     def test_no_paper_bc_no_warning(self):
         from bons.views import _get_mismatch_warning
         from unittest.mock import MagicMock
@@ -1076,6 +1089,55 @@ class MismatchWarningTests(TestCase):
         self.assertAlmostEqual(float(initial["untaxed_extra_amount"]), 10.00)
         # total should remain the BC value since it was already set
         self.assertAlmostEqual(float(initial["total"]), 54.58)
+
+    def test_supplement_ignores_invoice_amounts_for_other_bc_numbers(self):
+        from bons.views import _supplement_amounts_from_invoices
+        from unittest.mock import MagicMock
+
+        receipt = MagicMock()
+        receipt.ocr_raw_text = json.dumps([
+            {
+                "document_type": "paper_bc",
+                "bc_number": "17186",
+                "subtotal": None,
+                "tps": None,
+                "tvq": None,
+                "total": 54.58,
+            },
+            {
+                "document_type": "invoice",
+                "associated_bc_number": "17186",
+                "subtotal": 47.47,
+                "tps": 2.37,
+                "tvq": 4.74,
+                "total": 54.58,
+            },
+            {
+                "document_type": "paper_bc",
+                "bc_number": "16011",
+                "total": 999.99,
+            },
+            {
+                "document_type": "invoice",
+                "associated_bc_number": "16011",
+                "subtotal": 900.00,
+                "tps": 45.00,
+                "tvq": 89.78,
+                "total": 1034.78,
+            },
+        ])
+        initial = {
+            "bc_number": "17186",
+            "subtotal": None,
+            "tps": None,
+            "tvq": None,
+            "untaxed_extra_amount": None,
+            "total": Decimal("54.58"),
+        }
+        _supplement_amounts_from_invoices(initial, receipt)
+        self.assertEqual(initial["subtotal"], Decimal("47.47"))
+        self.assertEqual(initial["tps"], Decimal("2.37"))
+        self.assertEqual(initial["tvq"], Decimal("4.74"))
 
     def test_supplement_does_not_overwrite_existing_values(self):
         """When paper BC already has taxes, invoice values should NOT overwrite."""
@@ -1370,6 +1432,28 @@ class SignerRoleWorkflowTests(TestCase):
         summary = next(row for row in rows if row["field_name"] == "signer_roles_ambiguous")
         self.assertEqual(summary["value"], "Non")
 
+    def test_build_review_confidence_marks_corrected_fields_as_na(self):
+        from bons.ai_confidence import build_receipt_review_confidence_scores
+
+        self.receipt.ocr_raw_text = json.dumps([
+            {
+                "document_type": "paper_bc",
+                "supplier_name": "Fournisseur OCR",
+                "field_confidence_scores": {
+                    "supplier_name": 8,
+                },
+            }
+        ])
+        self.receipt.save(update_fields=["ocr_raw_text"])
+
+        scores = build_receipt_review_confidence_scores(
+            self.receipt,
+            {"supplier_name": "Fournisseur corrigé"},
+            document_type="paper_bc",
+        )
+
+        self.assertEqual(scores["supplier_name"], "NA")
+
     def test_receipt_review_syncs_member_reimbursement_from_paper_bc_payee(self):
         self.client.login(username="tresorier", password="test123")
         prefix = f"receipt_{self.receipt.pk}"
@@ -1508,6 +1592,19 @@ class SignerRoleWorkflowTests(TestCase):
         self.assertEqual(initial.get("validator_member_name"), "Lui-Jade Rodrigue")
         self.assertEqual(initial.get("validator_apartment"), "")
         self.assertNotIn("validator_member", initial)
+
+    def test_confirmed_false_signer_ambiguity_overrides_candidate_true(self):
+        self.extracted.signer_roles_ambiguous_candidate = True
+        self.extracted.signer_roles_ambiguous_final = False
+        self.extracted.confirmed_at = timezone.now()
+        self.extracted.save(update_fields=[
+            "signer_roles_ambiguous_candidate",
+            "signer_roles_ambiguous_final",
+            "confirmed_at",
+        ])
+
+        initial, _, _, _, _ = _paper_bc_signer_initials(self.house, self.extracted)
+        self.assertFalse(initial["signer_roles_ambiguous"])
 
     def test_external_supplier_display_label(self):
         """External approver should display as 'FOUR / [name]'."""
@@ -1760,6 +1857,43 @@ class DigitalInvoiceDuplicateTests(DuplicateDetectionBaseTest):
             0.95,
         )
 
+    @patch.object(DuplicateDetectionService, "_receipt_to_base64", return_value="ZmFrZQ==")
+    @patch("bons.ocr_service.OpenAI")
+    def test_compare_with_gpt_treats_false_string_as_false(
+        self,
+        mock_openai,
+        mock_receipt_to_base64,
+    ):
+        response = MagicMock()
+        response.choices = [
+            MagicMock(
+                message=MagicMock(
+                    content=json.dumps(
+                        {
+                            "is_same_purchase": "false",
+                            "confidence": 0.82,
+                            "reasoning": "Transactions differentes",
+                            "field_confidence_scores": {
+                                "is_same_purchase": 2,
+                                "confidence": 8,
+                                "reasoning": 7,
+                            },
+                        }
+                    )
+                )
+            )
+        ]
+        mock_openai.return_value.chat.completions.create.return_value = response
+
+        with self.settings(OPENAI_API_KEY="test-key"):
+            result = DuplicateDetectionService.compare_with_gpt(
+                self.new_receipt,
+                self.existing_receipt,
+            )
+
+        self.assertFalse(result["is_same_purchase"])
+        self.assertEqual(result["field_confidence_scores"]["is_same_purchase"], 2)
+
     @patch.object(DuplicateDetectionService, "compare_with_gpt")
     def test_check_and_flag_creates_flag(self, mock_gpt):
         mock_gpt.return_value = {
@@ -1869,7 +2003,12 @@ class ExportGatingTests(DuplicateDetectionBaseTest):
     """Test that exports are blocked when receipts haven't been reviewed."""
 
     def test_export_ready_when_all_reviewed(self):
+        self.existing_receipt.ocr_status = OcrStatus.CORRECTED
+        self.existing_receipt.save(update_fields=["ocr_status"])
         self.assertTrue(_bon_is_export_ready(self.existing_bon))
+
+    def test_export_not_ready_when_only_extracted(self):
+        self.assertFalse(_bon_is_export_ready(self.existing_bon))
 
     def test_export_not_ready_when_pending(self):
         from bons.models import ReceiptFile, OcrStatus
@@ -1884,6 +2023,8 @@ class ExportGatingTests(DuplicateDetectionBaseTest):
         self.assertFalse(_bon_is_export_ready(self.existing_bon))
 
     def test_export_ready_ignores_archived_pending_receipt(self):
+        self.existing_receipt.ocr_status = OcrStatus.CORRECTED
+        self.existing_receipt.save(update_fields=["ocr_status"])
         fake = SimpleUploadedFile("archived-pending.png", b"data", content_type="image/png")
         receipt = ReceiptFile.objects.create(
             bon_de_commande=self.existing_bon,
@@ -2242,12 +2383,16 @@ class DetailViewDuplicateTests(DuplicateDetectionBaseTest):
         self.assertNotContains(resp, "Confiance : 1%")
 
     def test_detail_shows_export_link_when_ready(self):
+        self.existing_receipt.ocr_status = OcrStatus.CORRECTED
+        self.existing_receipt.save(update_fields=["ocr_status"])
         self.client.login(username="tresorier", password="test123")
         resp = self.client.get(f"/bons/{self.existing_bon.pk}/")
         self.assertContains(resp, "Exporter")
         self.assertContains(resp, f'href="/bons/{self.existing_bon.pk}/export/"')
 
     def test_export_configure_screen_shows_ai_confidence_option(self):
+        self.existing_receipt.ocr_status = OcrStatus.CORRECTED
+        self.existing_receipt.save(update_fields=["ocr_status"])
         self.client.login(username="tresorier", password="test123")
         resp = self.client.get(f"/bons/{self.existing_bon.pk}/export/")
         self.assertEqual(resp.status_code, 200)
@@ -2255,6 +2400,8 @@ class DetailViewDuplicateTests(DuplicateDetectionBaseTest):
         self.assertContains(resp, "Inclure les scores de confiance IA")
 
     def test_export_configure_redirects_with_ai_confidence_flag(self):
+        self.existing_receipt.ocr_status = OcrStatus.CORRECTED
+        self.existing_receipt.save(update_fields=["ocr_status"])
         self.client.login(username="tresorier", password="test123")
         resp = self.client.post(
             f"/bons/{self.existing_bon.pk}/export/",

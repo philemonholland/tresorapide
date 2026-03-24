@@ -883,26 +883,27 @@ def _paper_bc_payee_name(receipt, ef=None) -> str:
     invoices. Reimbursement detection must still use the original payee field
     from the paper BC, not the invoice-enriched display value.
     """
-    try:
-        docs = json.loads(receipt.ocr_raw_text or "[]")
-    except (json.JSONDecodeError, TypeError):
-        docs = []
-
-    has_invoice_docs = False
-    for doc in docs:
-        doc_type = str(doc.get("document_type") or "").strip()
-        if doc_type == "paper_bc":
-            payee_name = str(doc.get("supplier_name") or "").strip()
-            if payee_name:
-                return payee_name
-        elif doc_type == "invoice":
-            has_invoice_docs = True
-
     if ef is None:
-        try:
-            ef = receipt.extracted_fields
-        except ReceiptExtractedFields.DoesNotExist:
-            ef = None
+        ef = _safe_extracted_fields(receipt)
+
+    docs = _load_receipt_ai_documents(receipt)
+    current_bc_number = _current_receipt_bc_number(
+        receipt,
+        documents=docs,
+        ef=ef,
+    )
+    paper_bc_docs = _paper_bc_documents_for_current_receipt(
+        docs,
+        bc_number=current_bc_number,
+    )
+    linked_invoices = _linked_invoice_documents_for_current_receipt(
+        docs,
+        bc_number=current_bc_number,
+    )
+    for doc in paper_bc_docs:
+        payee_name = str(doc.get("supplier_name") or "").strip()
+        if payee_name:
+            return payee_name
 
     if not ef:
         return ""
@@ -912,7 +913,7 @@ def _paper_bc_payee_name(receipt, ef=None) -> str:
         return candidate_name
 
     final_name = (ef.final_supplier_name or "").strip()
-    if final_name and not has_invoice_docs:
+    if final_name and not linked_invoices:
         return final_name
     return ""
 
@@ -1039,9 +1040,105 @@ def _extracted_document_amounts(ef):
 def _safe_extracted_fields(receipt):
     """Return the receipt's ReceiptExtractedFields or None if missing."""
     try:
-        return receipt.extracted_fields
+        extracted_fields = receipt.extracted_fields
     except ReceiptExtractedFields.DoesNotExist:
         return None
+    return extracted_fields if isinstance(extracted_fields, ReceiptExtractedFields) else None
+
+
+def _normalize_bc_reference(value) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    digits = "".join(char for char in text if char.isdigit())
+    return digits or text
+
+
+def _load_receipt_ai_documents(receipt) -> list[dict]:
+    try:
+        data = json.loads(receipt.ocr_raw_text or "[]")
+    except (json.JSONDecodeError, TypeError):
+        return []
+    if isinstance(data, dict):
+        data = [data]
+    if not isinstance(data, list):
+        return []
+    return [item for item in data if isinstance(item, dict)]
+
+
+def _current_receipt_bc_number(receipt, *, documents=None, explicit_bc_number="", ef=None) -> str:
+    explicit = _normalize_bc_reference(explicit_bc_number)
+    if explicit:
+        return explicit
+
+    if ef is None:
+        ef = _safe_extracted_fields(receipt)
+    if ef:
+        stored = _normalize_bc_reference(ef.final_bc_number or ef.bc_number_candidate)
+        if stored:
+            return stored
+
+    for document in documents or []:
+        if str(document.get("document_type") or "").strip() != "paper_bc":
+            continue
+        candidate = _normalize_bc_reference(document.get("bc_number"))
+        if candidate:
+            return candidate
+    return ""
+
+
+def _paper_bc_documents_for_current_receipt(documents, *, bc_number="") -> list[dict]:
+    paper_bcs = [
+        document
+        for document in documents
+        if str(document.get("document_type") or "").strip() == "paper_bc"
+    ]
+    if not paper_bcs:
+        return []
+
+    normalized_bc = _normalize_bc_reference(bc_number)
+    if normalized_bc:
+        matched = [
+            document
+            for document in paper_bcs
+            if _normalize_bc_reference(document.get("bc_number")) == normalized_bc
+        ]
+        if matched:
+            return matched
+    return paper_bcs[:1]
+
+
+def _linked_invoice_documents_for_current_receipt(documents, *, bc_number="") -> list[dict]:
+    invoices = [
+        document
+        for document in documents
+        if str(document.get("document_type") or "").strip() == "invoice"
+    ]
+    if not invoices:
+        return []
+
+    normalized_bc = _normalize_bc_reference(bc_number)
+    if normalized_bc:
+        matched = [
+            document
+            for document in invoices
+            if _normalize_bc_reference(document.get("associated_bc_number")) == normalized_bc
+        ]
+        if matched:
+            return matched
+
+    paper_bc_count = sum(
+        1
+        for document in documents
+        if str(document.get("document_type") or "").strip() == "paper_bc"
+    )
+    has_explicit_invoice_links = any(
+        _normalize_bc_reference(document.get("associated_bc_number"))
+        for document in invoices
+    )
+    if paper_bc_count <= 1 and not has_explicit_invoice_links:
+        return invoices
+    return []
 
 
 def _supplement_amounts_from_invoices(initial, receipt):
@@ -1059,12 +1156,16 @@ def _supplement_amounts_from_invoices(initial, receipt):
     if not (needs_subtotal or needs_tps or needs_tvq or needs_untaxed_extra):
         return  # nothing missing
 
-    try:
-        all_docs = json.loads(receipt.ocr_raw_text or "[]")
-    except (json.JSONDecodeError, TypeError):
-        return
-
-    invoices = [d for d in all_docs if d.get("document_type") == "invoice"]
+    all_docs = _load_receipt_ai_documents(receipt)
+    current_bc_number = _current_receipt_bc_number(
+        receipt,
+        documents=all_docs,
+        explicit_bc_number=initial.get("bc_number"),
+    )
+    invoices = _linked_invoice_documents_for_current_receipt(
+        all_docs,
+        bc_number=current_bc_number,
+    )
     if not invoices:
         return
 
@@ -1151,12 +1252,16 @@ def _supplement_supplier_details_from_invoices(initial, receipt):
     handwritten location. When invoice supplier details are available, use
     them in the review form and keep merchant_name aligned with that supplier.
     """
-    try:
-        all_docs = json.loads(receipt.ocr_raw_text or "[]")
-    except (json.JSONDecodeError, TypeError):
-        return
-
-    invoices = [d for d in all_docs if d.get("document_type") == "invoice"]
+    all_docs = _load_receipt_ai_documents(receipt)
+    current_bc_number = _current_receipt_bc_number(
+        receipt,
+        documents=all_docs,
+        explicit_bc_number=initial.get("bc_number"),
+    )
+    invoices = _linked_invoice_documents_for_current_receipt(
+        all_docs,
+        bc_number=current_bc_number,
+    )
     if not invoices:
         return
 
@@ -1355,9 +1460,11 @@ def _paper_bc_signer_initials(house, ef):
     purchaser_apt = ef.final_expense_apartment or ef.expense_apartment_candidate or ""
     validator_name = ef.final_validator_member_name or ef.validator_member_name_candidate or ""
     validator_apt = ef.final_validator_apartment or ef.validator_apartment_candidate or ""
+    is_confirmed = bool(ef.confirmed_at or ef.confirmed_by_id)
     roles_ambiguous = (
         ef.signer_roles_ambiguous_final
-        or ef.signer_roles_ambiguous_candidate
+        if is_confirmed
+        else ef.signer_roles_ambiguous_candidate
     )
 
     initial = {
@@ -1536,16 +1643,16 @@ def _get_mismatch_warning(receipt):
     - BC and invoice totals differ
     - Invoices exist but amounts couldn't be extracted (unverifiable)
     """
-    try:
-        all_docs = json.loads(receipt.ocr_raw_text or "[]")
-    except (json.JSONDecodeError, TypeError):
-        return None
-
-    if not isinstance(all_docs, list):
-        return None
-
-    paper_bcs = [d for d in all_docs if d.get("document_type") == "paper_bc"]
-    invoices = [d for d in all_docs if d.get("document_type") == "invoice"]
+    all_docs = _load_receipt_ai_documents(receipt)
+    current_bc_number = _current_receipt_bc_number(receipt, documents=all_docs)
+    paper_bcs = _paper_bc_documents_for_current_receipt(
+        all_docs,
+        bc_number=current_bc_number,
+    )
+    invoices = _linked_invoice_documents_for_current_receipt(
+        all_docs,
+        bc_number=current_bc_number,
+    )
 
     if not paper_bcs or not invoices:
         return None
@@ -1558,7 +1665,7 @@ def _get_mismatch_warning(receipt):
         )
         bc_total = paper_amounts["total"]
         invoice_total = invoice_amounts["total"]
-        bc_number = paper_bcs[0].get("bc_number", "?")
+        bc_number = current_bc_number or paper_bcs[0].get("bc_number", "?")
         paper_untaxed_extra = paper_amounts["untaxed_extra_amount"] or Decimal("0.00")
 
         if bc_total is None:
@@ -2388,12 +2495,12 @@ class BonCompleteView(TreasurerRequiredMixin, UpdateView):
 # ---------------------------------------------------------------------------
 
 def _bon_is_export_ready(bon):
-    """A bon is export-ready when all its receipts have been reviewed (EXTRACTED or CORRECTED)."""
+    """A bon is export-ready when all its active receipts have been reviewed."""
     receipts = bon.active_receipt_files
     if not receipts.exists():
         return True  # no receipts = nothing to review
     return not receipts.exclude(
-        ocr_status__in=[OcrStatus.EXTRACTED, OcrStatus.CORRECTED]
+        ocr_status=OcrStatus.CORRECTED
     ).exists()
 
 

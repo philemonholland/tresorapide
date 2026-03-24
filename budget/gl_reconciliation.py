@@ -69,6 +69,24 @@ def _build_complete_ai_confidence_scores(raw_value, *, allowed_keys):
     }
 
 
+def _normalize_int_identifier(value):
+    if value in (None, ""):
+        return None
+    try:
+        return int(Decimal(str(value)))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+
+
+def _normalize_float_confidence(value):
+    if value in (None, ""):
+        return None
+    try:
+        return float(Decimal(str(value)))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+
+
 def _entry_ai_metadata(entry):
     metadata = entry.ai_metadata if isinstance(entry.ai_metadata, dict) else {}
     return dict(metadata)
@@ -91,7 +109,7 @@ def _sort_expense_match_candidates(candidates, entry_date=None):
     return sorted(candidates, key=_key)
 
 
-def _try_gpt_parse_entries(entries: List[dict]) -> List[dict]:
+def _try_gpt_parse_entries(entries: List[dict]) -> List[dict] | None:
     """
     Use GPT to extract apartment, BC number, and clean description
     from GL entries. Returns enriched entries.
@@ -173,12 +191,15 @@ Si une information est absente, utilise "NA" dans field_confidence_scores plutô
             for item in parsed:
                 if not isinstance(item, dict) or "row" not in item:
                     continue
+                row_number = _normalize_int_identifier(item.get("row"))
+                if row_number is None:
+                    continue
                 normalized_item = dict(item)
                 normalized_item["field_confidence_scores"] = _build_complete_ai_confidence_scores(
                     item.get("field_confidence_scores"),
                     allowed_keys=GL_PARSE_CONFIDENCE_KEYS,
                 )
-                row_map[item["row"]] = normalized_item
+                row_map[row_number] = normalized_item
 
         for e in entries:
             gpt = row_map.get(e["row_number"], {})
@@ -199,7 +220,7 @@ Si une information est absente, utilise "NA" dans field_confidence_scores plutô
             }
     except Exception:
         logger.exception("GPT enrichment of GL entries failed")
-
+        return None
     return entries
 
 
@@ -276,16 +297,23 @@ Ne force pas de correspondance si les descriptions sont clairement incompatibles
         if isinstance(parsed, list):
             normalized = []
             for m in parsed:
-                if (
-                    isinstance(m, dict)
-                    and "gl_id" in m and "expense_id" in m
-                    and m.get("confidence", 0) >= 0.7
-                ):
-                    item = dict(m)
-                    item["confidence_score"] = _normalize_ai_confidence_score(
-                        m.get("confidence_score")
-                    )
-                    normalized.append(item)
+                if not isinstance(m, dict):
+                    continue
+                gl_id = _normalize_int_identifier(m.get("gl_id"))
+                expense_id = _normalize_int_identifier(m.get("expense_id"))
+                confidence = _normalize_float_confidence(m.get("confidence"))
+                if gl_id is None or expense_id is None or confidence is None:
+                    continue
+                if confidence < 0.7:
+                    continue
+                item = dict(m)
+                item["gl_id"] = gl_id
+                item["expense_id"] = expense_id
+                item["confidence"] = confidence
+                item["confidence_score"] = _normalize_ai_confidence_score(
+                    m.get("confidence_score")
+                )
+                normalized.append(item)
             return normalized
         return []
     except Exception:
@@ -449,6 +477,8 @@ class GrandLivreReconciliationService:
         ]
 
         enriched = _try_gpt_parse_entries(entry_dicts)
+        if enriched is None:
+            return
         row_map = {d["row_number"]: d for d in enriched}
 
         for entry in entries:
@@ -460,16 +490,12 @@ class GrandLivreReconciliationService:
             if data.get("extracted_apartment") and not entry.extracted_apartment:
                 entry.extracted_apartment = data["extracted_apartment"]
             metadata = _entry_ai_metadata(entry)
-            metadata["parse_field_confidence_scores"] = data.get(
+            parse_scores = data.get(
                 "ai_metadata",
                 {},
-            ).get(
-                "parse_field_confidence_scores",
-                _build_complete_ai_confidence_scores(
-                    None,
-                    allowed_keys=GL_PARSE_CONFIDENCE_KEYS,
-                ),
-            )
+            ).get("parse_field_confidence_scores")
+            if parse_scores is not None:
+                metadata["parse_field_confidence_scores"] = parse_scores
             entry.ai_metadata = metadata
 
         GrandLivreEntry.objects.bulk_update(
@@ -517,6 +543,10 @@ class GrandLivreReconciliationService:
 
         for entry in gl_entries:
             if entry.matched_expense_id:
+                metadata = _entry_ai_metadata(entry)
+                if entry.match_confidence != GLMatchConfidence.PROBABLE:
+                    metadata.pop("semantic_match", None)
+                    entry.ai_metadata = metadata
                 matched_expense_ids.add(entry.matched_expense_id)
                 continue
 
@@ -602,9 +632,15 @@ class GrandLivreReconciliationService:
                 entry.matched_expense = best_match
                 entry.match_confidence = best_confidence
                 entry.match_notes = match_note
+                metadata = _entry_ai_metadata(entry)
+                metadata.pop("semantic_match", None)
+                entry.ai_metadata = metadata
                 matched_expense_ids.add(best_match.id)
             else:
                 entry.match_confidence = GLMatchConfidence.UNMATCHED
+                metadata = _entry_ai_metadata(entry)
+                metadata.pop("semantic_match", None)
+                entry.ai_metadata = metadata
                 entry.needs_import = True
 
         # 4. GPT semantic matching for remaining unmatched entries
