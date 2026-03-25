@@ -26,6 +26,71 @@
     </section>
     {% endif %}
 
+    {% if amount_consistency_warning %}
+    <section class="card" style="background: #fff3cd; border: 2px solid #ffeeba;">
+        <div style="color: #856404;">
+            <h2 style="margin-bottom: 0.5rem;">⚠️ MONTANTS À VÉRIFIER</h2>
+            <p>
+                Le document <strong>{{ amount_consistency_warning.filename }}</strong> présente des montants
+                incomplets ou incohérents. Sous-total extrait :
+                <strong>{{ amount_consistency_warning.subtotal }} $</strong>, somme calculée :
+                <strong>{{ amount_consistency_warning.entered_sum }} $</strong>, total extrait :
+                <strong>{{ amount_consistency_warning.total }} $</strong>, TPS extraite / attendue :
+                <strong>{{ amount_consistency_warning.actual_tps }} $ / {{ amount_consistency_warning.expected_tps }} $</strong>,
+                TVQ extraite / attendue :
+                <strong>{{ amount_consistency_warning.actual_tvq }} $ / {{ amount_consistency_warning.expected_tvq }} $</strong>.
+                Veuillez porter une attention particulière avant de valider.
+            </p>
+        </div>
+    </section>
+    {% endif %}
+
+    {# Validated duplicate warning — requires confirmation #}
+    {% if validated_duplicates %}
+    <section class="card" style="background: #f8d7da; border: 2px solid #f5c6cb;">
+        <div style="color: #721c24;">
+            <h2 style="margin-bottom: 0.5rem;">🚨 DOUBLON DÉTECTÉ — Bon déjà validé</h2>
+            <p>
+                Une ou plusieurs factures de ce bon ont un total identique à des factures
+                d'un bon <strong>déjà validé</strong>. Le remboursement pourrait être fait en double.
+            </p>
+            {% for dupe in validated_duplicates %}
+            <div style="margin: 0.5rem 0; padding: 0.5rem; background: #fff; border-radius: 4px; border: 1px solid #f5c6cb;">
+                <strong>{{ dupe.receipt.original_filename }}</strong>
+                ({{ dupe.total|floatformat:2 }}&nbsp;$) correspond à
+                <strong>{{ dupe.match_receipt.original_filename }}</strong>
+                sur le <a href="{% url 'bons:detail' dupe.match_bon.pk %}" style="color: #721c24; text-decoration: underline;">BC {{ dupe.match_bon.number }}</a>
+                (validé)
+            </div>
+            {% endfor %}
+        </div>
+    </section>
+    {% endif %}
+
+    {# Unvalidated duplicate — cleanup opportunity #}
+    {% if unvalidated_duplicates %}
+    <section class="card" style="background: #fff3cd; border: 2px solid #ffeeba;">
+        <div style="color: #856404;">
+            <h2 style="margin-bottom: 0.5rem;">🧹 Nettoyage — Doublons non validés</h2>
+            <p>
+                Les bons suivants contiennent des factures avec le même total mais n'ont
+                jamais été validés. Ils ne causeront pas de remboursement en double, mais
+                vous pouvez les annuler pour garder le système propre.
+            </p>
+            {% for dupe in unvalidated_duplicates %}
+            <div style="margin: 0.5rem 0; padding: 0.5rem; background: #fff; border-radius: 4px; border: 1px solid #ffeeba;">
+                <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer;">
+                    <input type="checkbox" class="cleanup-checkbox" value="{{ dupe.match_bon.pk }}">
+                    Annuler le <a href="{% url 'bons:detail' dupe.match_bon.pk %}" style="color: #856404; text-decoration: underline;">BC {{ dupe.match_bon.number }}</a>
+                    — {{ dupe.match_receipt.original_filename }}
+                    ({{ dupe.total|floatformat:2 }}&nbsp;$, {{ dupe.match_bon.get_status_display }})
+                </label>
+            </div>
+            {% endfor %}
+        </div>
+    </section>
+    {% endif %}
+
     <section class="card">
         <div class="section-heading">
             <div>
@@ -42,13 +107,49 @@
         </p>
         <p>Cette action capturera les informations actuelles et marquera le bon comme validé.</p>
 
-        <form method="post" class="stack">
+        <form method="post" class="stack" id="validate-form">
             {% csrf_token %}
             {{ form.non_field_errors }}
-            {% include "includes/form_field.html" %}
+
+            <div style="margin: 0.5rem 0;">
+                <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer;">
+                    {{ form.confirm }}
+                    {{ form.confirm.label }}
+                </label>
+            </div>
+
+            {% if validated_duplicates %}
+            <div style="margin: 0.5rem 0; padding: 0.75rem; background: #f8d7da; border-radius: 4px;">
+                <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer; color: #721c24; font-weight: bold;">
+                    {{ form.confirm_duplicates }}
+                    {{ form.confirm_duplicates.label }}
+                </label>
+            </div>
+            {% endif %}
+
+            {{ form.cleanup_bon_ids }}
+
             <button type="submit" class="btn btn-success btn-lg">Confirmer la validation</button>
         </form>
     </section>
 
     {% include "bons/_receipt_confidence_summaries.html" %}
+
+    {% if unvalidated_duplicates %}
+    <script>
+    (function() {
+        var form = document.getElementById('validate-form');
+        var hiddenInput = form.querySelector('[name="cleanup_bon_ids"]');
+        var checkboxes = document.querySelectorAll('.cleanup-checkbox');
+
+        form.addEventListener('submit', function() {
+            var selected = [];
+            checkboxes.forEach(function(cb) {
+                if (cb.checked) selected.push(cb.value);
+            });
+            hiddenInput.value = selected.join(',');
+        });
+    })();
+    </script>
+    {% endif %}
 {% endblock %}

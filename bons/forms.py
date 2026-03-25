@@ -110,6 +110,7 @@ ALLOWED_MOBILE_CAPTURE_TYPES = {
     "image/jpeg", "image/png",
 }
 MAX_RECEIPT_SIZE = 10 * 1024 * 1024  # 10 MB
+MAX_MOBILE_CAPTURE_SIZE = 20 * 1024 * 1024  # 20 MB
 
 
 def _validate_receipt_file(f):
@@ -128,7 +129,10 @@ def _validate_receipt_file(f):
 
 def _validate_mobile_capture_file(f):
     """Server-side validation for handheld capture photos."""
-    _validate_receipt_file(f)
+    if f.size > MAX_MOBILE_CAPTURE_SIZE:
+        raise forms.ValidationError(
+            f"Photo trop volumineuse ({f.size // (1024*1024)} Mo). Maximum : 20 Mo."
+        )
     if f.content_type not in ALLOWED_MOBILE_CAPTURE_TYPES:
         raise forms.ValidationError(
             "La capture mobile accepte seulement les photos JPEG ou PNG."
@@ -160,6 +164,15 @@ class BonValidateForm(forms.Form):
     confirm = forms.BooleanField(
         required=True,
         label="Je confirme la validation de ce bon de commande",
+    )
+    confirm_duplicates = forms.BooleanField(
+        required=False,
+        label="Je confirme vouloir valider malgré les doublons détectés",
+    )
+    cleanup_bon_ids = forms.CharField(
+        required=False,
+        widget=forms.HiddenInput(),
+        help_text="Comma-separated bon PKs to void as unvalidated duplicates",
     )
 
 
@@ -236,12 +249,13 @@ class MobileReceiptCaptureForm(forms.Form):
     photo = forms.FileField(
         label="Photo",
         help_text=(
-            "Photo JPEG ou PNG. La signature avec numéro d'appartement doit être lisible."
+            "Photo JPEG ou PNG (max 20 Mo). Prenez une photo avec la caméra ou "
+            "choisissez une image de votre galerie."
         ),
         widget=forms.FileInput(
             attrs={
                 "accept": "image/jpeg,image/png,image/*",
-                "capture": "environment",
+                "data-mobile-native-camera": "true",
             }
         ),
         required=True,

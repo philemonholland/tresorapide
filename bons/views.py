@@ -6,7 +6,7 @@ from django.views.generic.edit import FormView
 from django.contrib import messages
 from django.template.response import TemplateResponse
 from collections import defaultdict
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from difflib import SequenceMatcher
 import json
 import unicodedata
@@ -32,11 +32,16 @@ from .scan_sessions import (
     create_scan_session,
     default_budget_year_for_house,
 )
+from .amounts import (
+    MONEY_EPSILON,
+    STANDARD_TPS_RATE,
+    STANDARD_TVQ_RATE,
+    money as _shared_money,
+    standard_tax_breakdown as _shared_standard_tax_breakdown,
+    build_amount_consistency_warning,
+)
 from .services import generate_bon_number
 
-MONEY_EPSILON = Decimal("0.01")
-STANDARD_TPS_RATE = Decimal("0.05")
-STANDARD_TVQ_RATE = Decimal("0.09975")
 MOBILE_CAPTURE_SESSION_KEY = "mobile_capture_scan_session_id"
 
 REVIEW_CONFIDENCE_KEYS = (
@@ -187,7 +192,7 @@ def _mobile_capture_signature_issues(receipts) -> list[str]:
         if extracted_fields is None:
             issues.append(
                 f"« {receipt.original_filename} » n'a pas pu être lu automatiquement. "
-                "La signature avec numéro d'appartement est obligatoire."
+                "Vérifiez manuellement la signature et le numéro d'appartement."
             )
             continue
 
@@ -205,7 +210,7 @@ def _mobile_capture_signature_issues(receipts) -> list[str]:
                 continue
             issues.append(
                 f"« {receipt.original_filename} » est une facture sans bon de commande "
-                "papier signé avec numéro d'appartement."
+                "papier signé avec numéro d'appartement. Vérifiez-la manuellement."
             )
             continue
 
@@ -213,8 +218,8 @@ def _mobile_capture_signature_issues(receipts) -> list[str]:
             continue
 
         issues.append(
-            f"« {receipt.original_filename} » doit contenir une signature lisible "
-            "avec numéro d'appartement."
+            f"« {receipt.original_filename} » ne contient pas de signature lisible "
+            "avec numéro d'appartement. Vérifiez-la manuellement."
         )
     return issues
 
@@ -274,6 +279,93 @@ def _filter_by_house(qs, user):
     if not user.is_gestionnaire:
         return qs.filter(house=user.house)
     return qs
+
+
+# ---------------------------------------------------------------------------
+# Validation-time duplicate detection helpers
+# ---------------------------------------------------------------------------
+
+def _find_duplicate_bons_for_validation(bon, receipts):
+    """
+    Find receipts on *other* bons that match the total of receipts
+    on this bon. Returns (validated_dupes, unvalidated_dupes) where
+    each is a list of dicts with 'receipt', 'match_receipt', 'match_bon'.
+    """
+    from .ocr_service import DuplicateDetectionService
+
+    validated_dupes = []
+    unvalidated_dupes = []
+    seen_bon_pks = set()
+
+    for receipt in receipts:
+        matching_efs = DuplicateDetectionService.find_matching_totals(
+            receipt, bon.house
+        )
+        for match_ef in matching_efs:
+            match_receipt = match_ef.receipt_file
+            match_bon = match_receipt.bon_de_commande
+            if match_bon.pk == bon.pk or match_bon.pk in seen_bon_pks:
+                continue
+            seen_bon_pks.add(match_bon.pk)
+
+            entry = {
+                "receipt": receipt,
+                "match_receipt": match_receipt,
+                "match_bon": match_bon,
+                "total": match_ef.final_total or match_ef.total_candidate,
+            }
+            if match_bon.status == BonStatus.VALIDATED:
+                validated_dupes.append(entry)
+            else:
+                unvalidated_dupes.append(entry)
+
+    return validated_dupes, unvalidated_dupes
+
+
+def _void_unvalidated_duplicate_bons(cleanup_pks, current_bon, user):
+    """Void the selected unvalidated duplicate bons."""
+    import logging
+    logger = logging.getLogger("bons.views")
+
+    bons_to_void = BonDeCommande.objects.filter(
+        pk__in=cleanup_pks,
+        house=current_bon.house,
+        is_scan_session=False,
+    ).exclude(status=BonStatus.VALIDATED)
+
+    for dup_bon in bons_to_void:
+        dup_bon.status = BonStatus.VOID
+        dup_bon.void_reason = (
+            f"Nettoyage de doublon non validé lors de la validation "
+            f"du BC {current_bon.number}"
+        )
+        dup_bon.voided_at = timezone.now()
+        dup_bon.save(update_fields=["status", "void_reason", "voided_at"])
+        logger.info(
+            "Voided unvalidated duplicate BC %s (pk=%d) during validation of BC %s",
+            dup_bon.number, dup_bon.pk, current_bon.number,
+        )
+
+
+def _create_duplicate_flag_if_needed(receipt, match_receipt, status):
+    """Create a DuplicateFlag if one doesn't already exist for this pair."""
+    from .models import DuplicateFlag
+
+    already = DuplicateFlag.objects.filter(
+        receipt_file=receipt,
+        suspected_duplicate_receipt=match_receipt,
+    ).exists() or DuplicateFlag.objects.filter(
+        receipt_file=match_receipt,
+        suspected_duplicate_receipt=receipt,
+    ).exists()
+    if not already:
+        DuplicateFlag.objects.create(
+            receipt_file=receipt,
+            suspected_duplicate_receipt=match_receipt,
+            confidence=None,
+            gpt_comparison_result="Doublon détecté à la validation (même total)",
+            status=status,
+        )
 
 
 class BonListView(RoleRequiredMixin, ListView):
@@ -381,6 +473,12 @@ class BonDetailView(RoleRequiredMixin, DetailView):
                     "unverifiable": True,
                 }
 
+        for receipt in bon.active_receipt_files:
+            warning = _get_amount_consistency_warning(receipt)
+            if warning:
+                ctx["amount_consistency_warning"] = warning
+                break
+
         return ctx
 
 
@@ -486,13 +584,6 @@ class BonUpdateView(TreasurerRequiredMixin, UpdateView):
                 ip_address=self.request.META.get("REMOTE_ADDR"),
             )
 
-        # Re-run duplicate detection if financial fields changed
-        if financial_changed:
-            for receipt in bon.active_receipt_files.filter(
-                ocr_status__in=[OcrStatus.EXTRACTED, OcrStatus.CORRECTED]
-            ):
-                DuplicateDetectionService.check_and_flag_duplicates(receipt, bon.house)
-
         return response
 
     def get_success_url(self):
@@ -557,6 +648,15 @@ class BonValidateView(TreasurerRequiredMixin, FormView):
         ctx["bon"] = self.bon
         receipts = list(self.bon.active_receipt_files.order_by("created_at", "pk"))
         ctx["receipt_confidence_summaries"] = _receipt_confidence_summaries(receipts)
+
+        # --- Duplicate detection at validation time ---
+        validated_dupes, unvalidated_dupes = _find_duplicate_bons_for_validation(
+            self.bon, receipts
+        )
+        ctx["validated_duplicates"] = validated_dupes
+        ctx["unvalidated_duplicates"] = unvalidated_dupes
+        ctx["has_duplicates"] = bool(validated_dupes) or bool(unvalidated_dupes)
+
         # Show how many bons still need validation in the same house/year
         pending_count = (
             BonDeCommande.objects
@@ -586,6 +686,12 @@ class BonValidateView(TreasurerRequiredMixin, FormView):
                     "unverifiable": True,
                 }
 
+        for receipt in self.bon.active_receipt_files:
+            warning = _get_amount_consistency_warning(receipt)
+            if warning:
+                ctx["amount_consistency_warning"] = warning
+                break
+
         return ctx
 
     def form_valid(self, form):
@@ -596,6 +702,39 @@ class BonValidateView(TreasurerRequiredMixin, FormView):
                 bon.get_status_display()
             ))
             return redirect(self.get_success_url())
+
+        # --- Duplicate gate: require explicit confirmation when duplicates exist ---
+        receipts = list(bon.active_receipt_files.order_by("created_at", "pk"))
+        validated_dupes, unvalidated_dupes = _find_duplicate_bons_for_validation(
+            bon, receipts
+        )
+        if validated_dupes and not form.cleaned_data.get("confirm_duplicates"):
+            messages.error(
+                self.request,
+                "Des doublons avec des bons déjà validés ont été détectés. "
+                "Veuillez cocher la case de confirmation des doublons pour continuer.",
+            )
+            return self.form_invalid(form)
+
+        # --- Optional cleanup: void unvalidated duplicate bons ---
+        cleanup_raw = form.cleaned_data.get("cleanup_bon_ids", "")
+        if cleanup_raw:
+            cleanup_pks = [
+                int(pk.strip()) for pk in cleanup_raw.split(",")
+                if pk.strip().isdigit()
+            ]
+            if cleanup_pks:
+                _void_unvalidated_duplicate_bons(
+                    cleanup_pks, bon, self.request.user
+                )
+
+        # --- Record duplicate flags for audit trail ---
+        from .models import DuplicateFlag, DuplicateFlagStatus
+        for dupe in validated_dupes:
+            _create_duplicate_flag_if_needed(
+                dupe["receipt"], dupe["match_receipt"],
+                DuplicateFlagStatus.PENDING,
+            )
 
         bon.status = BonStatus.VALIDATED
         bon.validated_by = self.request.user
@@ -788,6 +927,7 @@ class ReceiptReviewSingleView(TreasurerRequiredMixin, View):
         ).order_by("sort_order", "trace_code")
 
         mismatch_warning = _get_mismatch_warning(receipt)
+        amount_consistency_warning = _get_amount_consistency_warning(receipt)
 
         return {
             "bon": bon,
@@ -800,6 +940,7 @@ class ReceiptReviewSingleView(TreasurerRequiredMixin, View):
             "validator_is_external": bool(initial.get("validator_is_external")),
             "document_type": doc_type,
             "mismatch_warning": mismatch_warning,
+            "amount_consistency_warning": amount_consistency_warning,
             "review_field_confidences": build_receipt_review_confidence_badges(
                 receipt,
                 _build_review_confidence_values(initial),
@@ -1000,12 +1141,7 @@ def _resolve_validator_assignment(house, apartment_code: str, validator_name: st
 
 
 def _money(value):
-    if value in (None, ""):
-        return None
-    try:
-        return Decimal(str(value)).quantize(MONEY_EPSILON)
-    except (InvalidOperation, TypeError, ValueError):
-        return None
+    return _shared_money(value)
 
 
 def _merchant_value_for_document(ef, doc_type: str):
@@ -1144,20 +1280,7 @@ def _normalize_document_amounts(
 
 def _standard_tax_breakdown(subtotal, untaxed_extra_amount=None):
     """Return the expected Quebec tax breakdown for a taxable subtotal."""
-    subtotal = _money(subtotal)
-    if subtotal is None:
-        return None
-    untaxed_extra_amount = _money(untaxed_extra_amount) or Decimal("0.00")
-    tps = (subtotal * STANDARD_TPS_RATE).quantize(MONEY_EPSILON)
-    tvq = (subtotal * STANDARD_TVQ_RATE).quantize(MONEY_EPSILON)
-    total = (subtotal + tps + tvq + untaxed_extra_amount).quantize(MONEY_EPSILON)
-    return {
-        "subtotal": subtotal,
-        "tps": tps,
-        "tvq": tvq,
-        "untaxed_extra_amount": untaxed_extra_amount,
-        "total": total,
-    }
+    return _shared_standard_tax_breakdown(subtotal, untaxed_extra_amount)
 
 
 def _extracted_document_type(ef) -> str:
@@ -1831,15 +1954,35 @@ class MobileCaptureHomeView(TreasurerRequiredMixin, FormView):
                 return redirect("bons:mobile-capture")
             _set_mobile_capture_session(self.request, scan_session)
 
-        add_receipts_to_scan_session(
+        receipts = add_receipts_to_scan_session(
             scan_session,
             [form.cleaned_data["photo"]],
             uploaded_by=self.request.user,
         )
-        messages.success(
-            self.request,
-            "Photo ajoutée. Voulez-vous en prendre une autre ou lancer l'analyse ?",
-        )
+
+        # Run OCR immediately on just this one receipt
+        if receipts:
+            _, error_message = ReceiptOcrService.process_receipts_batch(
+                receipts,
+                house=self.request.user.house,
+            )
+            if error_message:
+                messages.warning(self.request, f"Analyse OCR : {error_message}")
+                messages.success(
+                    self.request,
+                    "Photo ajoutée mais l'analyse a rencontré un problème. "
+                    "Vous pouvez reprendre ou continuer.",
+                )
+            else:
+                messages.success(
+                    self.request,
+                    "Photo ajoutée et analysée. Ajoutez-en une autre ou lancez la révision.",
+                )
+        else:
+            messages.success(
+                self.request,
+                "Photo ajoutée. Voulez-vous en prendre une autre ou lancer l'analyse ?",
+            )
         return redirect("bons:mobile-capture")
 
 
@@ -1859,32 +2002,26 @@ class MobileCaptureFinalizeView(TreasurerRequiredMixin, View):
 
         from .ocr_service import ReceiptOcrService
 
-        if not ReceiptOcrService.is_available():
-            messages.error(
-                request,
-                "La capture mobile ne peut pas continuer sans analyse OCR.",
+        # Safety net: process any receipts that weren't OCR'd yet
+        unprocessed = [r for r in receipts if r.ocr_status not in (OcrStatus.EXTRACTED, OcrStatus.FAILED)]
+        if unprocessed and ReceiptOcrService.is_available():
+            _, error_message = ReceiptOcrService.process_receipts_batch(
+                unprocessed,
+                house=request.user.house,
             )
-            return redirect("bons:mobile-capture")
-
-        _, error_message = ReceiptOcrService.process_receipts_batch(
-            receipts,
-            house=request.user.house,
-        )
-        if error_message:
-            messages.warning(request, error_message)
+            if error_message:
+                messages.warning(request, error_message)
 
         issues = _mobile_capture_signature_issues(receipts)
         if issues:
-            BonDeCommande.objects.filter(pk=scan_session.pk).update(
-                status=BonStatus.DRAFT,
-            )
-            messages.error(
+            messages.warning(
                 request,
-                "Traitement refusé: chaque capture doit permettre d'identifier la signature requise avec un numéro d'appartement, ou être liée à un BC papier signé.",
+                "Certaines captures n'ont pas de signature lisible avec numéro d'appartement, "
+                "ou ne sont pas liées à un BC papier signé. Elles ont quand même été envoyées "
+                "en révision pour vérification manuelle.",
             )
             for issue in issues:
-                messages.error(request, issue)
-            return redirect("bons:mobile-capture")
+                messages.warning(request, issue)
 
         BonDeCommande.objects.filter(pk=scan_session.pk).update(
             status=BonStatus.READY_FOR_REVIEW,
@@ -2010,6 +2147,43 @@ def _get_mismatch_warning(receipt):
     except (ValueError, TypeError):
         return None
     return None
+
+
+def _get_amount_consistency_warning(receipt):
+    """Flag extracted amount combinations that look incomplete or inconsistent."""
+    extracted_fields = _safe_extracted_fields(receipt)
+    if extracted_fields is None:
+        return None
+    warning = build_amount_consistency_warning(
+        subtotal=(
+            extracted_fields.final_subtotal
+            if extracted_fields.final_subtotal is not None
+            else extracted_fields.subtotal_candidate
+        ),
+        tps=(
+            extracted_fields.final_tps
+            if extracted_fields.final_tps is not None
+            else extracted_fields.tps_candidate
+        ),
+        tvq=(
+            extracted_fields.final_tvq
+            if extracted_fields.final_tvq is not None
+            else extracted_fields.tvq_candidate
+        ),
+        untaxed_extra_amount=(
+            extracted_fields.final_untaxed_extra_amount
+            if extracted_fields.final_untaxed_extra_amount is not None
+            else extracted_fields.untaxed_extra_amount_candidate
+        ),
+        total=(
+            extracted_fields.final_total
+            if extracted_fields.final_total is not None
+            else extracted_fields.total_candidate
+        ),
+    )
+    if warning:
+        warning["filename"] = receipt.original_filename
+    return warning
 
 
 class OcrReviewView(TreasurerRequiredMixin, View):
@@ -2476,11 +2650,6 @@ class OcrReviewView(TreasurerRequiredMixin, View):
 
             self._fill_bon_from_receipts(bon, all_docs, is_paper_bc=True)
 
-            # Run digital invoice duplicate detection on each receipt
-            from .ocr_service import DuplicateDetectionService
-            for r in all_docs:
-                DuplicateDetectionService.check_and_flag_duplicates(r, house)
-
             created_bons.append(bon)
 
         # --- Orphan invoices (no matching paper BC) → treat as regular ---
@@ -2518,11 +2687,6 @@ class OcrReviewView(TreasurerRequiredMixin, View):
                 r.save(update_fields=["bon_de_commande_id"])
 
             self._fill_bon_from_receipts(bon, group_receipts)
-
-            # Run duplicate detection on each receipt
-            from .ocr_service import DuplicateDetectionService
-            for r in group_receipts:
-                DuplicateDetectionService.check_and_flag_duplicates(r, house)
 
             created_bons.append(bon)
 
@@ -2705,6 +2869,7 @@ class OcrReviewView(TreasurerRequiredMixin, View):
 
     def _render(self, request, bon, receipt, form, idx, total, matched_member_name, name_mismatch=False, document_type="receipt", expense_member_mismatch=False, validator_member_mismatch=False, validator_is_external=False):
         mismatch_warning = _get_mismatch_warning(receipt)
+        amount_consistency_warning = _get_amount_consistency_warning(receipt)
         review_values = {}
         for key in REVIEW_CONFIDENCE_KEYS:
             bound_field_name = f"{form.prefix}-{key}" if form.prefix else key
@@ -2726,6 +2891,7 @@ class OcrReviewView(TreasurerRequiredMixin, View):
             "validator_is_external": validator_is_external,
             "document_type": document_type,
             "mismatch_warning": mismatch_warning,
+            "amount_consistency_warning": amount_consistency_warning,
             "review_field_confidences": build_receipt_review_confidence_badges(
                 receipt,
                 review_values,

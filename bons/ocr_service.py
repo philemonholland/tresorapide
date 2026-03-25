@@ -19,6 +19,7 @@ from .ai_confidence import (
     OCR_FIELD_CONFIDENCE_KEYS,
     build_complete_ai_confidence_scores,
 )
+from .amounts import build_amount_consistency_warning, cap_amount_confidence_scores
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +30,7 @@ except ImportError:
     OPENAI_AVAILABLE = False
 
 try:
-    from PIL import Image, ImageDraw, ImageFont
+    from PIL import Image, ImageDraw, ImageFont, ImageOps
     PILLOW_AVAILABLE = True
 except ImportError:
     PILLOW_AVAILABLE = False
@@ -51,6 +52,15 @@ financiers pour une coopérative d'habitation au Québec.
 L'image contient un ou plusieurs documents (reçus, factures, bons de commande \
 papier), chacun précédé d'un bandeau avec le nom du fichier original et le \
 numéro de page (ex: «BC16011.pdf - Page 1» ou «TestRecu1.png»).
+
+PHOTOS MOBILES: L'image peut provenir d'un téléphone et montrer un document \
+(reçu, facture, bon de commande) posé sur une surface (table, comptoir, \
+plancher) avec de l'arrière-plan visible. Concentre-toi UNIQUEMENT sur le \
+document lui-même — ignore complètement l'arrière-plan, les surfaces, les \
+ombres et tout objet non pertinent. Si le document n'occupe qu'une partie de \
+l'image, extrais quand même toutes les données possibles de ce document. Si \
+l'image ne contient pas de bandeau avec un nom de fichier, traite l'image \
+entière comme UN SEUL document.
 
 IMPORTANT: Un même document peut s'étendre sur PLUSIEURS sous-images \
 consécutives (ex: facture de plusieurs pages, reçu photographié en 2 parties). \
@@ -120,8 +130,10 @@ Retourne UNIQUEMENT un tableau JSON. Chaque élément = un document distinct:
 ]
 
 Règles:
-- filename: reproduis EXACTEMENT le nom affiché dans le bandeau. Si un document \
-s'étend sur plusieurs sous-images, utilise le nom de la première.
+- filename: reproduis EXACTEMENT le nom affiché dans le bandeau au-dessus du \
+document. Si un document s'étend sur plusieurs sous-images, utilise le nom de \
+la première. Si aucun bandeau n'est visible (photo mobile directe), utilise \
+le nom de fichier fourni dans le message ou "mobile_capture" comme fallback.
 - document_type: "paper_bc", "invoice", ou "receipt".
 - bc_number: pour "paper_bc" seulement — le numéro sous "Notre numéro de \
 commande". Laisser "" pour les autres types.
@@ -173,6 +185,20 @@ de commande associé, ou une section « montant ». C'est CRITIQUE pour la \
 vérification croisée avec le bon de commande papier. Si le prix unitaire et \
 la quantité sont visibles mais pas de sous-total explicite, calculer \
 prix × quantité comme subtotal.
+- Vérification interne OBLIGATOIRE des montants: quand subtotal, tps, tvq, \
+  untaxed_extra_amount et total sont visibles, compare toujours \
+  subtotal + tps + tvq + untaxed_extra_amount au total. Si les montants ne se \
+  réconcilient pas exactement, conserve les valeurs telles que lues sur le \
+  document, mais baisse fortement la confiance des champs financiers concernés.
+- Confiance CONSERVATRICE: n'utilise 9 que si la valeur est parfaitement \
+  lisible, explicite, imprimée/net, et cohérente avec le reste du document. Si \
+  tu dois déduire, hésiter, ou si les montants/taxes ne se réconcilient pas \
+  parfaitement, reste à 6 ou moins. En cas d'ambiguïté importante, utilise 3 ou \
+  moins.
+- Si la photo contient de l'arrière-plan visible (surface, objets non liés au \
+  document), baisse la confiance de 1 point pour tous les champs par rapport à \
+  ce que tu aurais donné pour un scan propre, car les conditions de capture sont \
+  moins idéales.
 - summary: courte description du contenu du document. Garde le resume a
   l'essentiel: decris simplement les articles, travaux ou achats, sans
   ajouter de formule comme "Bon de commande pour", "Recu pour",
@@ -287,7 +313,7 @@ class ReceiptOcrService:
             (PNG bytes of the composite image, list of page labels in order)
         """
         BANNER_HEIGHT = 40
-        TARGET_WIDTH = 1200
+        MAX_TARGET_WIDTH = 2200
         PADDING = 10
 
         panels = []
@@ -299,7 +325,7 @@ class ReceiptOcrService:
 
             if lower_path.endswith(".pdf") and PDF2IMAGE_AVAILABLE:
                 try:
-                    pdf_pages = convert_from_path(file_path, dpi=200)
+                    pdf_pages = convert_from_path(file_path, dpi=300)
                     for i, page_img in enumerate(pdf_pages):
                         page_label = f"{label} - Page {i + 1}" if len(pdf_pages) > 1 else label
                         page_images.append((page_label, page_img))
@@ -315,14 +341,16 @@ class ReceiptOcrService:
                     continue
 
             for page_label, img in page_images:
+                img = ImageOps.exif_transpose(img)
                 if img.mode != "RGB":
                     img = img.convert("RGB")
 
-                ratio = TARGET_WIDTH / img.width
-                new_h = int(img.height * ratio)
-                img = img.resize((TARGET_WIDTH, new_h), Image.LANCZOS)
+                if img.width > MAX_TARGET_WIDTH:
+                    ratio = MAX_TARGET_WIDTH / img.width
+                    new_h = int(img.height * ratio)
+                    img = img.resize((MAX_TARGET_WIDTH, new_h), Image.LANCZOS)
 
-                banner = Image.new("RGB", (TARGET_WIDTH, BANNER_HEIGHT), (40, 40, 40))
+                banner = Image.new("RGB", (img.width, BANNER_HEIGHT), (40, 40, 40))
                 draw = ImageDraw.Draw(banner)
                 try:
                     font = ImageFont.truetype(
@@ -339,8 +367,9 @@ class ReceiptOcrService:
         if not panels:
             raise ValueError("Aucune image valide à analyser.")
 
+        composite_width = max(panel.width for panel in panels)
         total_height = sum(p.height for p in panels) + PADDING * (len(panels) - 1)
-        composite = Image.new("RGB", (TARGET_WIDTH, total_height), (255, 255, 255))
+        composite = Image.new("RGB", (composite_width, total_height), (255, 255, 255))
         y = 0
         for panel in panels:
             composite.paste(panel, (0, y))
@@ -444,6 +473,7 @@ class ReceiptOcrService:
                             "type": "image_url",
                             "image_url": {
                                 "url": f"data:image/png;base64,{image_b64}",
+                                "detail": "high",
                             },
                         },
                     ],
@@ -514,10 +544,25 @@ class ReceiptOcrService:
             return False
         return str(value).strip().lower() in {"1", "true", "yes", "oui"}
 
+    @staticmethod
+    def _json_safe_value(value):
+        if isinstance(value, dict):
+            return {
+                str(key): ReceiptOcrService._json_safe_value(item)
+                for key, item in value.items()
+            }
+        if isinstance(value, (list, tuple)):
+            return [ReceiptOcrService._json_safe_value(item) for item in value]
+        if isinstance(value, Decimal):
+            return str(value)
+        if isinstance(value, date):
+            return value.isoformat()
+        return value
+
     @classmethod
     def _parse_one(cls, data: dict) -> dict:
         """Parse a single document entry from the GPT JSON response."""
-        return {
+        parsed = {
             "filename": str(data.get("filename") or ""),
             "document_type": str(data.get("document_type") or "receipt").strip(),
             "bc_number": str(data.get("bc_number") or "").strip(),
@@ -544,6 +589,22 @@ class ReceiptOcrService:
                 allowed_keys=OCR_FIELD_CONFIDENCE_KEYS,
             ),
         }
+        return cls._apply_conservative_confidence_guards(parsed)
+
+    @staticmethod
+    def _apply_conservative_confidence_guards(parsed: dict) -> dict:
+        warning = build_amount_consistency_warning(
+            subtotal=parsed.get("subtotal"),
+            tps=parsed.get("tps"),
+            tvq=parsed.get("tvq"),
+            total=parsed.get("total"),
+            untaxed_extra_amount=parsed.get("untaxed_extra_amount"),
+        )
+        parsed["field_confidence_scores"] = cap_amount_confidence_scores(
+            parsed.get("field_confidence_scores"),
+            warning,
+        )
+        return parsed
 
     @classmethod
     def _parse_batch_response(cls, raw_text: str, filenames: list[str]) -> list[dict]:
@@ -580,22 +641,37 @@ class ReceiptOcrService:
 
         # Tag each result with its source_filename (the original upload name).
         # GPT filenames may be page labels like "X.pdf - Page 2"; map them back.
+        already_matched = set()
         for r in results:
             gpt_fn = r["filename"]
             # Exact match
             if gpt_fn in filenames:
                 r["source_filename"] = gpt_fn
+                already_matched.add(gpt_fn)
                 continue
-            # Fuzzy: GPT filename contains or is contained by an original name
+            # Fuzzy: GPT filename contains or is contained by an original name,
+            # also checking the base name (without ::rPK suffix).
             matched = False
             for fn in filenames:
-                if fn and gpt_fn and (fn in gpt_fn or gpt_fn in fn):
+                base_fn = fn.split("::r")[0] if "::r" in fn else fn
+                if fn and gpt_fn and (
+                    fn in gpt_fn or gpt_fn in fn
+                    or base_fn in gpt_fn or gpt_fn in base_fn
+                ):
                     r["source_filename"] = fn
+                    already_matched.add(fn)
                     matched = True
                     break
             if not matched:
-                # Fallback: assign to first filename (single-file uploads)
-                r["source_filename"] = filenames[0] if filenames else ""
+                # Fallback: assign to the first filename not yet matched
+                for fn in filenames:
+                    if fn not in already_matched:
+                        r["source_filename"] = fn
+                        already_matched.add(fn)
+                        matched = True
+                        break
+                if not matched:
+                    r["source_filename"] = filenames[0] if filenames else ""
 
         # Ensure every input filename has at least one result
         seen_sources = {r["source_filename"] for r in results}
@@ -658,14 +734,19 @@ class ReceiptOcrService:
                 r.save(update_fields=["ocr_status", "ocr_raw_text"])
             return empties, msg
 
-        # Build file map: filename → file path (images AND PDFs)
+        # Build file map: unique_key → file path (images AND PDFs)
+        # Use unique keys (filename::rPK) to avoid collisions when
+        # multiple uploads share the same original_filename.
         file_map = {}
+        receipt_key_map = {}
         for r in receipt_file_objs:
             r.ocr_status = OcrStatus.PENDING
             r.save(update_fields=["ocr_status"])
             ct = (r.content_type or "").lower()
             if ct.startswith("image/") or ct == "application/pdf":
-                file_map[r.original_filename] = r.file.path
+                unique_key = f"{r.original_filename}::r{r.pk}"
+                file_map[unique_key] = r.file.path
+                receipt_key_map[unique_key] = r
 
         if not file_map:
             msg = "Aucun fichier analysable (images et PDF supportés)."
@@ -694,19 +775,21 @@ class ReceiptOcrService:
             model = _get_openai_model()
 
             for receipt_obj in receipt_file_objs:
+                unique_key = f"{receipt_obj.original_filename}::r{receipt_obj.pk}"
                 fn = receipt_obj.original_filename
-                file_results = results_by_source.get(fn, [cls._empty_result(fn)])
+                file_results = results_by_source.get(unique_key, [cls._empty_result(fn)])
+                json_safe_file_results = cls._json_safe_value(file_results)
 
                 # Store ALL results from this file as raw JSON
-                receipt_obj.ocr_raw_text = json.dumps(file_results, default=str)
+                receipt_obj.ocr_raw_text = json.dumps(json_safe_file_results)
                 receipt_obj.ocr_status = OcrStatus.EXTRACTED
                 receipt_obj.save(update_fields=["ocr_raw_text", "ocr_status"])
 
                 ReceiptOcrResult.objects.create(
                     receipt_file=receipt_obj,
                     engine_name=f"openai-{model}",
-                    raw_text=json.dumps(file_results, default=str),
-                    raw_json=file_results,
+                    raw_text=json.dumps(json_safe_file_results),
+                    raw_json=json_safe_file_results,
                 )
 
                 # Primary extracted fields: use the first result (paper_bc if

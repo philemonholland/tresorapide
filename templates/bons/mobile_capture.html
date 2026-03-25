@@ -45,8 +45,10 @@
         </div>
 
         <div class="message info">
-            📌 Signature avec numéro d'appartement obligatoire. Les factures seules seront refusées
-            si elles ne sont pas accompagnées d'un bon de commande papier signé dans la même capture.
+            📌 Essayez de capturer une signature lisible avec numéro d'appartement. Si ce n'est pas
+            possible, la capture ira quand même en révision avec un avertissement. Vous pouvez
+            prendre une photo avec la caméra ou choisir une image existante de votre galerie.
+            Chaque photo sera analysée immédiatement après l'envoi.
         </div>
 
         <form method="post" enctype="multipart/form-data" class="stack mobile-capture-form" id="mobile-capture-form">
@@ -74,14 +76,25 @@
                 {% for error in form.photo.errors %}<p class="error-text">{{ error }}</p>{% endfor %}
             </div>
 
-            <div class="mobile-capture-toolbar">
-                <button
-                    type="button"
-                    class="btn btn-primary btn-lg mobile-capture-trigger"
-                    {% if not can_add_mobile_photo %}disabled{% endif %}
-                >
+            <div id="mobile-photo-preview" class="mobile-photo-preview-area" hidden>
+                <img id="mobile-preview-img" class="mobile-preview-img" alt="Aperçu">
+                <p class="text-muted">L'image sera envoyée en qualité originale pour l'analyse.</p>
+            </div>
+
+            <div class="mobile-capture-toolbar" id="mobile-camera-toolbar">
+                <button type="button" class="btn btn-primary btn-lg mobile-capture-trigger" id="btn-camera"
+                    {% if not can_add_mobile_photo %}disabled{% endif %}>
                     📷 Prendre une photo
                 </button>
+                <button type="button" class="btn btn-lg mobile-capture-trigger" id="btn-gallery"
+                    {% if not can_add_mobile_photo %}disabled{% endif %}>
+                    📁 Choisir une image
+                </button>
+            </div>
+
+            <div id="mobile-photo-actions" class="mobile-capture-toolbar" hidden>
+                <button type="submit" class="btn btn-success btn-lg">✅ Ajouter cette photo</button>
+                <button type="button" class="btn" id="btn-retake">❌ Reprendre</button>
             </div>
         </form>
 
@@ -123,6 +136,15 @@
                             <p class="text-muted">
                                 Ajoutée le {{ receipt.created_at|date:"Y-m-d H:i" }}
                             </p>
+                            {% if receipt.ocr_status == "EXTRACTED" %}
+                                <span class="mobile-ocr-badge extracted">✅ Analysée</span>
+                            {% elif receipt.ocr_status == "PENDING" %}
+                                <span class="mobile-ocr-badge pending">⏳ En cours</span>
+                            {% elif receipt.ocr_status == "FAILED" %}
+                                <span class="mobile-ocr-badge failed">❌ Erreur</span>
+                            {% else %}
+                                <span class="mobile-ocr-badge pending">⏳ En attente</span>
+                            {% endif %}
                         </div>
                     </article>
                 {% endfor %}
@@ -133,19 +155,55 @@
     <script>
     document.addEventListener('DOMContentLoaded', function() {
         var fileInput = document.querySelector('#mobile-capture-form input[type="file"]');
-        var trigger = document.querySelector('.mobile-capture-trigger');
-        var form = document.getElementById('mobile-capture-form');
-        if (!fileInput || !trigger || !form) return;
+        var btnCamera = document.getElementById('btn-camera');
+        var btnGallery = document.getElementById('btn-gallery');
+        var btnRetake = document.getElementById('btn-retake');
+        var previewArea = document.getElementById('mobile-photo-preview');
+        var previewImg = document.getElementById('mobile-preview-img');
+        var actionsArea = document.getElementById('mobile-photo-actions');
+        var cameraToolbar = document.getElementById('mobile-camera-toolbar');
+        if (!fileInput || !btnCamera || !btnGallery) return;
 
         fileInput.classList.add('mobile-camera-input');
-        trigger.addEventListener('click', function() {
+        var objectUrl = '';
+
+        function showPreview(file) {
+            if (objectUrl) URL.revokeObjectURL(objectUrl);
+            objectUrl = URL.createObjectURL(file);
+            previewImg.src = objectUrl;
+            previewArea.hidden = false;
+            actionsArea.hidden = false;
+            if (cameraToolbar) cameraToolbar.hidden = true;
+        }
+
+        function clearPreview() {
+            previewArea.hidden = true;
+            actionsArea.hidden = true;
+            if (cameraToolbar) cameraToolbar.hidden = false;
+            previewImg.removeAttribute('src');
+            if (objectUrl) { URL.revokeObjectURL(objectUrl); objectUrl = ''; }
+            fileInput.value = '';
+        }
+
+        btnCamera.addEventListener('click', function() {
+            fileInput.setAttribute('capture', 'environment');
             fileInput.click();
         });
+
+        btnGallery.addEventListener('click', function() {
+            fileInput.removeAttribute('capture');
+            fileInput.click();
+        });
+
         fileInput.addEventListener('change', function() {
             if (fileInput.files && fileInput.files.length > 0) {
-                form.submit();
+                showPreview(fileInput.files[0]);
             }
         });
+
+        if (btnRetake) {
+            btnRetake.addEventListener('click', clearPreview);
+        }
     });
     </script>
 {% endblock %}

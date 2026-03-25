@@ -63,6 +63,24 @@
     </section>
     {% endif %}
 
+    {% if amount_consistency_warning %}
+    <section class="card" style="background: #fff3cd; border: 2px solid #ffeeba;">
+        <div style="color: #856404;">
+            <h2 style="margin-bottom: 0.5rem;">⚠️ MONTANTS À VÉRIFIER</h2>
+            <p>
+                Le document <strong>{{ amount_consistency_warning.filename }}</strong> présente des montants
+                incomplets ou incohérents. Sous-total extrait :
+                <strong>{{ amount_consistency_warning.subtotal }} $</strong>, somme calculée :
+                <strong>{{ amount_consistency_warning.entered_sum }} $</strong>, total extrait :
+                <strong>{{ amount_consistency_warning.total }} $</strong>, TPS extraite / attendue :
+                <strong>{{ amount_consistency_warning.actual_tps }} $ / {{ amount_consistency_warning.expected_tps }} $</strong>,
+                TVQ extraite / attendue :
+                <strong>{{ amount_consistency_warning.actual_tvq }} $ / {{ amount_consistency_warning.expected_tvq }} $</strong>.
+            </p>
+        </div>
+    </section>
+    {% endif %}
+
     <section class="card">
         <div class="section-heading">
             <div>

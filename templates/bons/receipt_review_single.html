@@ -46,6 +46,22 @@
         </div>
         {% endif %}
 
+        {% if amount_consistency_warning %}
+        <div class="message" style="margin-bottom: 1rem; background: #fff3cd; color: #856404; border: 1px solid #ffeeba; border-radius: 4px; padding: 0.75rem 1rem;">
+            ⚠️ <strong>Montants à vérifier.</strong>
+            <ul style="margin: 0.5rem 0 0.5rem 1.25rem;">
+                {% for issue in amount_consistency_warning.issues %}
+                <li>{{ issue }}</li>
+                {% endfor %}
+            </ul>
+            Sous-total extrait : <strong>{{ amount_consistency_warning.subtotal }} $</strong>,
+            somme calculée : <strong>{{ amount_consistency_warning.entered_sum }} $</strong>,
+            total extrait : <strong>{{ amount_consistency_warning.total }} $</strong>,
+            TPS extraite / attendue : <strong>{{ amount_consistency_warning.actual_tps }} $ / {{ amount_consistency_warning.expected_tps }} $</strong>,
+            TVQ extraite / attendue : <strong>{{ amount_consistency_warning.actual_tvq }} $ / {{ amount_consistency_warning.expected_tvq }} $</strong>.
+        </div>
+        {% endif %}
+
         {% if receipt.ocr_status == "FAILED" and receipt.ocr_raw_text %}
             <div class="message warning" style="margin-bottom: 1rem;">
                 ⚠️ {{ receipt.ocr_raw_text }}
@@ -257,7 +273,7 @@
                     </fieldset>
 
                     {# Amounts #}
-                    <fieldset style="border: 1px solid #ddd; border-radius: 4px; padding: 1rem; margin-bottom: 1rem;{% if mismatch_warning %} background:#fff5f5; border-color:#f5c6cb;{% endif %}">
+                    <fieldset style="border: 1px solid #ddd; border-radius: 4px; padding: 1rem; margin-bottom: 1rem;{% if mismatch_warning or amount_consistency_warning %} background:#fff5f5; border-color:#f5c6cb;{% endif %}">
                         <legend style="font-weight: bold; padding: 0 0.5rem;">Montants</legend>
 
                         {% if mismatch_warning %}
@@ -267,6 +283,15 @@
                             {% else %}
                                 ⚠️ Le total du BC ({{ mismatch_warning.bc_total }} $) ne correspond pas aux factures associées ({{ mismatch_warning.invoice_total }} $).
                             {% endif %}
+                        </div>
+                        {% endif %}
+
+                        {% if amount_consistency_warning %}
+                        <div class="message warning" style="margin-bottom: 0.75rem; background:#fff3cd; color:#856404; border:1px solid #ffeeba;">
+                            ⚠️ Montants à vérifier : somme calculée {{ amount_consistency_warning.entered_sum }} $,
+                            total extrait {{ amount_consistency_warning.total }} $,
+                            TPS extraite / attendue {{ amount_consistency_warning.actual_tps }} $ / {{ amount_consistency_warning.expected_tps }} $,
+                            TVQ extraite / attendue {{ amount_consistency_warning.actual_tvq }} $ / {{ amount_consistency_warning.expected_tvq }} $.
                         </div>
                         {% endif %}
 
@@ -328,8 +353,8 @@
         var amountHelperFromSubtotal = document.getElementById("amount-helper-from-subtotal");
         var amountHelperMissingTaxes = document.getElementById("amount-helper-missing-taxes");
         var reviewForm = dtField.form;
-        var hasMismatchWarning = {% if mismatch_warning %}true{% else %}false{% endif %};
-        var mismatchConfirmMessage = "{% if mismatch_warning %}{% if mismatch_warning.unverifiable %}Les montants des factures n'ont pas pu être extraits automatiquement. Êtes-vous certain de vouloir confirmer malgré cet avertissement ?{% else %}Le total du BC ne correspond pas aux factures associées. Êtes-vous certain de vouloir confirmer malgré cet avertissement ?{% endif %}{% endif %}";
+        var hasAmountWarning = {% if mismatch_warning or amount_consistency_warning %}true{% else %}false{% endif %};
+        var amountConfirmMessage = "{% if mismatch_warning and amount_consistency_warning %}Le document présente un écart de montants et des incohérences dans les montants extraits. Êtes-vous certain de vouloir confirmer malgré ces avertissements ?{% elif mismatch_warning %}{% if mismatch_warning.unverifiable %}Les montants des factures n'ont pas pu être extraits automatiquement. Êtes-vous certain de vouloir confirmer malgré cet avertissement ?{% else %}Le total du BC ne correspond pas aux factures associées. Êtes-vous certain de vouloir confirmer malgré cet avertissement ?{% endif %}{% elif amount_consistency_warning %}Les montants extraits semblent incomplets ou incohérents avec le total. Êtes-vous certain de vouloir confirmer malgré cet avertissement ?{% endif %}";
 
         function toggle() {
             var val = dtField.value;
@@ -534,9 +559,9 @@
         if (amountHelperMissingTaxes) {
             amountHelperMissingTaxes.addEventListener("click", calculateMissingTaxes);
         }
-        if (reviewForm && hasMismatchWarning) {
+        if (reviewForm && hasAmountWarning) {
             reviewForm.addEventListener("submit", function(event) {
-                if (!window.confirm(mismatchConfirmMessage)) {
+                if (!window.confirm(amountConfirmMessage)) {
                     event.preventDefault();
                 }
             });

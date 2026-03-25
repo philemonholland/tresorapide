@@ -81,11 +81,30 @@ class Command(BaseCommand):
             action="store_true",
             help="Delete existing BB data before seeding.",
         )
+        parser.add_argument(
+            "--force",
+            action="store_true",
+            help="Seed BB even if the database already contains existing app data.",
+        )
 
     @transaction.atomic
     def handle(self, *args, **options):
         if options["reset"]:
             self._reset()
+        elif not options["force"]:
+            existing_sections = self._existing_data_sections()
+            if existing_sections:
+                summary = ", ".join(existing_sections)
+                self.stdout.write(
+                    self.style.WARNING(
+                        "Base de donnees deja configuree; seed BB automatique ignore."
+                    )
+                )
+                self.stdout.write(
+                    f"  Sections deja peuplees: {summary}. "
+                    "Utilisez --force pour semer BB quand meme, ou --reset pour repartir de zero."
+                )
+                return
 
         house = self._create_house()
         members_map = self._create_members(house)
@@ -100,6 +119,20 @@ class Command(BaseCommand):
             f"budget 2026, {len(sub_budgets)} sous-budgets, "
             f"{len(BB_EXPENSES)} dépenses."
         ))
+
+    def _existing_data_sections(self):
+        existing_sections = []
+        checks = (
+            ("maisons", House.objects.all()),
+            ("membres", Member.objects.all()),
+            ("budgets", BudgetYear.objects.all()),
+            ("dépenses", Expense.objects.all()),
+            ("utilisateurs", User.objects.all()),
+        )
+        for label, queryset in checks:
+            if queryset.exists():
+                existing_sections.append(label)
+        return existing_sections
 
     def _reset(self):
         """Delete all BB-related data for a clean re-seed."""
@@ -140,6 +173,7 @@ class Command(BaseCommand):
     def _create_members(self, house):
         """Create members, apartments, and residencies for BB."""
         members_map = {}
+        seed_start_date = date(2026, 1, 1)
         for apt_code, first, last in BB_MEMBERS:
             # Create or get member
             member, _ = Member.objects.get_or_create(
@@ -155,14 +189,26 @@ class Command(BaseCommand):
                 defaults={"is_active": True},
             )
 
-            # Create residency if none exists
-            if not Residency.objects.filter(
-                member=member, apartment=apartment, end_date__isnull=True
-            ).exists():
+            existing_seed_residency = Residency.objects.filter(
+                member=member,
+                apartment=apartment,
+                start_date=seed_start_date,
+            ).exists()
+            if existing_seed_residency:
+                members_map[apt_code] = member
+                continue
+
+            if member.residencies.exists():
+                self.stdout.write(
+                    self.style.WARNING(
+                        f"  Résidence BB ignorée pour {member.display_name} : historique existant."
+                    )
+                )
+            else:
                 Residency.objects.create(
                     member=member,
                     apartment=apartment,
-                    start_date=date(2026, 1, 1),
+                    start_date=seed_start_date,
                 )
 
             members_map[apt_code] = member
