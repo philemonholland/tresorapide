@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import subprocess
 import sys
 import time
@@ -111,11 +112,20 @@ def main() -> int:
     backup_dir = Path(args.backup_dir).expanduser().resolve()
     database_path = backup_dir / "database.sql"
     media_path = backup_dir / "media.tar.gz"
+    metadata_path = backup_dir / "backup-metadata.json"
+    metadata = None
 
     if not database_path.exists():
         raise FileNotFoundError(f"Missing database dump: {database_path}")
     if not media_path.exists():
         raise FileNotFoundError(f"Missing media archive: {media_path}")
+    if metadata_path.exists():
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        if metadata.get("secrets_included") is False:
+            print(
+                "Note: this backup excludes secrets. "
+                "Make sure the current secret store and .env configuration are already correct."
+            )
 
     run(["docker", "compose", "up", "-d", "db"])
     wait_for_exec(

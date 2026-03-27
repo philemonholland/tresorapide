@@ -35,6 +35,7 @@ On the first run, the launcher:
 - creates or repairs `.env` from `.env.example`
 - asks for the LAN hostname/IP and ports it should use
 - generates secure values such as `DJANGO_SECRET_KEY` and `POSTGRES_PASSWORD` when needed
+- stores generated secrets in file-backed host storage instead of leaving them in plaintext `.env`
 - validates `docker-compose.yml`, starts the stack, and waits for `http://localhost:<port>/api/ready/`
 - offers to run `createsuperuser` if no users exist yet
 - opens the app in your default browser unless you disable that
@@ -97,8 +98,9 @@ Copy-Item .env.example .env
 
 Before you start the stack, edit `.env` and replace:
 
-- `DJANGO_SECRET_KEY`
-- `POSTGRES_PASSWORD`
+- `SECRETS_DIR` if you do not want the default secret-file location
+- `DJANGO_SECRET_KEY` or `DJANGO_SECRET_KEY_FILE`
+- `POSTGRES_PASSWORD` or `POSTGRES_PASSWORD_FILE`
 - `192.168.1.50` with the actual LAN IP address or hostname of the machine running Docker
 - `APP_PUBLISHED_PORT` or `POSTGRES_PUBLISHED_PORT` only if `8000` or `5432` are already in use on the host
 
@@ -137,15 +139,17 @@ PostgreSQL is published to `127.0.0.1` on the configured host port, so database 
 
 ### 4. Backups
 
-Back up three things together:
+Back up the operational data together:
 
-1. `.env` for secrets and host-specific settings
-2. `database.sql` from PostgreSQL
-3. `media.tar.gz` from the media volume
+1. `database.sql` from PostgreSQL
+2. `media.tar.gz` from the media volume
+3. `backup-metadata.json` that records the bundle format and whether the storage was protected at rest
 
 Static files do not need to be backed up because `collectstatic` rebuilds them during startup and restore.
 
-The repo now includes a backup helper that creates timestamped folders under `.\backups\`:
+On Windows, the backup helper now defaults to a protected per-user folder under Local AppData instead of the repo tree. You can still override the target with `--output-root`.
+
+The repo now includes a backup helper that creates timestamped folders under the chosen backup root:
 
 ```powershell
 python .\scripts\compose_backup.py
@@ -155,7 +159,9 @@ Each backup folder contains:
 
 - `database.sql`
 - `media.tar.gz`
-- `.env.backup` when `.env` exists locally
+- `backup-metadata.json`
+
+Secrets are intentionally not copied into backup folders. Keep your secret store (`SECRETS_DIR`) protected and backed up separately.
 
 Suggested convention: keep at least one recent daily backup and one recent pre-upgrade backup before schema or deployment changes.
 

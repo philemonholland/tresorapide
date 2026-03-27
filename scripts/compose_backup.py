@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import argparse
-import shutil
+import json
 import subprocess
 import sys
 import time
@@ -11,8 +11,16 @@ from datetime import datetime
 from pathlib import Path
 from typing import TextIO
 
+try:
+    from scripts.host_storage_security import (
+        ensure_protected_directory,
+        get_default_backup_root,
+    )
+except ImportError:  # pragma: no cover - direct script execution path
+    from host_storage_security import ensure_protected_directory, get_default_backup_root
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_BACKUP_ROOT = PROJECT_ROOT / "backups"
+DEFAULT_BACKUP_ROOT = get_default_backup_root(PROJECT_ROOT)
 TEMP_MEDIA_ARCHIVE = "/tmp/tresorapide-backup/media.tar.gz"
 
 CREATE_MEDIA_ARCHIVE_SCRIPT = """
@@ -74,6 +82,11 @@ def parse_args() -> argparse.Namespace:
         default=str(DEFAULT_BACKUP_ROOT),
         help="Directory that receives timestamped backup folders.",
     )
+    parser.add_argument(
+        "--allow-unprotected-storage",
+        action="store_true",
+        help="Allow writing backups without Windows at-rest protection when EFS is unavailable.",
+    )
     return parser.parse_args()
 
 
@@ -85,13 +98,15 @@ def main() -> int:
     backup_dir = backup_root / timestamp
     database_path = backup_dir / "database.sql"
     media_path = backup_dir / "media.tar.gz"
-    env_copy_path = backup_dir / ".env.backup"
+    metadata_path = backup_dir / "backup-metadata.json"
 
-    backup_dir.mkdir(parents=True, exist_ok=False)
-
-    env_path = PROJECT_ROOT / ".env"
-    if env_path.exists():
-        shutil.copy2(env_path, env_copy_path)
+    protected_storage = ensure_protected_directory(backup_dir, exist_ok=False)
+    if not protected_storage and not args.allow_unprotected_storage:
+        raise RuntimeError(
+            "Refusing to create a plaintext backup on this platform. "
+            "Re-run with --allow-unprotected-storage only if you already have "
+            "another trusted at-rest protection mechanism."
+        )
 
     run(["docker", "compose", "up", "-d", "db", "web"])
     wait_for_exec(
@@ -141,15 +156,29 @@ def main() -> int:
         ]
     )
 
+    metadata_path.write_text(
+        json.dumps(
+            {
+                "format_version": 2,
+                "created_at": timestamp,
+                "database_file": database_path.name,
+                "media_file": media_path.name,
+                "secrets_included": False,
+                "protected_storage": protected_storage,
+            },
+            indent=2,
+            sort_keys=True,
+        ) + "\n",
+        encoding="utf-8",
+    )
+
     print("")
     print("Backup completed.")
     print(f"  Folder: {backup_dir}")
     print(f"  Database: {database_path.name}")
     print(f"  Media: {media_path.name}")
-    if env_copy_path.exists():
-        print(f"  Env copy: {env_copy_path.name}")
-    else:
-        print("  Env copy: skipped (.env not present)")
+    print(f"  Metadata: {metadata_path.name}")
+    print(f"  Protected at rest: {'yes' if protected_storage else 'no'}")
     return 0
 
 
@@ -159,3 +188,6 @@ if __name__ == "__main__":
     except subprocess.CalledProcessError as exc:
         print(f"Backup failed with exit code {exc.returncode}.", file=sys.stderr)
         raise SystemExit(exc.returncode) from exc
+    except RuntimeError as exc:
+        print(f"Backup failed: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc

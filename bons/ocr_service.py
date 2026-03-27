@@ -289,9 +289,9 @@ class ReceiptOcrService:
             "retourne aussi l'appartement officiel du répertoire dans apartment_number, "
             "expense_apartment ou validator_apartment.\n"
             "- IMPORTANT pour validator_member_name / validator_apartment sur un paper_bc: "
-            "le 2e signataire peut etre une personne EXTERNE a la coop. N'utilise le "
-            "repertoire pour ce 2e signataire que si le nom manuscrit correspond "
-            "clairement a un membre. Sinon, conserve le nom lu tel quel et laisse "
+            "le 2e signataire peut être une personne EXTERNE à la coop. N'utilise le "
+            "répertoire pour ce 2e signataire que si le nom manuscrit correspond "
+            "clairement à un membre. Sinon, conserve le nom lu tel quel et laisse "
             "validator_apartment vide.\n"
             "- N'invente jamais un membre absent du répertoire. Si aucun match crédible "
             "n'existe, conserve le texte lu tel quel.\n"
@@ -726,7 +726,10 @@ class ReceiptOcrService:
         empties = [cls._empty_result(r.original_filename) for r in receipt_file_objs]
 
         if not cls.is_available():
-            msg = "Clé API OpenAI non configurée. Ajoutez OPENAI_API_KEY dans .env."
+            msg = (
+                "Clé API OpenAI non configurée. Ajoutez OPENAI_API_KEY ou "
+                "OPENAI_API_KEY_FILE dans la configuration."
+            )
             logger.warning(msg)
             for r in receipt_file_objs:
                 r.ocr_status = OcrStatus.FAILED
@@ -835,7 +838,10 @@ class ReceiptOcrService:
             if "insufficient_quota" in error_str or "429" in error_str:
                 msg = "Quota OpenAI épuisé. Vérifiez votre forfait sur platform.openai.com."
             elif "401" in error_str or "invalid_api_key" in error_str:
-                msg = "Clé API OpenAI invalide. Vérifiez OPENAI_API_KEY dans .env."
+                msg = (
+                    "Clé API OpenAI invalide. Vérifiez OPENAI_API_KEY ou "
+                    "OPENAI_API_KEY_FILE dans la configuration."
+                )
             elif "model_not_found" in error_str or "404" in error_str:
                 msg = f"Modèle OpenAI introuvable. Vérifiez OPENAI_MODEL (actuel: {_get_openai_model()})."
             else:

@@ -4,6 +4,10 @@ from django import forms
 from django.core.exceptions import ValidationError
 from django.utils import timezone
 
+from .export_formatting import (
+    DEFAULT_EXPORT_NUMBER_FORMAT,
+    EXPORT_NUMBER_FORMAT_CHOICES,
+)
 from .models import BonDeCommande, BonStatus, ReceiptFile
 from .services import generate_bon_number
 from budget.models import BudgetYear, SubBudget
@@ -188,6 +192,18 @@ class BonExportConfigureForm(forms.Form):
         choices=EXPORT_FORMAT_CHOICES,
         initial="pdf",
         label="Format d'export",
+    )
+    number_format = forms.ChoiceField(
+        choices=EXPORT_NUMBER_FORMAT_CHOICES,
+        initial=DEFAULT_EXPORT_NUMBER_FORMAT,
+        required=False,
+        label="Format numérique",
+        help_text=(
+            "Choisit le séparateur décimal du document exporté. "
+            "L'affichage à l'écran reste toujours avec un point décimal. "
+            "Dans Excel, les montants sont écrits comme texte pour préserver "
+            "exactement le séparateur choisi."
+        ),
     )
     include_ai_confidence = forms.BooleanField(
         required=False,

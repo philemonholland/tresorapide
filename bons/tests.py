@@ -676,7 +676,7 @@ class OcrMemberDirectoryTests(TestCase):
         self.assertIn("RÉPERTOIRE OFFICIEL DES MEMBRES ACTIFS", prompt)
         self.assertIn("Appartement 105: Serge Laroche", prompt)
         self.assertIn("retourne EXACTEMENT le nom officiel", prompt)
-        self.assertIn("le 2e signataire peut etre une personne EXTERNE", prompt)
+        self.assertIn("le 2e signataire peut être une personne EXTERNE", prompt)
 
     def test_resolve_member_assignment_prefers_fuzzy_name_match(self):
         other_member = Member.objects.create(first_name="Pierre", last_name="Bouchard")
@@ -724,6 +724,17 @@ class OcrMemberDirectoryTests(TestCase):
         self.assertEqual(initial["expense_apartment"], "105")
         self.assertFalse(purchaser_mismatch)
         self.assertEqual(purchaser_apartment, self.apartment)
+
+
+class ExportNumberFormattingTests(TestCase):
+    def test_format_money_text_uses_requested_separator(self):
+        from bons.export_formatting import format_money_text
+
+        self.assertEqual(format_money_text(Decimal("19.49")), "19.49 $")
+        self.assertEqual(
+            format_money_text(Decimal("19.49"), number_format="comma"),
+            "19,49 $",
+        )
 
 
 class OcrBatchSplittingTests(TestCase):
@@ -2804,6 +2815,27 @@ class ExportDuplicateVisualAttachmentTests(DuplicateDetectionBaseTest):
             media_files = [name for name in archive.namelist() if name.startswith("xl/media/")]
         self.assertGreaterEqual(len(media_files), 2)
 
+    def test_generate_bon_xlsx_can_use_comma_decimal_format(self):
+        import io
+        from openpyxl import load_workbook
+        from bons.export_formatting import format_money_text
+        from bons.pdf_service import generate_bon_xlsx
+
+        xlsx_bytes = generate_bon_xlsx(self.new_bon, number_format="comma")
+        workbook = load_workbook(io.BytesIO(xlsx_bytes))
+        sheet = workbook[f"BC {self.new_bon.number}"]
+        string_values = [
+            value
+            for row in sheet.iter_rows(values_only=True)
+            for value in row
+            if isinstance(value, str)
+        ]
+        joined_values = " ".join(string_values)
+        self.assertIn(
+            format_money_text(self.new_bon.total, number_format="comma"),
+            joined_values,
+        )
+
     def test_generate_bon_pdf_adds_confidence_page_when_requested(self):
         from bons.pdf_service import generate_bon_pdf
 
@@ -3047,6 +3079,8 @@ class DetailViewDuplicateTests(DuplicateDetectionBaseTest):
         resp = self.client.get(f"/bons/{self.existing_bon.pk}/export/")
         self.assertEqual(resp.status_code, 200)
         self.assertContains(resp, "Configurer l'export")
+        self.assertContains(resp, "Format numérique")
+        self.assertContains(resp, "Virgule décimale (1234,56)")
         self.assertContains(resp, "Inclure les scores de confiance IA")
 
     def test_export_configure_redirects_with_ai_confidence_flag(self):
@@ -3064,6 +3098,24 @@ class DetailViewDuplicateTests(DuplicateDetectionBaseTest):
         self.assertEqual(
             resp["Location"],
             f"/bons/{self.existing_bon.pk}/xlsx/?include_ai_confidence=1",
+        )
+
+    def test_export_configure_redirects_with_number_format_flag(self):
+        self.existing_receipt.ocr_status = OcrStatus.CORRECTED
+        self.existing_receipt.save(update_fields=["ocr_status"])
+        self.client.login(username="tresorier", password="test123")
+        resp = self.client.post(
+            f"/bons/{self.existing_bon.pk}/export/",
+            {
+                "export_format": "xlsx",
+                "include_ai_confidence": "on",
+                "number_format": "comma",
+            },
+        )
+        self.assertEqual(resp.status_code, 302)
+        self.assertEqual(
+            resp["Location"],
+            f"/bons/{self.existing_bon.pk}/xlsx/?include_ai_confidence=1&number_format=comma",
         )
 
     def test_detail_disables_export_when_not_ready(self):

@@ -10,9 +10,14 @@ from decimal import Decimal
 from difflib import SequenceMatcher
 import json
 import unicodedata
+from urllib.parse import urlencode
 
 from accounts.access import RoleRequiredMixin, TreasurerRequiredMixin, check_house_permission
 from core.device import apply_site_mode_preference
+from .export_formatting import (
+    DEFAULT_EXPORT_NUMBER_FORMAT,
+    normalize_export_number_format,
+)
 from .models import (
     BonDeCommande, BonStatus, ReceiptFile, ReceiptExtractedFields, OcrStatus,
     ReimburseTarget,
@@ -2978,6 +2983,9 @@ class BonExportPdfView(RoleRequiredMixin, View):
             include_ai_confidence=_query_param_is_true(
                 request.GET.get("include_ai_confidence")
             ),
+            number_format=normalize_export_number_format(
+                request.GET.get("number_format")
+            ),
         )
         response = HttpResponse(pdf_bytes, content_type="application/pdf")
         response["Content-Disposition"] = f'attachment; filename="BC_{bon.number}.pdf"'
@@ -3013,10 +3021,18 @@ class BonExportConfigureView(RoleRequiredMixin, FormView):
     def form_valid(self, form):
         format_name = form.cleaned_data["export_format"]
         include_ai_confidence = form.cleaned_data.get("include_ai_confidence", False)
+        number_format = normalize_export_number_format(
+            form.cleaned_data.get("number_format")
+        )
         view_name = "bons:export-pdf" if format_name == "pdf" else "bons:export-xlsx"
         export_url = reverse(view_name, kwargs={"pk": self.bon.pk})
+        query_params = {}
         if include_ai_confidence:
-            export_url += "?include_ai_confidence=1"
+            query_params["include_ai_confidence"] = "1"
+        if number_format != DEFAULT_EXPORT_NUMBER_FORMAT:
+            query_params["number_format"] = number_format
+        if query_params:
+            export_url += f"?{urlencode(query_params)}"
         return redirect(export_url)
 
 
@@ -3041,6 +3057,9 @@ class BonExportXlsxView(RoleRequiredMixin, View):
             bon,
             include_ai_confidence=_query_param_is_true(
                 request.GET.get("include_ai_confidence")
+            ),
+            number_format=normalize_export_number_format(
+                request.GET.get("number_format")
             ),
         )
         response = HttpResponse(

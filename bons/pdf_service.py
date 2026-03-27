@@ -29,6 +29,11 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
 
 from .ai_confidence import build_receipt_confidence_summary_rows
+from .export_formatting import (
+    DEFAULT_EXPORT_NUMBER_FORMAT,
+    format_money_text,
+    normalize_export_number_format,
+)
 
 
 COOP_NAME = "COOPÉRATIVE D'HABITATION\nDES CANTONS DE L'EST"
@@ -48,11 +53,9 @@ RECEIPT_PREVIEW_EXCEPTIONS = (
 )
 
 
-def _fmt_money(val):
-    """Format a Decimal as '0.00' or '' if None."""
-    if val is None:
-        return ""
-    return f"{val:.2f} $"
+def _fmt_money(val, *, number_format=DEFAULT_EXPORT_NUMBER_FORMAT):
+    """Format money text for export output."""
+    return format_money_text(val, number_format=number_format)
 
 
 def _duplicate_flags_for_bon(bon):
@@ -143,8 +146,14 @@ def _scaled_xlsx_image(image_bytes, max_width=320, max_height=420):
     return image
 
 
-def generate_bon_pdf(bon, *, include_ai_confidence: bool = False) -> bytes:
+def generate_bon_pdf(
+    bon,
+    *,
+    include_ai_confidence: bool = False,
+    number_format: str = DEFAULT_EXPORT_NUMBER_FORMAT,
+) -> bytes:
     """Generate a PDF for a BonDeCommande matching the paper form layout."""
+    number_format = normalize_export_number_format(number_format)
     buf = io.BytesIO()
     doc = SimpleDocTemplate(
         buf, pagesize=letter,
@@ -265,7 +274,10 @@ def generate_bon_pdf(bon, *, include_ai_confidence: bool = False) -> bytes:
             ef = r.extracted_fields
             desc = ef.final_merchant or ef.merchant_candidate or r.original_filename
             sb_name = ef.sub_budget.name if ef.sub_budget else ""
-            total_val = _fmt_money(ef.final_total or ef.total_candidate)
+            total_val = _fmt_money(
+                ef.final_total or ef.total_candidate,
+                number_format=number_format,
+            )
         except Exception:
             desc = r.original_filename
             sb_name = ""
@@ -303,14 +315,20 @@ def generate_bon_pdf(bon, *, include_ai_confidence: bool = False) -> bytes:
     # ── Totals section ───────────────────────────────────────────────────
     totals_data = []
     if bon.subtotal:
-        totals_data.append(["Sous-total :", _fmt_money(bon.subtotal)])
+        totals_data.append([
+            "Sous-total :",
+            _fmt_money(bon.subtotal, number_format=number_format),
+        ])
     if bon.tps:
-        totals_data.append(["TPS :", _fmt_money(bon.tps)])
+        totals_data.append(["TPS :", _fmt_money(bon.tps, number_format=number_format)])
     if bon.tvq:
-        totals_data.append(["TVQ :", _fmt_money(bon.tvq)])
+        totals_data.append(["TVQ :", _fmt_money(bon.tvq, number_format=number_format)])
     totals_data.append([
         Paragraph("<b>TOTAL</b>", style_right),
-        Paragraph(f"<b>{_fmt_money(bon.total)}</b>", style_right),
+        Paragraph(
+            f"<b>{_fmt_money(bon.total, number_format=number_format)}</b>",
+            style_right,
+        ),
     ])
 
     totals_table = Table(
@@ -531,7 +549,7 @@ def generate_bon_pdf(bon, *, include_ai_confidence: bool = False) -> bytes:
             elements.append(Spacer(1, 0.2 * cm))
             elements.append(Paragraph(
                 "<font size='8'>Les scores 0-9 indiquent le niveau de confiance de l'IA. "
-                "NA signifie que l'information n'a pas ete trouvee sur le document.</font>",
+                "NA signifie que l'information n'a pas été trouvée sur le document.</font>",
                 style_small,
             ))
             elements.append(Spacer(1, 0.3 * cm))
@@ -571,11 +589,17 @@ def generate_bon_pdf(bon, *, include_ai_confidence: bool = False) -> bytes:
     return buf.getvalue()
 
 
-def generate_bon_xlsx(bon, *, include_ai_confidence: bool = False) -> bytes:
+def generate_bon_xlsx(
+    bon,
+    *,
+    include_ai_confidence: bool = False,
+    number_format: str = DEFAULT_EXPORT_NUMBER_FORMAT,
+) -> bytes:
     """Generate an XLSX file for a BonDeCommande."""
     from openpyxl import Workbook
     from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
 
+    number_format = normalize_export_number_format(number_format)
     wb = Workbook()
     ws = wb.active
     ws.title = f"BC {bon.number}"
@@ -594,8 +618,6 @@ def generate_bon_xlsx(bon, *, include_ai_confidence: bool = False) -> bytes:
         left=Side(style="thin"), right=Side(style="thin"),
         top=Side(style="thin"), bottom=Side(style="thin"),
     )
-    money_fmt = '#,##0.00 "$"'
-
     # Header
     ws.merge_cells("A1:D1")
     ws["A1"] = COOP_NAME.replace("\n", " ")
@@ -648,19 +670,22 @@ def generate_bon_xlsx(bon, *, include_ai_confidence: bool = False) -> bytes:
             ef = r.extracted_fields
             desc = ef.final_merchant or ef.merchant_candidate or r.original_filename
             sb_name = ef.sub_budget.name if ef.sub_budget else ""
-            total_val = float(ef.final_total or ef.total_candidate or 0)
+            total_amount = ef.final_total or ef.total_candidate or Decimal("0")
         except Exception:
             desc = r.original_filename
             sb_name = ""
-            total_val = 0
+            total_amount = Decimal("0")
 
         ws.cell(row=row, column=1, value=1).border = border_thin
         ws.cell(row=row, column=1).alignment = Alignment(horizontal="center")
         ws.cell(row=row, column=2, value=desc).border = border_thin
         ws.cell(row=row, column=3, value=sb_name).border = border_thin
-        cell = ws.cell(row=row, column=4, value=total_val)
+        cell = ws.cell(
+            row=row,
+            column=4,
+            value=format_money_text(total_amount, number_format=number_format),
+        )
         cell.border = border_thin
-        cell.number_format = money_fmt
         cell.alignment = Alignment(horizontal="right")
         row += 1
 
@@ -669,19 +694,22 @@ def generate_bon_xlsx(bon, *, include_ai_confidence: bool = False) -> bytes:
     # Totals
     total_labels = []
     if bon.subtotal:
-        total_labels.append(("Sous-total :", float(bon.subtotal)))
+        total_labels.append(("Sous-total :", bon.subtotal))
     if bon.tps:
-        total_labels.append(("TPS :", float(bon.tps)))
+        total_labels.append(("TPS :", bon.tps))
     if bon.tvq:
-        total_labels.append(("TVQ :", float(bon.tvq)))
-    total_labels.append(("TOTAL :", float(bon.total or 0)))
+        total_labels.append(("TVQ :", bon.tvq))
+    total_labels.append(("TOTAL :", bon.total or Decimal("0")))
 
     for label, val in total_labels:
         ws.cell(row=row, column=3, value=label).font = bold
         ws.cell(row=row, column=3).alignment = Alignment(horizontal="right")
-        cell = ws.cell(row=row, column=4, value=val)
+        cell = ws.cell(
+            row=row,
+            column=4,
+            value=format_money_text(val, number_format=number_format),
+        )
         cell.font = bold
-        cell.number_format = money_fmt
         cell.alignment = Alignment(horizontal="right")
         if label == "TOTAL :":
             cell.border = Border(

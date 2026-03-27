@@ -234,6 +234,125 @@ function Write-DotEnvFile {
     [System.IO.File]::WriteAllLines($Path, $Lines, $utf8NoBom)
 }
 
+function Write-TextFile {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [AllowEmptyString()][string]$Value = ""
+    )
+
+    $parent = Split-Path -Parent $Path
+    if (-not [string]::IsNullOrWhiteSpace($parent)) {
+        [System.IO.Directory]::CreateDirectory($parent) | Out-Null
+    }
+
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($Path, $Value, $utf8NoBom)
+}
+
+function Read-TextFileTrimmed {
+    param([Parameter(Mandatory)][string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return ""
+    }
+
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    $content = [System.IO.File]::ReadAllText($Path, $utf8NoBom)
+    return $content.TrimEnd("`r", "`n")
+}
+
+function Get-DefaultSecretsDirectory {
+    if (-not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
+        return (Join-Path $env:LOCALAPPDATA "Tresorapide\secrets")
+    }
+
+    return (Join-Path $script:RepoRootPath ".secrets")
+}
+
+function Get-ContainerSecretPath {
+    param([Parameter(Mandatory)][string]$SecretName)
+
+    return "/run/tresorapide-secrets/$SecretName"
+}
+
+function Get-HostSecretPath {
+    param(
+        [Parameter(Mandatory)][string]$SecretsDirectory,
+        [Parameter(Mandatory)][string]$SecretName
+    )
+
+    return (Join-Path $SecretsDirectory $SecretName)
+}
+
+function Get-SecretNameFromContainerPath {
+    param(
+        [string]$ContainerPath,
+        [Parameter(Mandatory)][string]$DefaultName
+    )
+
+    if ([string]::IsNullOrWhiteSpace($ContainerPath)) {
+        return $DefaultName
+    }
+
+    $parts = @($ContainerPath -split '[\\/]+' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    if ($parts.Count -eq 0) {
+        return $DefaultName
+    }
+
+    return $parts[$parts.Count - 1]
+}
+
+function Get-EffectiveSecretValue {
+    param(
+        [Parameter(Mandatory)]$Values,
+        [Parameter(Mandatory)][string]$RawKey,
+        [Parameter(Mandatory)][string]$FileKey,
+        [Parameter(Mandatory)][string]$SecretsDirectory,
+        [Parameter(Mandatory)][string]$DefaultSecretName
+    )
+
+    $rawValue = if ($Values.Contains($RawKey)) { [string]$Values[$RawKey] } else { "" }
+    if (-not [string]::IsNullOrWhiteSpace($rawValue)) {
+        return $rawValue
+    }
+
+    $containerPath = if ($Values.Contains($FileKey)) { [string]$Values[$FileKey] } else { "" }
+    $secretName = Get-SecretNameFromContainerPath -ContainerPath $containerPath -DefaultName $DefaultSecretName
+    $hostPath = Get-HostSecretPath -SecretsDirectory $SecretsDirectory -SecretName $secretName
+    return (Read-TextFileTrimmed -Path $hostPath)
+}
+
+function Protect-DirectoryAtRest {
+    param([Parameter(Mandatory)][string]$Path)
+
+    [System.IO.Directory]::CreateDirectory($Path) | Out-Null
+
+    $cipherCommand = Get-Command cipher.exe -ErrorAction SilentlyContinue
+    if (-not $cipherCommand) {
+        Fail-Launcher "Windows EFS helper (cipher.exe) was not found. Cannot protect $Path."
+    }
+
+    $output = & $cipherCommand.Source /E /A $Path 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        $detail = [string]::Join([Environment]::NewLine, @($output))
+        Fail-Launcher "Could not enable Windows at-rest protection for $Path.`n$detail"
+    }
+}
+
+function Write-SecretFiles {
+    param(
+        [Parameter(Mandatory)][string]$SecretsDirectory,
+        [Parameter(Mandatory)]$SecretValues
+    )
+
+    Protect-DirectoryAtRest -Path $SecretsDirectory
+
+    foreach ($entry in $SecretValues.GetEnumerator()) {
+        $hostPath = Get-HostSecretPath -SecretsDirectory $SecretsDirectory -SecretName ([string]$entry.Key)
+        Write-TextFile -Path $hostPath -Value ([string]$entry.Value)
+    }
+}
+
 function New-RandomString {
     param(
         [int]$Length = 32,
@@ -580,6 +699,34 @@ function Resolve-EnvironmentConfiguration {
     $changed = $false
     $generatedKeys = New-Object System.Collections.Generic.List[string]
     $normalizedMessages = New-Object System.Collections.Generic.List[string]
+    $configuredSecretsDirectory = if ($Values.Contains("SECRETS_DIR")) { [string]$Values["SECRETS_DIR"] } else { "" }
+    $secretsDirectory = if (
+        [string]::IsNullOrWhiteSpace($configuredSecretsDirectory) -or
+        $configuredSecretsDirectory -in @("./.secrets", ".\.secrets")
+    ) {
+        Get-DefaultSecretsDirectory
+    }
+    else {
+        $configuredSecretsDirectory
+    }
+    $djangoSecretValue = Get-EffectiveSecretValue `
+        -Values $Values `
+        -RawKey "DJANGO_SECRET_KEY" `
+        -FileKey "DJANGO_SECRET_KEY_FILE" `
+        -SecretsDirectory $secretsDirectory `
+        -DefaultSecretName "django_secret_key"
+    $postgresPasswordValue = Get-EffectiveSecretValue `
+        -Values $Values `
+        -RawKey "POSTGRES_PASSWORD" `
+        -FileKey "POSTGRES_PASSWORD_FILE" `
+        -SecretsDirectory $secretsDirectory `
+        -DefaultSecretName "postgres_password"
+    $openaiKeyValue = Get-EffectiveSecretValue `
+        -Values $Values `
+        -RawKey "OPENAI_API_KEY" `
+        -FileKey "OPENAI_API_KEY_FILE" `
+        -SecretsDirectory $secretsDirectory `
+        -DefaultSecretName "openai_api_key"
 
     if ([string]$Values["DATABASE_ENGINE"] -ne "django.db.backends.postgresql") {
         $Values["DATABASE_ENGINE"] = "django.db.backends.postgresql"
@@ -599,14 +746,14 @@ function Resolve-EnvironmentConfiguration {
         $normalizedMessages.Add("Set POSTGRES_PORT to the container port 5432.")
     }
 
-    if (Test-NeedsSecretGeneration -Value ([string]$Values["DJANGO_SECRET_KEY"])) {
-        $Values["DJANGO_SECRET_KEY"] = New-RandomString -Length 64
+    if (Test-NeedsSecretGeneration -Value $djangoSecretValue) {
+        $djangoSecretValue = New-RandomString -Length 64
         $changed = $true
         $generatedKeys.Add("DJANGO_SECRET_KEY")
     }
 
-    if (Test-NeedsPasswordGeneration -Value ([string]$Values["POSTGRES_PASSWORD"])) {
-        $Values["POSTGRES_PASSWORD"] = New-RandomString -Length 32
+    if (Test-NeedsPasswordGeneration -Value $postgresPasswordValue) {
+        $postgresPasswordValue = New-RandomString -Length 32
         $changed = $true
         $generatedKeys.Add("POSTGRES_PASSWORD")
     }
@@ -661,10 +808,9 @@ function Resolve-EnvironmentConfiguration {
             -Validator { param($candidate) Test-IsValidPort -Value $candidate } `
             -ValidationMessage "Enter a port number between 1 and 65535."
 
-        $currentApiKey = if ($Values.ContainsKey("OPENAI_API_KEY")) { [string]$Values["OPENAI_API_KEY"] } else { "" }
         $openaiKey = Get-SetupValue `
             -Prompt "OpenAI API key for receipt analysis (leave blank to skip)" `
-            -DefaultValue $currentApiKey `
+            -DefaultValue $openaiKeyValue `
             -Validator { param($candidate) $true } `
             -ValidationMessage ""
 
@@ -680,7 +826,7 @@ function Resolve-EnvironmentConfiguration {
         $Values["DJANGO_CSRF_TRUSTED_ORIGINS"] = Build-TrustedOrigins -LanHosts $lanHosts -AppPort $appPort
         $Values["APP_PUBLISHED_PORT"] = $appPort
         $Values["POSTGRES_PUBLISHED_PORT"] = "127.0.0.1:$dbPort"
-        $Values["OPENAI_API_KEY"] = $openaiKey
+        $openaiKeyValue = $openaiKey
         $Values["OPENAI_MODEL"] = $openaiModel
         $changed = $true
     }
@@ -715,6 +861,35 @@ function Resolve-EnvironmentConfiguration {
         }
     }
 
+    $targetSecretValues = [ordered]@{
+        "SECRETS_DIR"           = $secretsDirectory
+        "DJANGO_SECRET_KEY"     = ""
+        "DJANGO_SECRET_KEY_FILE" = (Get-ContainerSecretPath -SecretName "django_secret_key")
+        "POSTGRES_PASSWORD"     = ""
+        "POSTGRES_PASSWORD_FILE" = (Get-ContainerSecretPath -SecretName "postgres_password")
+        "OPENAI_API_KEY"        = ""
+        "OPENAI_API_KEY_FILE"    = (Get-ContainerSecretPath -SecretName "openai_api_key")
+    }
+
+    foreach ($entry in $targetSecretValues.GetEnumerator()) {
+        $currentValue = if ($Values.Contains($entry.Key)) { [string]$Values[$entry.Key] } else { "" }
+        if ($currentValue -ne [string]$entry.Value) {
+            $changed = $true
+        }
+
+        $Values[$entry.Key] = [string]$entry.Value
+    }
+
+    $secretFiles = [ordered]@{
+        "django_secret_key" = $djangoSecretValue
+        "postgres_password" = $postgresPasswordValue
+        "openai_api_key"    = $openaiKeyValue
+    }
+
+    if ($normalizedMessages -notcontains "Configured file-backed secret storage for application secrets.") {
+        $normalizedMessages.Add("Configured file-backed secret storage for application secrets.")
+    }
+
     return [pscustomobject]@{
         Values             = $Values
         Changed            = $changed
@@ -723,6 +898,8 @@ function Resolve-EnvironmentConfiguration {
         LanHosts           = @(Get-CustomLanHostsFromAllowedHosts -AllowedHosts ([string]$Values["DJANGO_ALLOWED_HOSTS"]))
         AppPort            = [string]$Values["APP_PUBLISHED_PORT"]
         DatabasePort       = (Get-PortFromBinding -Binding ([string]$Values["POSTGRES_PUBLISHED_PORT"]) -DefaultPort 5432).ToString()
+        SecretsDirectory   = $secretsDirectory
+        SecretValues       = $secretFiles
     }
 }
 
@@ -1020,6 +1197,7 @@ function Show-ConfigurationSummary {
         Write-Host "LAN app URL:   $lanUrl"
     }
     Write-Host "PostgreSQL stays local on 127.0.0.1:$($Configuration.DatabasePort)"
+    Write-Host "Secrets directory: $($Configuration.SecretsDirectory)"
 }
 
 $temporaryEnvPath = $null
@@ -1133,6 +1311,10 @@ try {
         Write-Host "The launcher script parsed successfully, prepared the Docker .env values, and validated docker-compose.yml."
         exit 0
     }
+
+    Write-Step "Writing protected secret files"
+    Write-SecretFiles -SecretsDirectory $configuration.SecretsDirectory -SecretValues $configuration.SecretValues
+    Write-Success "Secret files updated."
 
     if ($configuration.Changed -or -not $envExistsBeforeRun) {
         Write-Step "Writing $EnvFilePath"

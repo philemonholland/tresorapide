@@ -6,51 +6,16 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from .env_helpers import (
+    get_bool_env,
+    get_env,
+    get_int_env,
+    get_list_env,
+    get_path_env,
+)
+
 BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
-
-
-def get_env(name: str, default: str | None = None) -> str:
-    """Return an environment variable or raise when it is required."""
-    value = os.getenv(name, default)
-    if value is None:
-        raise RuntimeError(f"Missing required environment variable: {name}")
-    return value
-
-
-def get_bool_env(name: str, default: bool = False) -> bool:
-    """Parse a boolean-like environment variable value."""
-    value = os.getenv(name)
-    if value is None:
-        return default
-    return value.strip().lower() in {"1", "true", "yes", "on"}
-
-
-def get_int_env(name: str, default: int) -> int:
-    """Parse an integer environment variable value."""
-    value = os.getenv(name)
-    if value is None:
-        return default
-    try:
-        return int(value)
-    except ValueError as exc:
-        raise RuntimeError(f"Environment variable {name} must be an integer.") from exc
-
-
-def get_list_env(name: str, default: list[str]) -> list[str]:
-    """Parse a comma-separated environment variable into a list of strings."""
-    raw_value = os.getenv(name)
-    if raw_value is None:
-        return default
-    return [item.strip() for item in raw_value.split(",") if item.strip()]
-
-
-def get_path_env(name: str, default: Path) -> Path:
-    """Parse a filesystem path environment variable into a Path object."""
-    value = os.getenv(name)
-    if value is None:
-        return default
-    return Path(value)
 
 
 SECRET_KEY = get_env(
@@ -219,5 +184,5 @@ DATA_UPLOAD_MAX_MEMORY_SIZE = 20 * 1024 * 1024  # 20 MB
 FILE_UPLOAD_MAX_MEMORY_SIZE = 10 * 1024 * 1024   # 10 MB
 
 # OpenAI API for receipt analysis (GPT-5.4 Vision)
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.4")
+OPENAI_API_KEY = get_env("OPENAI_API_KEY", "")
+OPENAI_MODEL = get_env("OPENAI_MODEL", "gpt-5.4")

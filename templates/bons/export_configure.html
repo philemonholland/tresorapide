@@ -20,7 +20,19 @@
             <div class="form-group {% if form.export_format.errors %}has-error{% endif %}">
                 <label for="{{ form.export_format.id_for_label }}">{{ form.export_format.label }}</label>
                 {{ form.export_format }}
+                {% if form.export_format.help_text %}
+                    <p class="help-text">{{ form.export_format.help_text }}</p>
+                {% endif %}
                 {% for error in form.export_format.errors %}<p class="error-text">{{ error }}</p>{% endfor %}
+            </div>
+
+            <div class="form-group {% if form.number_format.errors %}has-error{% endif %}">
+                <label for="{{ form.number_format.id_for_label }}">{{ form.number_format.label }}</label>
+                {{ form.number_format }}
+                {% if form.number_format.help_text %}
+                    <p class="help-text">{{ form.number_format.help_text }}</p>
+                {% endif %}
+                {% for error in form.number_format.errors %}<p class="error-text">{{ error }}</p>{% endfor %}
             </div>
 
             <div class="form-group {% if form.include_ai_confidence.errors %}has-error{% endif %}">

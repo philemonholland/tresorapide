@@ -9,5 +9,6 @@ htmlcov/
 staticfiles/
 media/
 backups/
+.secrets/
 TEST/
 budget_example_spreadsheet/
