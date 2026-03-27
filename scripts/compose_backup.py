@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import subprocess
 import sys
 import time
@@ -22,6 +23,23 @@ except ImportError:  # pragma: no cover - direct script execution path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_BACKUP_ROOT = get_default_backup_root(PROJECT_ROOT)
 TEMP_MEDIA_ARCHIVE = "/tmp/tresorapide-backup/media.tar.gz"
+
+
+def _resolve_secrets_dir(cli_override: str | None) -> Path | None:
+    """Return the host secrets directory from CLI arg, .env, or convention."""
+    if cli_override:
+        return Path(cli_override).expanduser().resolve()
+    from dotenv import dotenv_values
+    env = dotenv_values(PROJECT_ROOT / ".env")
+    env_value = env.get("SECRETS_DIR")
+    if env_value:
+        return Path(env_value).expanduser().resolve()
+    import os
+    if os.name == "nt":
+        local = os.getenv("LOCALAPPDATA")
+        if local:
+            return Path(local) / "Tresorapide" / "secrets"
+    return None
 
 CREATE_MEDIA_ARCHIVE_SCRIPT = """
 from pathlib import Path
@@ -86,6 +104,16 @@ def parse_args() -> argparse.Namespace:
         "--allow-unprotected-storage",
         action="store_true",
         help="Allow writing backups without Windows at-rest protection when EFS is unavailable.",
+    )
+    parser.add_argument(
+        "--include-secrets",
+        action="store_true",
+        help="Copy the host secrets directory into the backup for full restore capability.",
+    )
+    parser.add_argument(
+        "--secrets-dir",
+        default=None,
+        help="Path to the secrets directory (overrides SECRETS_DIR from .env).",
     )
     return parser.parse_args()
 
@@ -156,6 +184,17 @@ def main() -> int:
         ]
     )
 
+    secrets_included = False
+    if args.include_secrets:
+        secrets_dir = _resolve_secrets_dir(args.secrets_dir)
+        if secrets_dir and secrets_dir.is_dir():
+            secrets_dest = backup_dir / "secrets"
+            shutil.copytree(secrets_dir, secrets_dest)
+            secrets_included = True
+            print(f"Secrets copied from {secrets_dir}")
+        else:
+            print("Warning: secrets directory not found, skipping secrets backup.")
+
     metadata_path.write_text(
         json.dumps(
             {
@@ -163,7 +202,7 @@ def main() -> int:
                 "created_at": timestamp,
                 "database_file": database_path.name,
                 "media_file": media_path.name,
-                "secrets_included": False,
+                "secrets_included": secrets_included,
                 "protected_storage": protected_storage,
             },
             indent=2,
@@ -177,6 +216,7 @@ def main() -> int:
     print(f"  Folder: {backup_dir}")
     print(f"  Database: {database_path.name}")
     print(f"  Media: {media_path.name}")
+    print(f"  Secrets: {'yes' if secrets_included else 'no'}")
     print(f"  Metadata: {metadata_path.name}")
     print(f"  Protected at rest: {'yes' if protected_storage else 'no'}")
     return 0
