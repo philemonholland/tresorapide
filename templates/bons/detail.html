@@ -63,20 +63,33 @@
     </section>
     {% endif %}
 
-    {% if amount_consistency_warning %}
+    {% if bon_amount_consistency_warning %}
+    <section class="card" style="background: #f8d7da; border: 2px solid #f5c6cb;">
+        <div style="color: #721c24;">
+            <h2 style="margin-bottom: 0.5rem;">⛔ TOTAL DU BC INCOHÉRENT</h2>
+            <p>
+                Les colonnes du bon donnent
+                <strong>{{ bon_amount_consistency_warning.entered_sum }} $</strong>,
+                mais le total enregistré est
+                <strong>{{ bon_amount_consistency_warning.total }} $</strong>.
+                La validation est bloquée jusqu'à correction.
+            </p>
+        </div>
+    </section>
+    {% endif %}
+
+    {% if amount_consistency_warnings %}
     <section class="card" style="background: #fff3cd; border: 2px solid #ffeeba;">
         <div style="color: #856404;">
             <h2 style="margin-bottom: 0.5rem;">⚠️ MONTANTS À VÉRIFIER</h2>
+            {% for warning in amount_consistency_warnings %}
             <p>
-                Le document <strong>{{ amount_consistency_warning.filename }}</strong> présente des montants
-                incomplets ou incohérents. Sous-total extrait :
-                <strong>{{ amount_consistency_warning.subtotal }} $</strong>, somme calculée :
-                <strong>{{ amount_consistency_warning.entered_sum }} $</strong>, total extrait :
-                <strong>{{ amount_consistency_warning.total }} $</strong>, TPS extraite / attendue :
-                <strong>{{ amount_consistency_warning.actual_tps }} $ / {{ amount_consistency_warning.expected_tps }} $</strong>,
-                TVQ extraite / attendue :
-                <strong>{{ amount_consistency_warning.actual_tvq }} $ / {{ amount_consistency_warning.expected_tvq }} $</strong>.
+                <strong>{{ warning.filename }}</strong> : les composantes donnent
+                <strong>{{ warning.entered_sum }} $</strong>, mais le total enregistré est
+                <strong>{{ warning.total }} $</strong>.
             </p>
+            {% for issue in warning.issues %}<p>• {{ issue }}</p>{% endfor %}
+            {% endfor %}
         </div>
     </section>
     {% endif %}

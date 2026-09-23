@@ -21,6 +21,22 @@ AI_CONFIDENCE_LABELS = {
     9: "Confiance maximale",
 }
 AI_CONFIDENCE_MISSING_TOOLTIP = "NA - Information absente du document."
+DIRECTORY_RESOLVED_BADGE = {
+    "display": "Répertoire",
+    "tooltip": (
+        "Membre résolu à partir de l'appartement et du répertoire; "
+        "ceci n'est pas un score de confiance IA."
+    ),
+    "css_class": "ai-confidence-derived",
+}
+CONFIRMED_VALUE_BADGE = {
+    "display": "Corrigé",
+    "tooltip": (
+        "Valeur finale corrigée ou confirmée pendant la révision; "
+        "le score IA initial ne s'applique pas à cette valeur."
+    ),
+    "css_class": "ai-confidence-corrected",
+}
 
 OCR_FIELD_CONFIDENCE_KEYS = (
     "document_type",
@@ -47,6 +63,12 @@ OCR_FIELD_CONFIDENCE_KEYS = (
 )
 
 DUPLICATE_FIELD_CONFIDENCE_KEYS = (
+    "date_new",
+    "date_old",
+    "document_number_new",
+    "document_number_old",
+    "dates_match",
+    "document_numbers_match",
     "is_same_purchase",
     "confidence",
     "reasoning",
@@ -136,6 +158,7 @@ SUMMARY_FIELD_ORDER = (
     "validator_member_name",
     "validator_apartment",
     "signer_roles_ambiguous",
+    "member_name_raw",
     "apartment_number",
     "merchant_name",
     "purchase_date",
@@ -146,6 +169,55 @@ SUMMARY_FIELD_ORDER = (
     "total",
     "summary",
 )
+
+SUMMARY_FIELDS_BY_DOCUMENT_TYPE = {
+    "receipt": (
+        "document_type",
+        "member_name_raw",
+        "apartment_number",
+        "merchant_name",
+        "purchase_date",
+        "subtotal",
+        "tps",
+        "tvq",
+        "untaxed_extra_amount",
+        "total",
+        "summary",
+    ),
+    "invoice": (
+        "document_type",
+        "associated_bc_number",
+        "supplier_name",
+        "supplier_address",
+        "purchase_date",
+        "subtotal",
+        "tps",
+        "tvq",
+        "untaxed_extra_amount",
+        "total",
+        "summary",
+    ),
+    "paper_bc": (
+        "document_type",
+        "bc_number",
+        "supplier_name",
+        "supplier_address",
+        "reimburse_to",
+        "expense_member_name",
+        "expense_apartment",
+        "validator_member_name",
+        "validator_apartment",
+        "signer_roles_ambiguous",
+        "merchant_name",
+        "purchase_date",
+        "subtotal",
+        "tps",
+        "tvq",
+        "untaxed_extra_amount",
+        "total",
+        "summary",
+    ),
+}
 
 INVOICE_PREFERRED_FIELDS = {
     "supplier_name",
@@ -500,6 +572,7 @@ def _receipt_summary_values(extracted_fields) -> dict[str, Any]:
         "validator_member_name": extracted_fields.final_validator_member_name or extracted_fields.validator_member_name_candidate,
         "validator_apartment": extracted_fields.final_validator_apartment or extracted_fields.validator_apartment_candidate,
         "signer_roles_ambiguous": extracted_fields.signer_roles_ambiguous_final,
+        "member_name_raw": extracted_fields.final_member_name or extracted_fields.member_name_candidate,
         "apartment_number": extracted_fields.final_apartment_number or extracted_fields.apartment_number_candidate,
         "merchant_name": extracted_fields.final_merchant or extracted_fields.merchant_candidate,
         "purchase_date": extracted_fields.final_purchase_date or extracted_fields.purchase_date_candidate,
@@ -525,17 +598,38 @@ def build_receipt_confidence_summary_rows(receipt) -> list[dict[str, Any]]:
         return []
 
     values = _receipt_summary_values(extracted_fields)
+    document_type = str(values.get("document_type") or "").strip()
+    field_order = SUMMARY_FIELDS_BY_DOCUMENT_TYPE.get(
+        document_type,
+        SUMMARY_FIELD_ORDER,
+    )
     rows: list[dict[str, Any]] = []
-    for field_name in SUMMARY_FIELD_ORDER:
+    for field_name in field_order:
         if field_name not in final_confidence_scores:
             continue
-        badge = build_ai_confidence_badge(final_confidence_scores.get(field_name))
+        if field_name == "member_name_raw" and extracted_fields.final_member_name:
+            candidate_member = _normalize_text(extracted_fields.member_name_candidate)
+            final_member = _normalize_text(extracted_fields.final_member_name)
+            if not candidate_member or candidate_member.upper() == "ILLISIBLE":
+                badge = dict(DIRECTORY_RESOLVED_BADGE)
+            elif candidate_member.casefold() != final_member.casefold():
+                badge = dict(CONFIRMED_VALUE_BADGE)
+            else:
+                badge = build_ai_confidence_badge(
+                    final_confidence_scores.get(field_name)
+                )
+        else:
+            badge = build_ai_confidence_badge(final_confidence_scores.get(field_name))
         if not badge:
             continue
         rows.append(
             {
                 "field_name": field_name,
-                "label": REVIEW_FIELD_LABELS.get(field_name, field_name),
+                "label": (
+                    "Membre"
+                    if field_name == "member_name_raw"
+                    else REVIEW_FIELD_LABELS.get(field_name, field_name)
+                ),
                 "value": _format_summary_value(field_name, values.get(field_name)),
                 "confidence": badge,
             }

@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+
+{% block title %}Ajustement GL ligne {{ entry.row_number }} | Tresorapide{% endblock %}
+
+{% block content %}
+<section class="card">
+    <div class="section-heading">
+        <div>
+            <h1>{% if adjustment %}Modifier{% else %}Créer{% endif %} l'ajustement</h1>
+            <p class="text-muted">
+                Ligne {{ entry.row_number }} du Grand Livre · {{ entry.date|date:"Y-m-d"|default:"Date absente" }}
+            </p>
+        </div>
+        <a class="button-link" href="{% url 'budget:grand-livre-detail' upload.pk %}#gl-entry-{{ entry.pk }}">Retour</a>
+    </div>
+</section>
+
+<section class="card">
+    <h2>Écriture comptable source</h2>
+    <dl class="detail-grid">
+        <div><dt>Source</dt><dd>{{ entry.source|default:"—" }}</dd></div>
+        <div><dt>Description</dt><dd>{{ entry.description_raw|default:"—" }}</dd></div>
+        <div><dt>Débit</dt><dd>{{ entry.debit|floatformat:2 }} $</dd></div>
+        <div><dt>Crédit</dt><dd>{{ entry.credit|floatformat:2 }} $</dd></div>
+    </dl>
+    <p class="text-muted">
+        L'écriture source reste inchangée. L'ajustement apparaît sur une ligne distincte directement sous elle.
+    </p>
+</section>
+
+<section class="card">
+    <form method="post" class="stack">
+        {% csrf_token %}
+        {{ form.non_field_errors }}
+        <div class="form-group {% if form.amount_to_subtract.errors %}has-error{% endif %}">
+            <label for="{{ form.amount_to_subtract.id_for_label }}">{{ form.amount_to_subtract.label }}</label>
+            {{ form.amount_to_subtract }}
+            {% for error in form.amount_to_subtract.errors %}<p class="error-text">{{ error }}</p>{% endfor %}
+        </div>
+        <div class="form-group {% if form.reason.errors %}has-error{% endif %}">
+            <label for="{{ form.reason.id_for_label }}">{{ form.reason.label }}</label>
+            {{ form.reason }}
+            {% for error in form.reason.errors %}<p class="error-text">{{ error }}</p>{% endfor %}
+        </div>
+        <button type="submit" class="btn btn-primary">Enregistrer l'ajustement</button>
+    </form>
+</section>
+{% endblock %}

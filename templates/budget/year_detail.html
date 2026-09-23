@@ -57,6 +57,7 @@
                            data-budget-minus-imprevues="{{ base.budget_minus_imprevues }}">
                         <thead>
                             <tr>
+                                <th class="duplicate-status-col" title="Avis de doublon">Avis</th>
                                 <th>Date</th>
                                 <th>Description</th>
                                 <th class="compact-hide"># BC</th>
@@ -77,15 +78,21 @@
                             {% for row in ledger_rows %}
                                 <tr data-amount="{{ row.expense.amount }}"
                                     data-trace="{{ row.expense.sub_budget.trace_code }}"
-                                    {% if row.expense.is_cancellation %}style="color: var(--negative, #c0392b);"{% elif row.is_cancelled %}style="text-decoration: line-through; opacity: 0.6;"{% elif row.has_duplicate_flag %}style="background: #fff3cd;"{% endif %}>
+                                    {% if row.expense.is_cancellation %}style="color: var(--negative, #c0392b);"{% elif row.is_cancelled %}style="text-decoration: line-through; opacity: 0.6;"{% endif %}>
+                                    <td class="duplicate-status-col">
+                                        {% if row.has_duplicate_flag %}
+                                            <span
+                                                class="duplicate-notice"
+                                                title="Doublon possible détecté"
+                                                aria-label="Doublon possible détecté"
+                                            >!</span>
+                                        {% endif %}
+                                    </td>
                                     <td class="nowrap date-col">{{ row.expense.entry_date|date:"Y-m-d" }}</td>
                                     <td>
                                         {{ row.expense.description }}
                                         {% if row.expense.is_cancellation %}
                                             <strong>[ANNULATION]</strong>
-                                        {% endif %}
-                                        {% if row.has_duplicate_flag %}
-                                            <span style="color:#c0392b;font-weight:bold;" title="Doublon possible détecté">⚠️ DOUBLON</span>
                                         {% endif %}
                                     </td>
                                     <td class="compact-hide">{{ row.expense.bon_number|default:"" }}</td>

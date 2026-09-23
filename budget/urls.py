@@ -23,4 +23,6 @@ urlpatterns = [
     path('grand-livre/<int:pk>/', views.GrandLivreDetailView.as_view(), name='grand-livre-detail'),
     path('grand-livre/<int:pk>/validate/', views.GrandLivreValidateView.as_view(), name='grand-livre-validate'),
     path('grand-livre/<int:pk>/entries/<int:entry_pk>/edit/', views.GrandLivreEntryEditView.as_view(), name='grand-livre-entry-edit'),
+    path('grand-livre/<int:pk>/entries/<int:entry_pk>/adjustment/', views.GrandLivreAdjustmentEditView.as_view(), name='grand-livre-adjustment-edit'),
+    path('grand-livre/<int:pk>/entries/<int:entry_pk>/adjustment/<int:adjustment_pk>/archive/', views.GrandLivreAdjustmentArchiveView.as_view(), name='grand-livre-adjustment-archive'),
 ]

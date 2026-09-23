@@ -12,3 +12,5 @@ backups/
 .secrets/
 TEST/
 budget_example_spreadsheet/
+tmp/
+output/

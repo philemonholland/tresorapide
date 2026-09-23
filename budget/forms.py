@@ -1,8 +1,9 @@
 from django import forms
 from django.forms import inlineformset_factory
 from django.utils import timezone
+from decimal import Decimal
 
-from .models import BudgetYear, SubBudget, Expense
+from .models import BudgetYear, SubBudget, Expense, GrandLivreAdjustment
 
 
 class BudgetYearForm(forms.ModelForm):
@@ -125,6 +126,38 @@ class ExpenseForm(forms.ModelForm):
     ESSENTIAL_FIELDS = ("entry_date", "description", "amount", "sub_budget",
                         "bon_number", "supplier_name", "spent_by_label")
     DETAIL_FIELDS = ("validated_gl", "source_type", "notes")
+
+
+class GrandLivreAdjustmentForm(forms.ModelForm):
+    """Create or edit a subtractive adjustment without changing GL source data."""
+
+    class Meta:
+        model = GrandLivreAdjustment
+        fields = ["amount_to_subtract", "reason"]
+        labels = {
+            "amount_to_subtract": "Montant à soustraire",
+            "reason": "Motif de l'ajustement",
+        }
+        widgets = {
+            "amount_to_subtract": forms.NumberInput(attrs={"step": "0.01"}),
+            "reason": forms.Textarea(attrs={"rows": 4}),
+        }
+
+    def __init__(self, *args, entry=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.entry = entry or getattr(self.instance, "entry", None)
+
+    def clean_amount_to_subtract(self):
+        amount = self.cleaned_data["amount_to_subtract"]
+        if amount < Decimal("0.00"):
+            raise forms.ValidationError("Le montant ne peut pas être négatif.")
+        if self.entry is not None:
+            source_amount = abs(self.entry.net_amount)
+            if amount > source_amount:
+                raise forms.ValidationError(
+                    f"Le montant ne peut pas dépasser l'écriture source ({source_amount:.2f} $)."
+                )
+        return amount
 
 
 # ---------------------------------------------------------------------------

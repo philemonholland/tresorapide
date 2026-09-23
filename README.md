@@ -248,3 +248,7 @@ docker compose config
 - `budget`: future budgeting and forecasting workflows
 - `reimbursements`: future expense and reimbursement workflows
 - `audits`: future audit trail and review workflows
+
+## Project continuity
+
+- [Diagnostic ledger](DIAGNOSTIC_LEDGER.md) — active investigations, acceptance checks, and evidence.

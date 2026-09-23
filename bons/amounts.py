@@ -68,8 +68,20 @@ def build_amount_consistency_warning(
     taxes_should_exist = abs(expected["total"] - total) <= MONEY_EPSILON
     missing_tps = actual_tps is None and taxes_should_exist and expected["tps"] > Decimal("0.00")
     missing_tvq = actual_tvq is None and taxes_should_exist and expected["tvq"] > Decimal("0.00")
-    tps_mismatch = actual_tps is not None and abs(actual_tps - expected["tps"]) > MONEY_EPSILON
-    tvq_mismatch = actual_tvq is not None and abs(actual_tvq - expected["tvq"]) > MONEY_EPSILON
+    # A grocery receipt can contain both taxable and non-taxable items, so its
+    # taxes do not necessarily equal the standard rates applied to the entire
+    # subtotal. Only use the rate comparison as supporting evidence when the
+    # entered components already fail to reconcile to the printed total.
+    tps_mismatch = (
+        sum_mismatch
+        and actual_tps is not None
+        and abs(actual_tps - expected["tps"]) > MONEY_EPSILON
+    )
+    tvq_mismatch = (
+        sum_mismatch
+        and actual_tvq is not None
+        and abs(actual_tvq - expected["tvq"]) > MONEY_EPSILON
+    )
 
     if not any((sum_mismatch, missing_tps, missing_tvq, tps_mismatch, tvq_mismatch)):
         return None

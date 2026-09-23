@@ -4,13 +4,15 @@ Generates landscape-oriented exports with narrow margins,
 matching the on-screen layout.
 """
 import io
+from html import escape
 from decimal import Decimal
 
+from django.utils import timezone
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter, landscape
 from reportlab.lib.units import inch, cm
 from reportlab.platypus import (
-    SimpleDocTemplate, Table, TableStyle, Spacer, Paragraph, KeepTogether,
+    SimpleDocTemplate, Table, TableStyle, Spacer, Paragraph, PageBreak,
 )
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
@@ -33,10 +35,12 @@ def _fmt(val):
 
 
 def _fmt_plain(val):
-    """Format for reportlab table cells — no thousands separator issues."""
+    """Format a PDF amount in compact French-Canadian notation."""
     if val is None:
         return ""
-    return f"{val:.2f} $"
+    whole, decimals = f"{Decimal(val):,.2f}".split(".")
+    whole = whole.replace(",", "\u00a0")
+    return f"{whole},{decimals} $"
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -57,46 +61,134 @@ def generate_expense_ledger_pdf(budget_year, *, include_cancelled=False):
     page = landscape(letter)
     doc = SimpleDocTemplate(
         buf, pagesize=page,
-        leftMargin=0.5 * inch, rightMargin=0.5 * inch,
-        topMargin=0.4 * inch, bottomMargin=0.4 * inch,
+        leftMargin=0.38 * inch, rightMargin=0.38 * inch,
+        topMargin=0.38 * inch, bottomMargin=0.48 * inch,
     )
 
     styles = getSampleStyleSheet()
-    style_title = ParagraphStyle("LedgerTitle", parent=styles["Heading1"],
-                                 fontSize=14, alignment=TA_CENTER, spaceAfter=4)
-    style_subtitle = ParagraphStyle("LedgerSubtitle", parent=styles["Normal"],
-                                    fontSize=9, alignment=TA_CENTER, spaceAfter=8)
-    style_section = ParagraphStyle("SectionHead", parent=styles["Heading2"],
-                                   fontSize=11, spaceBefore=12, spaceAfter=4)
-    style_cell = ParagraphStyle("Cell", parent=styles["Normal"], fontSize=7,
-                                leading=9)
+    dark_blue = colors.HexColor("#17324D")
+    medium_blue = colors.HexColor("#315C7D")
+    pale_blue = colors.HexColor("#EAF2F8")
+    pale_green = colors.HexColor("#EAF7EF")
+    pale_gray = colors.HexColor("#F5F7F9")
+    border_gray = colors.HexColor("#B7C3CC")
+    text_gray = colors.HexColor("#44515C")
+
+    style_title = ParagraphStyle(
+        "LedgerTitle", parent=styles["Heading1"], fontName="Helvetica-Bold",
+        fontSize=17, leading=20, textColor=dark_blue, alignment=TA_CENTER,
+        spaceAfter=3,
+    )
+    style_subtitle = ParagraphStyle(
+        "LedgerSubtitle", parent=styles["Normal"], fontSize=8.5, leading=11,
+        textColor=text_gray, alignment=TA_CENTER, spaceAfter=7,
+    )
+    style_intro = ParagraphStyle(
+        "LedgerIntro", parent=styles["Normal"], fontSize=8, leading=10.5,
+        textColor=text_gray, alignment=TA_LEFT, spaceAfter=6,
+    )
+    style_page_title = ParagraphStyle(
+        "PageTitle", parent=styles["Heading1"], fontName="Helvetica-Bold",
+        fontSize=15, leading=18, textColor=dark_blue, alignment=TA_LEFT,
+        spaceAfter=3,
+    )
+    style_panel_title = ParagraphStyle(
+        "PanelTitle", parent=styles["Heading2"], fontName="Helvetica-Bold",
+        fontSize=10.5, leading=13, textColor=dark_blue, spaceAfter=5,
+    )
+    style_help = ParagraphStyle(
+        "Help", parent=styles["Normal"], fontSize=8, leading=10.5,
+        textColor=text_gray,
+    )
+    style_cell = ParagraphStyle(
+        "Cell", parent=styles["Normal"], fontSize=7.2, leading=9.2,
+    )
     style_cell_r = ParagraphStyle("CellR", parent=style_cell, alignment=TA_RIGHT)
     style_cell_c = ParagraphStyle("CellC", parent=style_cell, alignment=TA_CENTER)
+    style_cell_yes = ParagraphStyle(
+        "CellYes", parent=style_cell_c, fontName="Helvetica-Bold",
+        textColor=colors.HexColor("#1E6A43"),
+    )
+    style_cell_negative = ParagraphStyle(
+        "CellNegative", parent=style_cell_r, fontName="Helvetica-Bold",
+        textColor=colors.HexColor("#A12A2A"),
+    )
+    style_header = ParagraphStyle(
+        "Header", parent=style_cell, fontName="Helvetica-Bold", fontSize=7.2,
+        leading=8.7, textColor=colors.white,
+    )
+    style_header_c = ParagraphStyle("HeaderC", parent=style_header, alignment=TA_CENTER)
+    style_header_r = ParagraphStyle("HeaderR", parent=style_header, alignment=TA_RIGHT)
+    style_metric_label = ParagraphStyle(
+        "MetricLabel", parent=styles["Normal"], fontName="Helvetica-Bold",
+        fontSize=8, leading=10, textColor=medium_blue, alignment=TA_CENTER,
+    )
+    style_metric_value = ParagraphStyle(
+        "MetricValue", parent=styles["Normal"], fontName="Helvetica-Bold",
+        fontSize=12, leading=14, textColor=dark_blue, alignment=TA_CENTER,
+    )
 
     elements = []
 
-    # Title
     house = budget_year.house
+    export_date = timezone.localdate()
     elements.append(Paragraph(
-        f"Grille de dépenses — {house.code} — {budget_year.year}", style_title
+        f"Grille de dépenses - {escape(house.code)} - {budget_year.year}", style_title
     ))
     elements.append(Paragraph(COOP_NAME, style_subtitle))
-    elements.append(Spacer(1, 6))
+    elements.append(Paragraph(
+        "Les dates ci-dessous sont les dates d'achat conservées dans "
+        "Tresorapide. Cette page présente toutes les dépenses actives de "
+        "l'année, dans l'ordre chronologique.",
+        style_intro,
+    ))
+
+    metric_labels = [
+        "Dépenses enregistrées",
+        "Dépenses à ce jour",
+        "Argent disponible",
+        "Disponible après réserve",
+    ]
+    metric_values = [
+        str(len(rows)),
+        _fmt_plain(base["expenses_to_date"]),
+        _fmt_plain(available["available"]),
+        _fmt_plain(available["available_minus_imprevues"]),
+    ]
+    metric_table = Table(
+        [
+            [Paragraph(label, style_metric_label) for label in metric_labels],
+            [Paragraph(value, style_metric_value) for value in metric_values],
+        ],
+        colWidths=[(page[0] - doc.leftMargin - doc.rightMargin) / 4] * 4,
+    )
+    metric_table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), pale_blue),
+        ("BACKGROUND", (0, 1), (-1, 1), colors.white),
+        ("BOX", (0, 0), (-1, -1), 0.6, border_gray),
+        ("INNERGRID", (0, 0), (-1, -1), 0.35, border_gray),
+        ("TOPPADDING", (0, 0), (-1, 0), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, 0), 2),
+        ("TOPPADDING", (0, 1), (-1, 1), 2),
+        ("BOTTOMPADDING", (0, 1), (-1, 1), 4),
+    ]))
+    elements.append(metric_table)
+    elements.append(Spacer(1, 8))
 
     # ── Expense ledger table ─────────────────────────────
     header = [
-        Paragraph("<b>Date</b>", style_cell),
-        Paragraph("<b>Description</b>", style_cell),
-        Paragraph("<b># BC</b>", style_cell),
-        Paragraph("<b>GL</b>", style_cell_c),
-        Paragraph("<b>Fournisseur</b>", style_cell),
-        Paragraph("<b>Remb.</b>", style_cell),
-        Paragraph("<b>Dépensé par</b>", style_cell),
-        Paragraph("<b>Validé par</b>", style_cell),
-        Paragraph("<b>Montant</b>", style_cell_r),
-        Paragraph("<b>Trace</b>", style_cell_c),
-        Paragraph("<b>Balance</b>", style_cell_r),
-        Paragraph("<b>Balance−15%</b>", style_cell_r),
+        Paragraph("Date d'achat", style_header),
+        Paragraph("Description", style_header),
+        Paragraph("No BC", style_header),
+        Paragraph("Au GL", style_header_c),
+        Paragraph("Fournisseur", style_header),
+        Paragraph("Remboursé à", style_header),
+        Paragraph("Dépensé par", style_header),
+        Paragraph("Validé par", style_header),
+        Paragraph("Montant", style_header_r),
+        Paragraph("Trace", style_header_c),
+        Paragraph("Solde", style_header_r),
+        Paragraph("Solde après réserve", style_header_r),
     ]
 
     data = [header]
@@ -107,13 +199,13 @@ def generate_expense_ledger_pdf(budget_year, *, include_cancelled=False):
             desc += " [ANNULATION]"
         data.append([
             Paragraph(exp.entry_date.strftime("%Y-%m-%d"), style_cell),
-            Paragraph(desc, style_cell),
-            Paragraph(exp.bon_number or "", style_cell),
-            Paragraph("✓" if exp.validated_gl else "", style_cell_c),
-            Paragraph(exp.supplier_name or "", style_cell),
-            Paragraph(exp.display_reimburse_label, style_cell),
-            Paragraph(exp.display_spent_by_label, style_cell),
-            Paragraph(exp.display_approved_by_label, style_cell),
+            Paragraph(escape(desc), style_cell),
+            Paragraph(escape(exp.bon_number or ""), style_cell),
+            Paragraph("Oui" if exp.validated_gl else "", style_cell_yes),
+            Paragraph(escape(exp.supplier_name or ""), style_cell),
+            Paragraph(escape(exp.display_reimburse_label), style_cell),
+            Paragraph(escape(exp.display_spent_by_label), style_cell),
+            Paragraph(escape(exp.display_approved_by_label), style_cell),
             Paragraph(_fmt_plain(exp.amount), style_cell_r),
             Paragraph(str(exp.sub_budget.trace_code), style_cell_c),
             Paragraph(_fmt_plain(r["balance"]), style_cell_r),
@@ -123,36 +215,36 @@ def generate_expense_ledger_pdf(budget_year, *, include_cancelled=False):
     avail_width = page[0] - doc.leftMargin - doc.rightMargin
     col_widths = [
         0.07 * avail_width,  # Date
-        0.16 * avail_width,  # Description
-        0.06 * avail_width,  # BC
-        0.03 * avail_width,  # GL
-        0.11 * avail_width,  # Fournisseur
-        0.06 * avail_width,  # Remb.
-        0.11 * avail_width,  # Dépensé par
-        0.11 * avail_width,  # Validé par
-        0.08 * avail_width,  # Montant
+        0.165 * avail_width,  # Description
+        0.055 * avail_width,  # BC
+        0.04 * avail_width,  # GL
+        0.105 * avail_width,  # Fournisseur
+        0.07 * avail_width,  # Remboursé à
+        0.105 * avail_width,  # Dépensé par
+        0.105 * avail_width,  # Validé par
+        0.075 * avail_width,  # Montant
         0.04 * avail_width,  # Trace
         0.08 * avail_width,  # Balance
-        0.09 * avail_width,  # Balance-15%
+        0.09 * avail_width,  # Solde après réserve
     ]
 
     table = Table(data, colWidths=col_widths, repeatRows=1)
     style_cmds = [
-        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2c3e50")),
+        ("BACKGROUND", (0, 0), (-1, 0), dark_blue),
         ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-        ("FONTSIZE", (0, 0), (-1, -1), 7),
-        ("LEADING", (0, 0), (-1, -1), 9),
-        ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#bdc3c7")),
-        ("TOPPADDING", (0, 0), (-1, -1), 2),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("GRID", (0, 0), (-1, -1), 0.35, border_gray),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
         ("LEFTPADDING", (0, 0), (-1, -1), 3),
         ("RIGHTPADDING", (0, 0), (-1, -1), 3),
     ]
     # Alternate row colours
     for i in range(1, len(data)):
         if i % 2 == 0:
-            style_cmds.append(("BACKGROUND", (0, i), (-1, i), colors.HexColor("#f7f9fb")))
+            style_cmds.append(("BACKGROUND", (0, i), (-1, i), pale_gray))
+        if rows[i - 1]["expense"].validated_gl:
+            style_cmds.append(("BACKGROUND", (3, i), (3, i), pale_green))
         # Red text for cancellation rows
         exp = rows[i - 1]["expense"]
         if exp.is_cancellation:
@@ -162,83 +254,171 @@ def generate_expense_ledger_pdf(budget_year, *, include_cancelled=False):
 
     table.setStyle(TableStyle(style_cmds))
     elements.append(table)
+    elements.append(Spacer(1, 6))
+    elements.append(Paragraph(
+        "<b>Comment lire le tableau :</b> « Au GL : Oui » signifie que la dépense "
+        "a été retrouvée dans le Grand Livre. Le « Solde après réserve » montre ce "
+        "qui reste disponible après avoir conservé la réserve de 15 % pour les imprévus.",
+        style_help,
+    ))
 
-    # ── Summary table (page 2 or after ledger) ───────────
-    elements.append(Spacer(1, 16))
-    elements.append(Paragraph("Résumé budgétaire", style_section))
+    # ── Dedicated summary page ───────────────────────────
+    elements.append(PageBreak())
+    elements.append(Paragraph("Comprendre le budget", style_page_title))
+    elements.append(Paragraph(
+        "Prévu = budget attribué. Utilisé = dépenses actives enregistrées. "
+        "Restant = montant encore disponible dans la catégorie.",
+        style_intro,
+    ))
 
     summary_data = [
-        ["Budget d'entretien de la maison", _fmt_plain(base["budget_total"])],
-        ["Budget de déneigement", _fmt_plain(base["snow_budget"])],
-        ["Imprévus (15 %)", _fmt_plain(base["imprevues"])],
-        ["Budget − 15 %", _fmt_plain(base["budget_minus_imprevues"])],
-        ["Dépenses effectuées à ce jour", _fmt_plain(base["expenses_to_date"])],
-        ["Budget réparations — prévu", _fmt_plain(repair["planned"])],
-        ["Budget réparations — utilisé", _fmt_plain(repair["used"])],
-        ["Budget réparations — restant", _fmt_plain(repair["remaining"])],
-        ["Imprévus utilisés", _fmt_plain(imprevues["used"])],
-        ["Imprévus restants", _fmt_plain(imprevues["remaining"])],
-        ["Argent total disponible", _fmt_plain(available["available"])],
-        ["Argent total disponible − 15 %", _fmt_plain(available["available_minus_imprevues"])],
+        ["Budget d'entretien de la maison", base["budget_total"]],
+        ["Budget de déneigement", base["snow_budget"]],
+        ["Imprévus (15 %)", base["imprevues"]],
+        ["Budget après réserve de 15 %", base["budget_minus_imprevues"]],
+        ["Dépenses effectuées à ce jour", base["expenses_to_date"]],
+        ["Budget réparations - prévu", repair["planned"]],
+        ["Budget réparations - utilisé", repair["used"]],
+        ["Budget réparations - restant", repair["remaining"]],
+        ["Imprévus utilisés", imprevues["used"]],
+        ["Imprévus restants", imprevues["remaining"]],
+        ["Argent total disponible", available["available"]],
+        ["Disponible après réserve de 15 %", available["available_minus_imprevues"]],
     ]
-    summary_tbl = Table(summary_data, colWidths=[4 * inch, 1.5 * inch])
+    summary_rows = [
+        [Paragraph(escape(label), style_help), Paragraph(_fmt_plain(value), style_cell_r)]
+        for label, value in summary_data
+    ]
+    left_width = avail_width * 0.36
+    right_width = avail_width * 0.64
+    summary_tbl = Table(
+        summary_rows,
+        colWidths=[left_width * 0.68, left_width * 0.27],
+    )
     summary_tbl.setStyle(TableStyle([
-        ("FONTSIZE", (0, 0), (-1, -1), 8),
-        ("LEADING", (0, 0), (-1, -1), 11),
-        ("ALIGN", (1, 0), (1, -1), "RIGHT"),
-        ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#bdc3c7")),
-        ("TOPPADDING", (0, 0), (-1, -1), 2),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
-        ("BACKGROUND", (0, -2), (-1, -1), colors.HexColor("#ecf0f1")),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("GRID", (0, 0), (-1, -1), 0.35, border_gray),
+        ("TOPPADDING", (0, 0), (-1, -1), 3),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ("BACKGROUND", (0, -2), (-1, -1), pale_blue),
+        ("FONTNAME", (0, -2), (-1, -1), "Helvetica-Bold"),
     ]))
-    elements.append(summary_tbl)
 
-    # ── Sub-budget table ─────────────────────────────────
-    if categories:
-        elements.append(Spacer(1, 12))
-        elements.append(Paragraph("Sous-budgets", style_section))
-
-        cat_header = ["Description", "Trace", "Prévu", "Utilisé", "Restant"]
-        cat_data = [cat_header]
-        for c in categories:
-            cat_data.append([
-                c["name"],
-                str(c["trace_code"]),
-                _fmt_plain(c["planned"]),
-                _fmt_plain(c["used"]),
-                _fmt_plain(c["remaining"]),
-            ])
-        # Totals row (exclude contingency)
-        non_cont = [c for c in categories if not c["sub_budget"].is_contingency]
+    cat_header = [
+        Paragraph("Description", style_header),
+        Paragraph("Trace", style_header_c),
+        Paragraph("Prévu", style_header_r),
+        Paragraph("Utilisé", style_header_r),
+        Paragraph("Restant", style_header_r),
+    ]
+    cat_data = [cat_header]
+    for category in categories:
+        remaining_style = (
+            style_cell_negative if category["remaining"] < 0 else style_cell_r
+        )
         cat_data.append([
-            "Total (excl. imprévus)",
-            "",
-            _fmt_plain(sum((c["planned"] for c in non_cont), Decimal("0"))),
-            _fmt_plain(sum((c["used"] for c in non_cont), Decimal("0"))),
-            _fmt_plain(sum((c["remaining"] for c in non_cont), Decimal("0"))),
+            Paragraph(escape(category["name"]), style_help),
+            Paragraph(str(category["trace_code"]), style_cell_c),
+            Paragraph(_fmt_plain(category["planned"]), style_cell_r),
+            Paragraph(_fmt_plain(category["used"]), style_cell_r),
+            Paragraph(_fmt_plain(category["remaining"]), remaining_style),
         ])
 
-        cat_tbl = Table(cat_data, colWidths=[3 * inch, 0.6 * inch, 1.1 * inch, 1.1 * inch, 1.1 * inch])
-        cat_style = [
-            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#2c3e50")),
-            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-            ("FONTSIZE", (0, 0), (-1, -1), 8),
-            ("LEADING", (0, 0), (-1, -1), 11),
-            ("ALIGN", (1, 0), (1, -1), "CENTER"),
-            ("ALIGN", (2, 0), (-1, -1), "RIGHT"),
-            ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#bdc3c7")),
-            ("TOPPADDING", (0, 0), (-1, -1), 2),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
-            ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#ecf0f1")),
-            ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
-        ]
-        for i in range(1, len(cat_data) - 1):
-            if i % 2 == 0:
-                cat_style.append(("BACKGROUND", (0, i), (-1, i), colors.HexColor("#f7f9fb")))
-        cat_tbl.setStyle(TableStyle(cat_style))
-        elements.append(cat_tbl)
+    non_cont = [c for c in categories if not c["sub_budget"].is_contingency]
+    cat_data.append([
+        Paragraph("<b>Total (sans les imprévus)</b>", style_help),
+        "",
+        Paragraph(_fmt_plain(sum((c["planned"] for c in non_cont), Decimal("0"))), style_cell_r),
+        Paragraph(_fmt_plain(sum((c["used"] for c in non_cont), Decimal("0"))), style_cell_r),
+        Paragraph(_fmt_plain(sum((c["remaining"] for c in non_cont), Decimal("0"))), style_cell_r),
+    ])
 
-    doc.build(elements)
+    cat_widths = [
+        right_width * 0.43,
+        right_width * 0.09,
+        right_width * 0.16,
+        right_width * 0.16,
+        right_width * 0.16,
+    ]
+    cat_tbl = Table(cat_data, colWidths=cat_widths, repeatRows=1)
+    cat_style = [
+        ("BACKGROUND", (0, 0), (-1, 0), dark_blue),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("GRID", (0, 0), (-1, -1), 0.35, border_gray),
+        ("TOPPADDING", (0, 0), (-1, -1), 3.5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3.5),
+        ("LEFTPADDING", (0, 0), (-1, -1), 2.5),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 2.5),
+        ("BACKGROUND", (0, -1), (-1, -1), pale_blue),
+        ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
+    ]
+    for i, category in enumerate(categories, 1):
+        if i % 2 == 0:
+            cat_style.append(("BACKGROUND", (0, i), (-1, i), pale_gray))
+        if category["remaining"] < 0:
+            cat_style.extend([
+                ("BACKGROUND", (4, i), (4, i), colors.HexColor("#FDECEC")),
+            ])
+    cat_tbl.setStyle(TableStyle(cat_style))
+
+    left_panel = [
+        Paragraph("Résumé budgétaire", style_panel_title),
+        summary_tbl,
+        Spacer(1, 7),
+        Paragraph(
+            "La réserve de 15 % est mise de côté pour les imprévus. Le montant "
+            "« disponible après réserve » est donc le repère le plus prudent.",
+            style_help,
+        ),
+    ]
+    right_panel = [
+        Paragraph("Sous-budgets", style_panel_title),
+        cat_tbl,
+        Spacer(1, 6),
+        Paragraph(
+            "Un montant négatif dans « Restant » signifie que des dépenses ont été "
+            "inscrites dans une catégorie sans budget prévu suffisant.",
+            style_help,
+        ),
+    ]
+    panels = Table(
+        [[left_panel, right_panel]],
+        colWidths=[left_width, right_width],
+        hAlign="LEFT",
+    )
+    panels.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (0, 0), 0),
+        ("RIGHTPADDING", (0, 0), (0, 0), 9),
+        ("LEFTPADDING", (1, 0), (1, 0), 9),
+        ("RIGHTPADDING", (1, 0), (1, 0), 0),
+        ("TOPPADDING", (0, 0), (-1, -1), 0),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+        ("LINEBEFORE", (1, 0), (1, 0), 0.5, border_gray),
+    ]))
+    elements.append(panels)
+
+    def draw_footer(canvas, _doc):
+        canvas.saveState()
+        canvas.setStrokeColor(border_gray)
+        canvas.setLineWidth(0.4)
+        canvas.line(doc.leftMargin, 0.34 * inch, page[0] - doc.rightMargin, 0.34 * inch)
+        canvas.setFont("Helvetica", 6.8)
+        canvas.setFillColor(text_gray)
+        canvas.drawString(
+            doc.leftMargin,
+            0.19 * inch,
+            f"Généré le {export_date.isoformat()} - dates d'achat Tresorapide",
+        )
+        canvas.drawRightString(
+            page[0] - doc.rightMargin,
+            0.19 * inch,
+            f"Page {canvas.getPageNumber()}",
+        )
+        canvas.restoreState()
+
+    doc.build(elements, onFirstPage=draw_footer, onLaterPages=draw_footer)
     return buf.getvalue()
 
 

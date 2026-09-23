@@ -6,6 +6,7 @@ from datetime import date
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
+from django.core.exceptions import ValidationError
 from django.test import TestCase, RequestFactory
 from django.core.files.uploadedfile import SimpleUploadedFile
 
@@ -13,10 +14,10 @@ import openpyxl
 
 from accounts.models import User
 from houses.models import House
-from members.models import Member
+from members.models import Apartment, Member, Residency
 from budget.models import (
     BudgetYear, SubBudget, Expense, ExpenseSourceType,
-    GrandLivreUpload, GrandLivreEntry, ReconciliationResult,
+    GrandLivreUpload, GrandLivreEntry, GrandLivreAdjustment, ReconciliationResult,
     GLUploadStatus, GLMatchConfidence,
 )
 from budget.gl_parser import (
@@ -190,6 +191,51 @@ class GLParserTests(TestCase):
         finally:
             os.unlink(path)
 
+    def test_parse_compact_nine_column_accountant_layout(self):
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.append([None] * 9)
+        ws.append([None] * 9)
+        ws.append([None] * 9)
+        ws.append([None] * 9)
+        ws.append([None] * 8 + [date(2026, 9, 9)])
+        ws.append([None] * 9)
+        ws.append([None] * 9)
+        ws.append([
+            "No compte", "Description", "Ann/Pér", "Date", "Source",
+            "Description", "Débit", "Crédit", "Solde fin",
+        ])
+        ws.append([
+            "13-51200", "Entretien et ré", date(2026, 1, 1),
+            date(2026, 1, 7), "SANY", "4999081-BC 16739-Nettoyants",
+            19.49, None, None,
+        ])
+        ws.append([
+            None, None, None, date(2026, 1, 30), "POULIOT", "Réparation",
+            100.00, None, 119.49,
+        ])
+        # Compact exports have no textual total label. The final row contains
+        # only Debit, Credit and Ending Balance.
+        ws.append([None, None, None, None, None, None, 119.49, 25.00, 94.49])
+        ws.append([
+            "14-51200", "Next account", date(2026, 1, 1),
+            date(2026, 1, 8), "OTHER", "Other", 999.00, None, 999.00,
+        ])
+        path = _save_wb_temp(wb)
+        try:
+            section = parse_grand_livre(path, "13-51200")
+        finally:
+            os.unlink(path)
+
+        self.assertEqual(len(section.transactions), 2)
+        self.assertEqual(section.transactions[0].debit, Decimal("19.49"))
+        self.assertEqual(section.transactions[1].debit, Decimal("100.00"))
+        self.assertEqual(section.total_debit, Decimal("119.49"))
+        self.assertEqual(section.total_credit, Decimal("25.00"))
+        self.assertEqual(section.solde_fin, Decimal("94.49"))
+        self.assertEqual(section.entry_count, 2)
+        self.assertEqual(section.period_end_date, date(2026, 9, 9))
+
     def test_parse_missing_account(self):
         wb = _create_test_gl_workbook(
             [{"date": date(2025, 1, 1), "source": "X", "description": "Y", "debit": 10}],
@@ -296,6 +342,31 @@ class GLReconciliationTests(TestCase):
         self.assertEqual(upload.entry_count, 2)
         self.assertEqual(upload.entries.count(), 2)
 
+    def test_reprocessing_preserves_source_row_identity_and_adjustment_link(self):
+        from budget.gl_reconciliation import GrandLivreReconciliationService as Svc
+
+        upload = self._create_upload_with_entries([{
+            "date": date(2025, 4, 15),
+            "source": "CANAC",
+            "description": "BC 16481-bac",
+            "debit": 126.44,
+        }])
+        Svc.parse_and_store(upload)
+        entry = upload.entries.get()
+        adjustment = GrandLivreAdjustment.objects.create(
+            entry=entry,
+            amount_to_subtract=Decimal("10.00"),
+            reason="Test stable link",
+            created_by=self.user,
+        )
+
+        Svc.parse_and_store(upload)
+
+        refreshed_entry = upload.entries.get()
+        adjustment.refresh_from_db()
+        self.assertEqual(refreshed_entry.pk, entry.pk)
+        self.assertEqual(adjustment.entry_id, entry.pk)
+
     def test_match_by_amount(self):
         from budget.gl_reconciliation import GrandLivreReconciliationService as Svc
 
@@ -312,8 +383,31 @@ class GLReconciliationTests(TestCase):
 
         entries = list(upload.entries.order_by("row_number"))
         self.assertIsNotNone(entries[0].matched_expense)
-        self.assertEqual(entries[0].match_confidence, GLMatchConfidence.EXACT)
+        self.assertEqual(entries[0].match_confidence, GLMatchConfidence.PROBABLE)
         self.assertIsNone(entries[1].matched_expense)
+
+    def test_match_by_unique_amount_and_same_date_is_exact(self):
+        from budget.gl_reconciliation import GrandLivreReconciliationService as Svc
+
+        expense = self._add_expense(
+            "Exact amount and date",
+            126.44,
+            entry_date=date(2025, 4, 15),
+        )
+        upload = self._create_upload_with_entries([{
+            "date": date(2025, 4, 15),
+            "source": "CANAC",
+            "description": "Exact amount and date",
+            "debit": 126.44,
+        }])
+        Svc.parse_and_store(upload)
+        Svc.match_expenses(upload, use_ai=False)
+
+        entry = upload.entries.first()
+        expense.refresh_from_db()
+        self.assertEqual(entry.matched_expense_id, expense.pk)
+        self.assertEqual(entry.match_confidence, GLMatchConfidence.EXACT)
+        self.assertTrue(expense.validated_gl)
 
     def test_match_by_bc_number(self):
         from budget.gl_reconciliation import GrandLivreReconciliationService as Svc
@@ -330,6 +424,25 @@ class GLReconciliationTests(TestCase):
         entry = upload.entries.first()
         self.assertIsNotNone(entry.matched_expense)
         self.assertEqual(entry.extracted_bc_number, "16482")
+
+    def test_bc_number_does_not_match_when_amount_differs(self):
+        from budget.gl_reconciliation import GrandLivreReconciliationService as Svc
+
+        self._add_expense("Some purchase", 41.86, bon_number="16482")
+        transactions = [{
+            "date": date(2025, 5, 1),
+            "source": "PARENT",
+            "description": "496578-BC 16482-scellant",
+            "debit": 50.00,
+        }]
+        upload = self._create_upload_with_entries(transactions)
+        Svc.parse_and_store(upload)
+        Svc.match_expenses(upload, use_ai=False)
+
+        entry = upload.entries.first()
+        self.assertIsNone(entry.matched_expense)
+        self.assertEqual(entry.match_confidence, GLMatchConfidence.UNMATCHED)
+        self.assertTrue(entry.needs_import)
 
     @patch("openai.OpenAI")
     def test_enrich_with_ai_accepts_string_row_identifiers(self, mock_openai):
@@ -613,6 +726,7 @@ class GLReconciliationTests(TestCase):
 
     def test_import_validated_entries(self):
         from budget.gl_reconciliation import GrandLivreReconciliationService as Svc
+        from audits.models import AuditLogEntry
 
         transactions = [
             {"date": date(2025, 5, 1), "source": "PARENT", "description": "497066-BC 16483-clé#104", "debit": 10.81},
@@ -633,8 +747,514 @@ class GLReconciliationTests(TestCase):
         self.assertEqual(expense.amount, Decimal("10.81"))
         self.assertEqual(expense.source_type, ExpenseSourceType.GL_IMPORT)
         self.assertTrue(expense.validated_gl)
-        self.assertEqual(expense.spent_by_label, "CHCE")
+        self.assertEqual(expense.spent_by_label, "104")
         self.assertEqual(expense.display_approved_by_label, "CHCE")
+        self.assertEqual(expense.sub_budget.trace_code, 1)
+        self.assertEqual(expense.description, "Clé - appartement 104")
+        self.assertEqual(len(expense.gl_source_fingerprint), 64)
+        self.assertEqual(
+            AuditLogEntry.objects.filter(
+                action="grand_livre.entry_materialized",
+                target_object_id=str(expense.pk),
+            ).count(),
+            1,
+        )
+
+    def test_materialize_all_house_account_rows_preserves_local_fields(self):
+        from audits.models import AuditLogEntry
+        from budget.gl_reconciliation import GrandLivreReconciliationService as Svc
+
+        paint = SubBudget.objects.create(
+            budget_year=self.by,
+            trace_code=11,
+            name="Peinture",
+            planned_amount=250,
+        )
+        extermination = SubBudget.objects.create(
+            budget_year=self.by,
+            trace_code=5,
+            name="Exterminateur",
+            planned_amount=350,
+        )
+        apartment_103 = Apartment.objects.create(
+            house=self.house,
+            code="103",
+        )
+        carole = Member.objects.create(
+            first_name="Carole",
+            last_name="Lacourse",
+        )
+        Residency.objects.create(
+            member=carole,
+            apartment=apartment_103,
+            start_date=date(2025, 1, 1),
+            is_primary_contact=True,
+        )
+        local = self._add_expense(
+            "Notre description claire",
+            19.49,
+            bon_number="16739",
+            entry_date=date(2025, 1, 7),
+        )
+        transactions = [
+            {
+                "date": date(2025, 1, 7),
+                "source": "SANY",
+                "description": "4999081-BC 16739-Nettoyants",
+                "debit": 19.49,
+            },
+            {
+                "date": date(2025, 3, 18),
+                "source": "QU PARENT",
+                "description": "514268-BC360856-Robinet+cartouche#103",
+                "debit": 184.15,
+            },
+            {
+                "date": date(2025, 3, 20),
+                "source": "QU PARENT",
+                "description": "514391-BC 360856-scellant",
+                "debit": 9.30,
+            },
+            {
+                "date": date(2025, 3, 31),
+                "source": "BATTILL",
+                "description": "76641-BC 360867-batterie d'urgence éclairage",
+                "debit": 124.12,
+            },
+            {
+                "date": date(2025, 6, 17),
+                "source": "PEINTURE J",
+                "description": "5480-BC 17182-peinture pilliers",
+                "debit": 2742.72,
+            },
+            {
+                "date": date(2025, 9, 1),
+                "source": "TERMINIX",
+                "description": "4540484-Contratannueldu1septau31août2027",
+                "debit": 341.74,
+            },
+        ]
+        upload = self._create_upload_with_entries(transactions)
+        Svc.parse_and_store(upload)
+        Svc.match_expenses(upload, use_ai=False)
+
+        created, skipped = Svc.materialize_unmatched_entries(upload)
+        result = Svc.build_reconciliation(upload)
+
+        self.assertEqual(len(created), 5)
+        self.assertEqual(skipped, 0)
+        self.assertEqual(Expense.objects.count(), 6)
+        local.refresh_from_db()
+        self.assertEqual(local.description, "Notre description claire")
+        self.assertEqual(local.entry_date, date(2025, 1, 7))
+
+        bc_group = list(Expense.objects.filter(bon_number="360856"))
+        self.assertEqual(len(bc_group), 2)
+        self.assertEqual({expense.sub_budget.trace_code for expense in bc_group}, {1})
+        self.assertEqual(
+            {expense.spent_by_label for expense in bc_group},
+            {"103 / Carole Lacourse"},
+        )
+        self.assertEqual(
+            Expense.objects.get(bon_number="17182").sub_budget,
+            paint,
+        )
+        self.assertEqual(
+            Expense.objects.get(supplier_name="TERMINIX").sub_budget,
+            extermination,
+        )
+        self.assertEqual(
+            Expense.objects.get(bon_number="360867").sub_budget.trace_code,
+            1,
+        )
+        self.assertEqual(
+            Expense.objects.get(bon_number="360867").spent_by_label,
+            "103 / Carole Lacourse",
+        )
+        self.assertEqual(
+            Expense.objects.get(supplier_name="TERMINIX").spent_by_label,
+            "BB",
+        )
+        self.assertEqual(
+            AuditLogEntry.objects.filter(
+                action="grand_livre.entry_materialized"
+            ).count(),
+            5,
+        )
+        self.assertEqual(result.matched_count, 6)
+        self.assertEqual(result.unmatched_gl_count, 0)
+        self.assertEqual(result.missing_from_gl_count, 0)
+        self.assertEqual(result.grille_total, result.gl_total)
+        self.assertEqual(result.difference, Decimal("0.00"))
+        self.assertTrue(result.is_balanced)
+
+        created_again, skipped_again = Svc.materialize_unmatched_entries(upload)
+        self.assertEqual(created_again, [])
+        self.assertEqual(skipped_again, 0)
+        self.assertEqual(Expense.objects.count(), 6)
+
+    def test_full_reconciliation_materializes_unmatched_rows_automatically(self):
+        from budget.gl_reconciliation import GrandLivreReconciliationService as Svc
+
+        upload = self._create_upload_with_entries([{
+            "date": date(2025, 4, 15),
+            "source": "CANAC",
+            "description": "123456-BC 16481-bac",
+            "debit": 126.44,
+        }])
+        with (
+            patch.object(Svc, "enrich_with_ai"),
+            patch.object(Svc, "analyze_with_ai"),
+        ):
+            Svc.full_reconciliation(upload)
+
+        upload.refresh_from_db()
+        entry = upload.entries.get()
+        self.assertIsNotNone(entry.matched_expense_id)
+        self.assertFalse(entry.needs_import)
+        self.assertTrue(entry.is_validated)
+        self.assertEqual(Expense.objects.count(), 1)
+        self.assertEqual(upload.reconciliation.matched_count, 1)
+        self.assertEqual(upload.reconciliation.unmatched_gl_count, 0)
+        expense = Expense.objects.get()
+        self.assertEqual(expense.spent_by_label, "BB")
+        self.assertEqual(expense.display_approved_by_label, "CHCE")
+
+        with (
+            patch.object(Svc, "enrich_with_ai"),
+            patch.object(Svc, "analyze_with_ai"),
+        ):
+            Svc.full_reconciliation(upload)
+        self.assertEqual(Expense.objects.count(), 1)
+
+    def test_materialization_rejects_another_account(self):
+        from budget.gl_reconciliation import GrandLivreReconciliationService as Svc
+
+        upload = self._create_upload_with_entries([{
+            "date": date(2025, 4, 15),
+            "source": "CANAC",
+            "description": "123456-BC 16481-bac",
+            "debit": 126.44,
+        }])
+        Svc.parse_and_store(upload)
+        Svc.match_expenses(upload, use_ai=False)
+        upload.account_number = "99-99999"
+        upload.save(update_fields=["account_number"])
+
+        with self.assertRaises(ValidationError):
+            Svc.materialize_unmatched_entries(upload)
+        self.assertEqual(Expense.objects.count(), 0)
+
+    def test_credit_materializes_as_an_active_negative_gl_expense(self):
+        from budget.gl_reconciliation import (
+            GrandLivreReconciliationService as Svc,
+            active_expenses_queryset,
+        )
+
+        upload = self._create_upload_with_entries([{
+            "date": date(2025, 4, 15),
+            "source": "FOURNISSEUR",
+            "description": "123456-Crédit fournisseur",
+            "debit": 0,
+            "credit": 25.50,
+        }])
+        Svc.parse_and_store(upload)
+        Svc.match_expenses(upload, use_ai=False)
+        created, skipped = Svc.materialize_unmatched_entries(upload)
+        result = Svc.build_reconciliation(upload)
+
+        self.assertEqual(skipped, 0)
+        self.assertEqual(len(created), 1)
+        expense = created[0]
+        self.assertEqual(expense.amount, Decimal("-25.50"))
+        self.assertFalse(expense.is_cancellation)
+        self.assertTrue(
+            active_expenses_queryset(self.by).filter(pk=expense.pk).exists()
+        )
+        self.assertEqual(result.matched_count, 1)
+        self.assertEqual(result.unmatched_gl_count, 0)
+        self.assertEqual(result.missing_from_gl_count, 0)
+        self.assertEqual(result.grille_total, Decimal("-25.50"))
+        self.assertEqual(result.difference, Decimal("0.00"))
+        self.assertEqual(expense.spent_by_label, "BB")
+        self.assertEqual(expense.display_approved_by_label, "CHCE")
+
+    def test_apartment_context_propagates_within_period_and_resets(self):
+        from budget.gl_reconciliation import GrandLivreReconciliationService as Svc
+
+        transactions = [
+            {
+                "period": "2025-02",
+                "date": date(2025, 2, 2),
+                "description": "111-BC100-Colle#102",
+                "debit": 1,
+            },
+            {
+                "date": date(2025, 2, 26),
+                "description": "112-BC101-Robinet",
+                "debit": 2,
+            },
+            {
+                "period": "2025-03",
+                "date": date(2025, 3, 18),
+                "description": "113-BC102-Cartouche#103",
+                "debit": 3,
+            },
+            {
+                "date": date(2025, 3, 20),
+                "description": "114-BC103-Scellant",
+                "debit": 4,
+            },
+            {
+                "date": date(2025, 3, 31),
+                "description": "115-BC104-Batterie",
+                "debit": 5,
+            },
+            {
+                "period": "2025-05",
+                "date": date(2025, 5, 1),
+                "description": "116-BC105-Poignée",
+                "debit": 6,
+            },
+        ]
+        upload = self._create_upload_with_entries(transactions)
+        Svc.parse_and_store(upload)
+
+        entries = list(upload.entries.order_by("row_number"))
+        self.assertEqual(
+            [entry.extracted_apartment for entry in entries],
+            ["102", "102", "103", "103", "103", ""],
+        )
+        self.assertEqual(
+            [entry.ai_metadata["apartment_context"]["source"] for entry in entries],
+            [
+                "explicit",
+                "period_inherited",
+                "explicit",
+                "period_inherited",
+                "period_inherited",
+                "none",
+            ],
+        )
+
+    def test_sync_updates_only_gl_imports_and_keeps_existing_category_without_apartment(self):
+        from audits.models import AuditLogEntry
+        from budget.gl_reconciliation import GrandLivreReconciliationService as Svc
+
+        apartment_103 = Apartment.objects.create(house=self.house, code="103")
+        carole = Member.objects.create(first_name="Carole", last_name="Lacourse")
+        Residency.objects.create(
+            member=carole,
+            apartment=apartment_103,
+            start_date=date(2025, 1, 1),
+            is_primary_contact=True,
+        )
+        gl_first = self._add_expense(
+            "Premier import GL",
+            10,
+            entry_date=date(2025, 3, 18),
+            sub=self.by.sub_budgets.get(trace_code=0),
+        )
+        gl_first.source_type = ExpenseSourceType.GL_IMPORT
+        gl_first.spent_by_label = "CHCE"
+        gl_first.save()
+        gl_second = self._add_expense(
+            "Deuxième import GL",
+            20,
+            entry_date=date(2025, 3, 20),
+            sub=self.by.sub_budgets.get(trace_code=0),
+        )
+        gl_second.source_type = ExpenseSourceType.GL_IMPORT
+        gl_second.spent_by_label = "CHCE"
+        gl_second.save()
+        gl_house = self._add_expense(
+            "Import maison",
+            30,
+            entry_date=date(2025, 4, 1),
+            sub=self.by.sub_budgets.get(trace_code=0),
+        )
+        gl_house.source_type = ExpenseSourceType.GL_IMPORT
+        gl_house.spent_by_label = "CHCE"
+        gl_house.save()
+        local = self._add_expense(
+            "Achat membre",
+            40,
+            entry_date=date(2025, 4, 2),
+        )
+        local.spent_by_label = "201 / Alexis Camille Roman"
+        local.save()
+
+        upload = self._create_upload_with_entries([
+            {
+                "period": "2025-03",
+                "date": date(2025, 3, 18),
+                "description": "1-BC101-Robinet#103",
+                "debit": 10,
+            },
+            {
+                "date": date(2025, 3, 20),
+                "description": "2-BC102-Scellant",
+                "debit": 20,
+            },
+            {
+                "period": "2025-04",
+                "date": date(2025, 4, 1),
+                "description": "3-BC103-Poignée",
+                "debit": 30,
+            },
+            {
+                "date": date(2025, 4, 2),
+                "description": "4-BC104-Achat membre",
+                "debit": 40,
+            },
+        ])
+        Svc.parse_and_store(upload)
+        Svc.match_expenses(upload, use_ai=False)
+        changed = Svc.sync_materialized_import_context(upload)
+
+        self.assertEqual(changed, 3)
+        gl_first.refresh_from_db()
+        gl_second.refresh_from_db()
+        gl_house.refresh_from_db()
+        local.refresh_from_db()
+        self.assertEqual(gl_first.spent_by_label, "103 / Carole Lacourse")
+        self.assertEqual(gl_second.spent_by_label, "103 / Carole Lacourse")
+        self.assertEqual(gl_first.sub_budget.trace_code, 1)
+        self.assertEqual(gl_second.sub_budget.trace_code, 1)
+        self.assertEqual(gl_house.spent_by_label, "BB")
+        self.assertEqual(gl_house.sub_budget.trace_code, 0)
+        self.assertEqual(local.spent_by_label, "201 / Alexis Camille Roman")
+        self.assertEqual(
+            AuditLogEntry.objects.filter(
+                action="grand_livre.import_context_synchronized"
+            ).count(),
+            3,
+        )
+
+    def test_sync_preserves_manual_gl_spender_override(self):
+        from budget.gl_reconciliation import GrandLivreReconciliationService as Svc
+
+        apartment_103 = Apartment.objects.create(house=self.house, code="103")
+        carole = Member.objects.create(first_name="Carole", last_name="Lacourse")
+        Residency.objects.create(
+            member=carole,
+            apartment=apartment_103,
+            start_date=date(2025, 1, 1),
+            is_primary_contact=True,
+        )
+        expense = self._add_expense(
+            "Scellant",
+            9.30,
+            entry_date=date(2025, 3, 20),
+            sub=self.sub_repair,
+        )
+        expense.source_type = ExpenseSourceType.GL_IMPORT
+        expense.spent_by_label = "202 / Marylin Lamarche"
+        expense.gl_spent_by_override = True
+        expense.gl_spent_by_override_reason = "Confirmation du trésorier"
+        expense.save()
+        upload = self._create_upload_with_entries([{
+            "period": "2025-03",
+            "date": date(2025, 3, 20),
+            "description": "514391-BC 360856-scellant#103",
+            "debit": 9.30,
+        }])
+        Svc.parse_and_store(upload)
+        Svc.match_expenses(upload, use_ai=False)
+
+        changed = Svc.sync_materialized_import_context(upload)
+
+        expense.refresh_from_db()
+        self.assertEqual(changed, 0)
+        self.assertEqual(expense.spent_by_label, "202 / Marylin Lamarche")
+        self.assertTrue(expense.gl_spent_by_override)
+        self.assertEqual(expense.sub_budget.trace_code, 1)
+
+    def test_reuploaded_source_matches_fingerprint_without_duplicate(self):
+        from budget.gl_reconciliation import GrandLivreReconciliationService as Svc
+
+        transactions = [{
+            "date": date(2025, 4, 15),
+            "source": "CANAC",
+            "description": "123456-BC 16481-bac",
+            "debit": 126.44,
+        }]
+        first_upload = self._create_upload_with_entries(transactions)
+        Svc.parse_and_store(first_upload)
+        Svc.match_expenses(first_upload, use_ai=False)
+        created, _ = Svc.materialize_unmatched_entries(first_upload)
+        self.assertEqual(len(created), 1)
+        expense = created[0]
+
+        second_upload = self._create_upload_with_entries(transactions)
+        Svc.parse_and_store(second_upload)
+        Svc.match_expenses(second_upload, use_ai=False)
+        second_entry = second_upload.entries.get()
+
+        self.assertEqual(second_entry.matched_expense_id, expense.pk)
+        self.assertEqual(second_entry.match_confidence, GLMatchConfidence.EXACT)
+        self.assertIn("Même écriture source", second_entry.match_notes)
+        created_again, skipped_again = Svc.materialize_unmatched_entries(
+            second_upload
+        )
+        self.assertEqual(created_again, [])
+        self.assertEqual(skipped_again, 0)
+        self.assertEqual(Expense.objects.count(), 1)
+
+
+    def test_reconciliation_excludes_reversed_and_void_bon_expenses(self):
+        from bons.models import BonDeCommande, BonStatus
+        from budget.gl_reconciliation import GrandLivreReconciliationService as Svc
+
+        active = self._add_expense("Active", 30)
+        reversed_expense = self._add_expense("Reversed", 40)
+        Expense.objects.create(
+            budget_year=self.by,
+            sub_budget=self.sub_repair,
+            entry_date=date(2025, 5, 2),
+            description="[ANNULATION] Reversed",
+            amount=Decimal("-40.00"),
+            spent_by_label="101 / Test",
+            is_cancellation=True,
+            reversal_of=reversed_expense,
+        )
+        void_bon = BonDeCommande.objects.create(
+            house=self.house,
+            budget_year=self.by,
+            number="VOID-TEST",
+            purchase_date=date(2025, 5, 3),
+            short_description="Void",
+            total=Decimal("50.00"),
+            sub_budget=self.sub_repair,
+            purchaser_member=self.member,
+            status=BonStatus.VOID,
+        )
+        Expense.objects.create(
+            budget_year=self.by,
+            sub_budget=self.sub_repair,
+            bon_de_commande=void_bon,
+            entry_date=date(2025, 5, 3),
+            description="Void bon expense",
+            amount=Decimal("50.00"),
+            spent_by_label="101 / Test",
+        )
+        upload = GrandLivreUpload.objects.create(
+            budget_year=self.by,
+            uploaded_by=self.user,
+            account_number="13-51200",
+            status=GLUploadStatus.RECONCILED,
+            gl_solde_fin=Decimal("0.00"),
+            period_end_date=date(2025, 12, 31),
+        )
+
+        result = Svc.build_reconciliation(upload)
+
+        self.assertEqual(result.grille_total, Decimal("30.00"))
+        self.assertEqual(result.missing_from_gl_count, 1)
+        self.assertEqual(
+            result.anomalies[-1].get("expense_ids", []),
+            [active.pk],
+        )
 
 
 class GLViewTests(TestCase):
@@ -718,6 +1338,162 @@ class GLViewTests(TestCase):
         resp = self.client.get(f"/budget/grand-livre/{upload.pk}/")
         self.assertEqual(resp.status_code, 200)
         self.assertContains(resp, "Test purchase")
+
+
+class GrandLivreAdjustmentTests(TestCase):
+    def setUp(self):
+        self.house = House.objects.create(
+            code="BB",
+            name="Maison BB",
+            account_number="13-51200",
+            accounting_code="13",
+        )
+        self.user = User.objects.create_user(
+            username="adjuster",
+            password="pass123",
+            house=self.house,
+            role="TREASURER",
+        )
+        self.by = BudgetYear.objects.create(
+            house=self.house,
+            year=2026,
+            annual_budget_total=Decimal("5000.00"),
+        )
+        self.upload = GrandLivreUpload.objects.create(
+            budget_year=self.by,
+            uploaded_by=self.user,
+            account_number="13-51200",
+            status=GLUploadStatus.RECONCILED,
+            gl_total_debit=Decimal("100.00"),
+            gl_total_credit=Decimal("0.00"),
+            gl_solde_fin=Decimal("100.00"),
+            period_end_date=date(2026, 9, 9),
+            entry_count=1,
+        )
+        self.entry = GrandLivreEntry.objects.create(
+            upload=self.upload,
+            row_number=62,
+            date=date(2026, 1, 7),
+            source="SOURCE",
+            description_raw="Source accounting row",
+            debit=Decimal("100.00"),
+            credit=Decimal("0.00"),
+            needs_import=True,
+        )
+        self.client.login(username="adjuster", password="pass123")
+
+    def test_adjustment_changes_derived_total_not_source_entry(self):
+        from budget.gl_reconciliation import GrandLivreReconciliationService as Svc
+
+        GrandLivreAdjustment.objects.create(
+            entry=self.entry,
+            amount_to_subtract=Decimal("30.00"),
+            reason="Montant contesté",
+            created_by=self.user,
+        )
+
+        result = Svc.build_reconciliation(self.upload)
+
+        self.entry.refresh_from_db()
+        self.assertEqual(self.entry.debit, Decimal("100.00"))
+        self.assertEqual(result.gl_total, Decimal("100.00"))
+        self.assertEqual(result.adjustment_total, Decimal("30.00"))
+        self.assertEqual(result.adjusted_gl_total, Decimal("70.00"))
+        self.assertEqual(result.difference, Decimal("70.00"))
+
+    def test_zero_adjustment_preserves_source_total(self):
+        from budget.gl_reconciliation import GrandLivreReconciliationService as Svc
+
+        GrandLivreAdjustment.objects.create(
+            entry=self.entry,
+            amount_to_subtract=Decimal("0.00"),
+            reason="Aucun écart retenu",
+            created_by=self.user,
+        )
+
+        result = Svc.build_reconciliation(self.upload)
+
+        self.assertEqual(result.adjustment_total, Decimal("0.00"))
+        self.assertEqual(result.adjusted_gl_total, Decimal("100.00"))
+
+    def test_create_renders_red_icon_and_child_row_directly_after_source(self):
+        response = self.client.post(
+            f"/budget/grand-livre/{self.upload.pk}/entries/{self.entry.pk}/adjustment/",
+            {
+                "amount_to_subtract": "25.00",
+                "reason": "À confirmer avec la coopérative centrale",
+            },
+        )
+        self.assertEqual(response.status_code, 302)
+
+        detail = self.client.get(f"/budget/grand-livre/{self.upload.pk}/")
+        html = detail.content.decode("utf-8")
+        self.assertContains(detail, 'class="gl-override-icon"')
+        self.assertContains(
+            detail,
+            'class="gl-adjustment-row"',
+        )
+        self.assertLess(
+            html.index(f'id="gl-entry-{self.entry.pk}"'),
+            html.index(f'data-parent-entry="{self.entry.pk}"'),
+        )
+        self.assertContains(detail, "-25.00 $")
+        self.assertContains(detail, "Grand Livre source")
+        self.assertContains(detail, "Grand Livre après ajustements")
+
+    def test_full_adjustment_disables_import_and_archive_restores_source(self):
+        from audits.models import AuditLogEntry
+
+        create_response = self.client.post(
+            f"/budget/grand-livre/{self.upload.pk}/entries/{self.entry.pk}/adjustment/",
+            {
+                "amount_to_subtract": "100.00",
+                "reason": "Écriture contestée en totalité",
+            },
+        )
+        self.assertEqual(create_response.status_code, 302)
+        adjustment = GrandLivreAdjustment.objects.get(entry=self.entry)
+        self.entry.refresh_from_db()
+        self.assertFalse(self.entry.needs_import)
+
+        detail = self.client.get(f"/budget/grand-livre/{self.upload.pk}/")
+        self.assertContains(detail, "Écriture entièrement ajustée")
+
+        archive_response = self.client.post(
+            f"/budget/grand-livre/{self.upload.pk}/entries/{self.entry.pk}/adjustment/{adjustment.pk}/archive/",
+            {"archive_reason": "Confirmation reçue"},
+        )
+        self.assertEqual(archive_response.status_code, 302)
+        adjustment.refresh_from_db()
+        self.entry.refresh_from_db()
+        result = self.upload.reconciliation
+        result.refresh_from_db()
+
+        self.assertTrue(adjustment.is_archived)
+        self.assertEqual(result.adjustment_total, Decimal("0.00"))
+        self.assertEqual(result.adjusted_gl_total, Decimal("100.00"))
+        self.assertTrue(self.entry.needs_import)
+        detail = self.client.get(f"/budget/grand-livre/{self.upload.pk}/")
+        self.assertNotContains(detail, 'class="gl-adjustment-row"')
+        self.assertNotContains(detail, 'class="gl-override-icon"')
+        self.assertTrue(AuditLogEntry.objects.filter(
+            action="grand_livre.adjustment_created",
+        ).exists())
+        self.assertTrue(AuditLogEntry.objects.filter(
+            action="grand_livre.adjustment_archived",
+        ).exists())
+
+    def test_adjustment_cannot_exceed_source_amount(self):
+        response = self.client.post(
+            f"/budget/grand-livre/{self.upload.pk}/entries/{self.entry.pk}/adjustment/",
+            {
+                "amount_to_subtract": "100.01",
+                "reason": "Invalid",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "ne peut pas dépasser")
+        self.assertFalse(GrandLivreAdjustment.objects.exists())
 
 
 class GLRealFileReconciliationTest(TestCase):

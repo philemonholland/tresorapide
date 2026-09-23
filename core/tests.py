@@ -19,6 +19,26 @@ class FoundationViewTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Tresorapide")
 
+    def test_base_layout_includes_discreet_hortrame_identity(self) -> None:
+        response = self.client.get(reverse("home"))
+        self.assertContains(response, 'class="hortrame-identity-bar"')
+        self.assertContains(response, "HORTRAME:")
+        self.assertContains(response, "Accelerating Epistemological Alignment")
+        self.assertContains(response, 'viewBox="0 0 318 445"')
+        self.assertContains(response, 'href="https://www.hortrame.com/"')
+
+    def test_hortrame_identity_remains_on_mobile_layout(self) -> None:
+        response = self.client.get(
+            reverse("accounts:login"),
+            HTTP_USER_AGENT=(
+                "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+                "AppleWebKit/605.1.15 Mobile/15E148 Safari/604.1"
+            ),
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'class="hortrame-identity-bar"')
+        self.assertContains(response, "Accelerating Epistemological Alignment")
+
     def test_home_page_guides_first_user_creation_when_no_users_exist(self) -> None:
         response = self.client.get(reverse("home"))
         self.assertEqual(response.status_code, 200)

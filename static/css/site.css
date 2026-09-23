@@ -10,6 +10,56 @@ body {
     margin: 0 auto;
 }
 
+.hortrame-identity-bar {
+    min-height: 38px;
+    display: flex;
+    align-items: center;
+    background: #090e15;
+    border-bottom: 1px solid #1d2836;
+    color: #aab8c9;
+}
+
+.hortrame-identity-layout {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.hortrame-identity-link {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.55rem;
+    color: #aab8c9;
+    text-decoration: none;
+    font-size: 0.68rem;
+    line-height: 1.4;
+    letter-spacing: 0.025rem;
+}
+
+.hortrame-identity-link svg {
+    width: 15px;
+    height: 22px;
+    flex: none;
+    color: #aab8c9;
+}
+
+.hortrame-identity-link strong {
+    color: #d5dfeb;
+    font-weight: 700;
+    letter-spacing: 0.06rem;
+}
+
+.hortrame-identity-link:hover {
+    color: #d7f5ed;
+}
+
+.hortrame-identity-link:focus-visible {
+    border-radius: 0.2rem;
+    outline: 2px solid #78f7d1;
+    outline-offset: 3px;
+}
+
 .header-layout {
     display: flex;
     justify-content: space-between;
@@ -226,6 +276,8 @@ body {
 .ai-confidence-8 { background: #15803d; }
 .ai-confidence-9 { background: #166534; }
 .ai-confidence-missing { background: #6b7280; }
+.ai-confidence-derived { background: #1d4ed8; }
+.ai-confidence-corrected { background: #4338ca; }
 
 .table-responsive {
     width: 100%;
@@ -619,6 +671,85 @@ body {
 
 .ledger-table td.date-col {
     white-space: nowrap;
+}
+
+@media (max-width: 600px) {
+    .hortrame-identity-bar {
+        min-height: 34px;
+    }
+
+    .hortrame-identity-link {
+        gap: 0.4rem;
+        font-size: 0.58rem;
+        letter-spacing: 0.015rem;
+    }
+
+    .hortrame-identity-link svg {
+        width: 13px;
+        height: 19px;
+    }
+}
+
+.ledger-table .duplicate-status-col {
+    width: 2.2rem;
+    min-width: 2.2rem;
+    padding-left: 0.25rem;
+    padding-right: 0.25rem;
+    text-align: center;
+    color: #7a6742;
+    font-size: 0.7rem;
+    font-weight: 500;
+}
+
+.duplicate-notice {
+    display: inline-flex;
+    width: 1.1rem;
+    height: 1.1rem;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid #d8b74e;
+    border-radius: 50%;
+    background: #fff3b0;
+    color: #6b5200;
+    font-size: 0.72rem;
+    font-weight: 700;
+    line-height: 1;
+    cursor: help;
+}
+
+.ledger-table .gl-status-col {
+    width: 2.2rem;
+    min-width: 2.2rem;
+    padding-left: 0.25rem;
+    padding-right: 0.25rem;
+    text-align: center;
+    font-size: 0.7rem;
+}
+
+.gl-override-icon {
+    display: inline-flex;
+    width: 1.15rem;
+    height: 1.15rem;
+    align-items: center;
+    justify-content: center;
+    border-radius: 50%;
+    background: #b91c1c;
+    color: #fff;
+    font-size: 0.72rem;
+    font-weight: 700;
+    line-height: 1;
+}
+
+.gl-adjustment-row td {
+    background: #fff4f4;
+    color: #7f1d1d;
+    border-top: 0;
+    font-size: 0.84rem;
+}
+
+.gl-adjustment-amount {
+    color: #b91c1c;
+    font-weight: 700;
 }
 
 .text-right {

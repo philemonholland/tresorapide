@@ -5,10 +5,30 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{% block title %}Tresorapide{% endblock %}</title>
-    <link rel="stylesheet" href="{% static 'css/site.css' %}?v=3">
+    <link rel="stylesheet" href="{% static 'css/site.css' %}?v=4">
     {% block extra_head %}{% endblock %}
 </head>
     <body class="{% if compact_handheld_mode %}handheld-mode{% endif %}">
+        <div class="hortrame-identity-bar">
+            <div class="container hortrame-identity-layout">
+                <a
+                    class="hortrame-identity-link"
+                    href="https://www.hortrame.com/"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    aria-label="HORTRAME: Accelerating Epistemological Alignment"
+                >
+                    <svg viewBox="0 0 318 445" aria-hidden="true" focusable="false" xmlns="http://www.w3.org/2000/svg">
+                        <g fill="none" stroke="currentColor" stroke-width="9">
+                            <rect x="5" y="150" width="290" height="290"></rect>
+                            <path d="M150 150v290M5 295h290"></path>
+                        </g>
+                        <path fill="currentColor" d="M197 4h116v116H197z"></path>
+                    </svg>
+                    <span><strong>HORTRAME:</strong> Accelerating Epistemological Alignment</span>
+                </a>
+            </div>
+        </div>
         <header class="site-header{% if compact_handheld_mode %} site-header-compact{% endif %}">
             <div class="container header-layout">
                 <div>

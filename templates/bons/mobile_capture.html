@@ -106,7 +106,12 @@
                 </form>
                 <form method="post" action="{% url 'bons:mobile-capture-reset' %}">
                     {% csrf_token %}
-                    <button type="submit" class="button-link">Recommencer</button>
+                    <button
+                        type="submit"
+                        class="button-link"
+                        style="color:#c0392b;"
+                        onclick="return confirm('Supprimer et archiver les {{ captured_count }} fichier(s) de cette capture? Ils ne seront pas inclus dans le prochain bon de commande.');"
+                    >Supprimer les {{ captured_count }} photos et recommencer</button>
                 </form>
             </div>
         {% endif %}

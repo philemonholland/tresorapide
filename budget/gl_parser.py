@@ -5,6 +5,7 @@ Reads the accountant's Grand Livre Excel file, locates the section
 for a given house account number, and extracts all transaction rows.
 """
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
@@ -133,6 +134,37 @@ def _find_header_row(ws) -> int:
     return 8  # fallback
 
 
+def _normalize_header(value) -> str:
+    text = unicodedata.normalize("NFKD", str(value or ""))
+    text = "".join(char for char in text if not unicodedata.combining(char))
+    return " ".join(text.casefold().strip().split())
+
+
+def _money_column_indexes(ws, header_row: int) -> tuple[int, int, int]:
+    """Return zero-based debit, credit and ending-balance columns.
+
+    Accountant exports exist in both a compact 9-column layout (G/H/I) and
+    an older 11-column layout (I/J/K). Resolve them from labels rather than
+    assuming one physical position.
+    """
+    headers = [
+        _normalize_header(cell.value)
+        for cell in ws[header_row]
+    ]
+
+    def locate(label: str, fallback: int) -> int:
+        try:
+            return headers.index(label)
+        except ValueError:
+            return fallback
+
+    return (
+        locate("debit", 8),
+        locate("credit", 9),
+        locate("solde fin", 10),
+    )
+
+
 def parse_grand_livre(file_path, target_account: str) -> GLAccountSection:
     """
     Parse the Grand Livre Excel file and extract the section for
@@ -146,10 +178,18 @@ def parse_grand_livre(file_path, target_account: str) -> GLAccountSection:
     target_prefix = target_normalized.split("-")[0] if "-" in target_normalized else target_normalized
 
     header_row = _find_header_row(ws)
+    debit_index, credit_index, balance_index = _money_column_indexes(
+        ws,
+        header_row,
+    )
     result = GLAccountSection(account_number=target_normalized)
     result.period_end_date = _extract_period_end_date(ws)
     in_target_section = False
     current_period = ""
+    saw_total_row = False
+
+    def value_at(values, index):
+        return values[index] if index < len(values) else None
 
     for row_idx, row in enumerate(ws.iter_rows(min_row=header_row + 1, values_only=False), header_row + 1):
         vals = [cell.value for cell in row]
@@ -159,11 +199,9 @@ def parse_grand_livre(file_path, target_account: str) -> GLAccountSection:
         d_val = vals[3] if len(vals) > 3 else None  # Date
         e_val = vals[4] if len(vals) > 4 else None  # Source
         f_val = vals[5] if len(vals) > 5 else None  # Description (transaction)
-        g_val = vals[6] if len(vals) > 6 else None  # Total label column
-        # h_val = vals[7]  # Solde début
-        i_val = vals[8] if len(vals) > 8 else None  # Débit
-        j_val = vals[9] if len(vals) > 9 else None  # Crédit
-        k_val = vals[10] if len(vals) > 10 else None  # Solde fin
+        debit_val = value_at(vals, debit_index)
+        credit_val = value_at(vals, credit_index)
+        balance_val = value_at(vals, balance_index)
 
         # Check if this is an account header row. In real GL files, the first
         # transaction can live on the same row as the account header.
@@ -175,7 +213,15 @@ def parse_grand_livre(file_path, target_account: str) -> GLAccountSection:
                     result.description = str(b_val).strip()
                 has_inline_transaction = any(
                     val not in (None, "")
-                    for val in (c_val, d_val, e_val, f_val, i_val, j_val, k_val)
+                    for val in (
+                        c_val,
+                        d_val,
+                        e_val,
+                        f_val,
+                        debit_val,
+                        credit_val,
+                        balance_val,
+                    )
                 )
                 if not has_inline_transaction:
                     continue
@@ -186,23 +232,38 @@ def parse_grand_livre(file_path, target_account: str) -> GLAccountSection:
                 continue
 
         if not in_target_section:
-            # Check for the Grand Total line to stop parsing
-            if g_val and isinstance(g_val, str) and "Grand Total" in g_val:
-                break
             continue
 
-        # Check for the total line of our account
-        if g_val and isinstance(g_val, str) and "Total" in g_val:
-            # Parse: "Total No compte 1351200 : 44"
+        total_label = next(
+            (
+                str(value)
+                for value in vals
+                if isinstance(value, str)
+                and "total no compte" in _normalize_header(value)
+            ),
+            "",
+        )
+        compact_total_row = (
+            not any(value not in (None, "") for value in (d_val, e_val, f_val))
+            and any(
+                value not in (None, "")
+                for value in (debit_val, credit_val, balance_val)
+            )
+        )
+        if total_label or compact_total_row:
             total_num = target_prefix + "51200"
-            if total_num in str(g_val).replace(" ", "").replace("-", ""):
-                result.total_debit = _to_decimal(i_val)
-                result.total_credit = _to_decimal(j_val)
-                result.solde_fin = _to_decimal(k_val)
-                match = re.search(r":\s*(\d+)", str(g_val))
+            label_applies = (
+                not total_label
+                or total_num in total_label.replace(" ", "").replace("-", "")
+            )
+            if label_applies:
+                result.total_debit += _to_decimal(debit_val)
+                result.total_credit += _to_decimal(credit_val)
+                result.solde_fin += _to_decimal(balance_val)
+                saw_total_row = True
+                match = re.search(r":\s*(\d+)", total_label)
                 if match:
-                    result.entry_count = int(match.group(1))
-                # Don't break — there might be a second section for same account
+                    result.entry_count += int(match.group(1))
                 in_target_section = False
                 continue
 
@@ -215,7 +276,13 @@ def parse_grand_livre(file_path, target_account: str) -> GLAccountSection:
                 current_period = str(c_val).strip()
 
         # Skip empty rows
-        if not d_val and not f_val and not i_val:
+        if (
+            not d_val
+            and not e_val
+            and not f_val
+            and _to_decimal(debit_val) == 0
+            and _to_decimal(credit_val) == 0
+        ):
             continue
 
         # Parse transaction row
@@ -225,9 +292,13 @@ def parse_grand_livre(file_path, target_account: str) -> GLAccountSection:
             date=_to_date(d_val),
             source=str(e_val).strip() if e_val else "",
             description=str(f_val).strip() if f_val else "",
-            debit=_to_decimal(i_val),
-            credit=_to_decimal(j_val),
-            solde_fin=_to_decimal(k_val) if k_val else None,
+            debit=_to_decimal(debit_val),
+            credit=_to_decimal(credit_val),
+            solde_fin=(
+                _to_decimal(balance_val)
+                if balance_val not in (None, "")
+                else None
+            ),
         )
         result.transactions.append(tx)
 
@@ -238,10 +309,17 @@ def parse_grand_livre(file_path, target_account: str) -> GLAccountSection:
     if not result.transactions:
         return result
 
-    # Recalculate entry count from actual transactions if the parsed count
-    # didn't match (can happen with multi-section accounts)
-    if result.entry_count == 0:
-        result.entry_count = len(result.transactions)
+    result.entry_count = len(result.transactions)
+    if not saw_total_row:
+        result.total_debit = sum(
+            (transaction.debit for transaction in result.transactions),
+            Decimal("0"),
+        )
+        result.total_credit = sum(
+            (transaction.credit for transaction in result.transactions),
+            Decimal("0"),
+        )
+        result.solde_fin = result.total_debit - result.total_credit
 
     return result
 

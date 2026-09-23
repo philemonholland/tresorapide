@@ -120,6 +120,12 @@ class GrandLivreEntry(TimeStampedModel):
 
     class Meta:
         ordering = ["upload", "row_number"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["upload", "row_number"],
+                name="unique_gl_row_per_upload",
+            ),
+        ]
 
     @property
     def net_amount(self):
@@ -129,6 +135,65 @@ class GrandLivreEntry(TimeStampedModel):
         return f"GL#{self.row_number}: {self.description_raw[:50]} ({self.debit})"
 
 
+class GrandLivreAdjustment(TimeStampedModel):
+    """Treasurer adjustment that leaves the accountant source row immutable."""
+
+    entry = models.ForeignKey(
+        GrandLivreEntry,
+        on_delete=models.CASCADE,
+        related_name="adjustments",
+    )
+    amount_to_subtract = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        help_text="Montant soustrait de l'écriture comptable source.",
+    )
+    reason = models.TextField()
+    created_by = models.ForeignKey(
+        "accounts.User",
+        on_delete=models.SET_NULL,
+        null=True,
+        related_name="gl_adjustments_created",
+    )
+    archived_at = models.DateTimeField(null=True, blank=True)
+    archived_by = models.ForeignKey(
+        "accounts.User",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="gl_adjustments_archived",
+    )
+    archive_reason = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ["entry_id", "created_at", "id"]
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(amount_to_subtract__gte=0),
+                name="gl_adjustment_amount_nonnegative",
+            ),
+            models.UniqueConstraint(
+                fields=["entry"],
+                condition=models.Q(archived_at__isnull=True),
+                name="one_active_gl_adjustment_per_entry",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["entry", "archived_at"]),
+        ]
+
+    @property
+    def is_archived(self):
+        return self.archived_at is not None
+
+    def __str__(self):
+        state = "archivé" if self.is_archived else "actif"
+        return (
+            f"Ajustement GL#{self.entry.row_number}: "
+            f"-{self.amount_to_subtract} ({state})"
+        )
+
+
 class ReconciliationResult(TimeStampedModel):
     """Summary of a Grand Livre reconciliation."""
     upload = models.OneToOneField(
@@ -136,6 +201,16 @@ class ReconciliationResult(TimeStampedModel):
         related_name="reconciliation",
     )
     gl_total = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    adjustment_total = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=0,
+    )
+    adjusted_gl_total = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=0,
+    )
     grille_total = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     difference = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     matched_count = models.PositiveIntegerField(default=0)
@@ -337,6 +412,26 @@ class Expense(TimeStampedModel):
         max_length=20, choices=ExpenseSourceType.choices,
         default=ExpenseSourceType.BON_DE_COMMANDE
     )
+    gl_source_fingerprint = models.CharField(
+        max_length=64,
+        blank=True,
+        help_text=(
+            "Empreinte déterministe de la ligne du Grand Livre ayant créé "
+            "cette dépense. Vide pour les autres sources."
+        ),
+    )
+    gl_spent_by_override = models.BooleanField(
+        default=False,
+        help_text=(
+            "Vrai lorsque l'attribution 'Dépensé par' d'un import GL a été "
+            "confirmée manuellement et ne doit plus être recalculée."
+        ),
+    )
+    gl_spent_by_override_reason = models.CharField(
+        max_length=255,
+        blank=True,
+        help_text="Motif de l'attribution manuelle d'un import GL.",
+    )
     entered_by = models.ForeignKey(
         "accounts.User", on_delete=models.SET_NULL,
         null=True, blank=True, related_name="entered_expenses"
@@ -358,6 +453,13 @@ class Expense(TimeStampedModel):
             models.Index(fields=["budget_year", "entry_date"]),
             models.Index(fields=["sub_budget"]),
         ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["budget_year", "gl_source_fingerprint"],
+                condition=~models.Q(gl_source_fingerprint=""),
+                name="unique_gl_source_per_budget_year",
+            ),
+        ]
 
     def clean(self):
         if self.sub_budget and self.budget_year:
@@ -365,7 +467,12 @@ class Expense(TimeStampedModel):
                 raise ValidationError(
                     "Le sous-budget doit appartenir à la même année budgétaire."
                 )
-        if not self.is_cancellation and self.amount is not None and self.amount < 0:
+        if (
+            not self.is_cancellation
+            and self.amount is not None
+            and self.amount < 0
+            and self.source_type != ExpenseSourceType.GL_IMPORT
+        ):
             raise ValidationError(
                 "Le montant ne peut pas être négatif (sauf pour les annulations)."
             )
@@ -392,7 +499,7 @@ class Expense(TimeStampedModel):
         if self.bon_de_commande_id:
             return self.bon_de_commande.effective_validator_display_label
         if self.source_type == ExpenseSourceType.GL_IMPORT:
-            return self.spent_by_label or "—"
+            return "CHCE"
         return "—"
 
     @property

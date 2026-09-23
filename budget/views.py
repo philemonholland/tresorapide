@@ -2,8 +2,10 @@ from decimal import Decimal
 
 from django.contrib import messages
 from django.core.exceptions import PermissionDenied
-from django.db.models import Sum, Q
+from django.db import transaction
+from django.db.models import Prefetch, Sum, Q
 from django.http import HttpResponse, HttpResponseForbidden, HttpResponseRedirect
+from django.template.response import TemplateResponse
 from django.urls import reverse_lazy, reverse
 from django.utils import timezone
 from django.views import View
@@ -11,8 +13,23 @@ from django.views.generic import ListView, DetailView, CreateView, UpdateView
 from django.shortcuts import get_object_or_404, redirect
 
 from accounts.access import RoleRequiredMixin, TreasurerRequiredMixin, check_house_permission
-from .models import BudgetYear, SubBudget, Expense, GrandLivreUpload, GrandLivreEntry, ReconciliationResult
-from .forms import BudgetYearForm, SubBudgetForm, SubBudgetFormSet, ExpenseForm
+from .models import (
+    BudgetYear,
+    SubBudget,
+    Expense,
+    ExpenseSourceType,
+    GrandLivreUpload,
+    GrandLivreEntry,
+    GrandLivreAdjustment,
+    ReconciliationResult,
+)
+from .forms import (
+    BudgetYearForm,
+    SubBudgetForm,
+    SubBudgetFormSet,
+    ExpenseForm,
+    GrandLivreAdjustmentForm,
+)
 from .services import BudgetCalculationService
 
 SEED_CATEGORIES = [
@@ -676,6 +693,36 @@ class ExpenseUpdateView(TreasurerRequiredMixin, UpdateView):
         )
         return ctx
 
+    def form_valid(self, form):
+        previous = Expense.objects.get(pk=self.object.pk)
+        changed_spender = (
+            previous.source_type == ExpenseSourceType.GL_IMPORT
+            and previous.spent_by_label != form.cleaned_data.get("spent_by_label")
+        )
+        if changed_spender:
+            form.instance.gl_spent_by_override = True
+            form.instance.gl_spent_by_override_reason = (
+                "Attribution confirmée manuellement dans la fiche de dépense."
+            )
+        response = super().form_valid(form)
+        if changed_spender:
+            from audits.services import create_audit_log_entry
+            create_audit_log_entry(
+                action="grand_livre.spent_by_overridden",
+                target=self.object,
+                summary=(
+                    f"Attribution manuelle de la dépense GL #{self.object.pk}"
+                ),
+                actor=self.request.user,
+                payload={
+                    "before": previous.spent_by_label,
+                    "after": self.object.spent_by_label,
+                    "reason": self.object.gl_spent_by_override_reason,
+                },
+                ip_address=self.request.META.get("REMOTE_ADDR"),
+            )
+        return response
+
     def get_success_url(self):
         return reverse("budget:expense-ledger", kwargs={"budget_year_pk": self.object.budget_year.pk})
 
@@ -853,23 +900,45 @@ class GrandLivreDetailView(TreasurerRequiredMixin, DetailView):
         )
 
     def get_context_data(self, **kwargs):
+        from .gl_reconciliation import (
+            active_expenses_queryset,
+            effective_gl_amount,
+        )
+
         ctx = super().get_context_data(**kwargs)
         upload = self.object
 
         # Fetch entries with related expense data
         entries = list(
             upload.entries.select_related("matched_expense", "matched_expense__sub_budget")
+            .prefetch_related(Prefetch(
+                "adjustments",
+                queryset=GrandLivreAdjustment.objects.filter(
+                    archived_at__isnull=True,
+                ).select_related("created_by"),
+                to_attr="active_adjustments",
+            ))
             .order_by("row_number")
         )
+        for entry in entries:
+            entry.current_adjustment = (
+                entry.active_adjustments[0]
+                if entry.active_adjustments
+                else None
+            )
+            entry.effective_amount = effective_gl_amount(
+                entry,
+                entry.current_adjustment,
+            )
 
         matched = [e for e in entries if e.matched_expense_id]
         unmatched = [e for e in entries if not e.matched_expense_id]
 
         # Find expenses missing from GL
         matched_ids = {e.matched_expense_id for e in matched}
-        all_expenses = Expense.objects.filter(
-            budget_year=upload.budget_year,
-        ).exclude(is_cancellation=True).select_related("sub_budget")
+        all_expenses = active_expenses_queryset(
+            upload.budget_year,
+        ).select_related("sub_budget")
         missing = [e for e in all_expenses if e.id not in matched_ids]
 
         ctx["entries"] = entries
@@ -887,7 +956,6 @@ class GrandLivreDetailView(TreasurerRequiredMixin, DetailView):
             self.request.user, upload.budget_year.house,
         )
         return ctx
-
 
 class GrandLivreValidateView(TreasurerRequiredMixin, View):
     """Validate and import selected GL entries into the grille."""
@@ -950,6 +1018,167 @@ class GrandLivreEntryEditView(TreasurerRequiredMixin, View):
         return redirect(reverse("budget:grand-livre-detail", kwargs={"pk": pk}))
 
 
+class GrandLivreAdjustmentEditView(TreasurerRequiredMixin, View):
+    """Create or edit one active adjustment without mutating the GL row."""
+
+    template_name = "budget/gl_adjustment_form.html"
+
+    def _objects(self, request, pk, entry_pk, *, lock=False):
+        upload = get_object_or_404(GrandLivreUpload, pk=pk)
+        check_house_permission(request.user, upload.budget_year.house)
+        entries = GrandLivreEntry.objects
+        if lock:
+            entries = entries.select_for_update()
+        entry = get_object_or_404(entries, pk=entry_pk, upload=upload)
+        adjustment = GrandLivreAdjustment.objects.filter(
+            entry=entry,
+            archived_at__isnull=True,
+        ).first()
+        return upload, entry, adjustment
+
+    def get(self, request, pk, entry_pk):
+        upload, entry, adjustment = self._objects(request, pk, entry_pk)
+        form = GrandLivreAdjustmentForm(
+            instance=adjustment,
+            entry=entry,
+        )
+        return TemplateResponse(request, self.template_name, {
+            "upload": upload,
+            "entry": entry,
+            "adjustment": adjustment,
+            "form": form,
+        })
+
+    @transaction.atomic
+    def post(self, request, pk, entry_pk):
+        from audits.models import AuditLogEntry
+        from .gl_reconciliation import GrandLivreReconciliationService
+
+        upload, entry, adjustment = self._objects(
+            request,
+            pk,
+            entry_pk,
+            lock=True,
+        )
+        previous = None
+        if adjustment:
+            previous = {
+                "amount_to_subtract": str(adjustment.amount_to_subtract),
+                "reason": adjustment.reason,
+            }
+        form = GrandLivreAdjustmentForm(
+            request.POST,
+            instance=adjustment,
+            entry=entry,
+        )
+        if not form.is_valid():
+            return TemplateResponse(request, self.template_name, {
+                "upload": upload,
+                "entry": entry,
+                "adjustment": adjustment,
+                "form": form,
+            })
+
+        adjustment = form.save(commit=False)
+        adjustment.entry = entry
+        if not adjustment.created_by_id:
+            adjustment.created_by = request.user
+        adjustment.save()
+        AuditLogEntry.objects.create(
+            actor=request.user,
+            action=(
+                "grand_livre.adjustment_updated"
+                if previous
+                else "grand_livre.adjustment_created"
+            ),
+            target_app_label="budget",
+            target_model="grandlivreadjustment",
+            target_object_id=str(adjustment.pk),
+            summary=(
+                f"Ajustement de {adjustment.amount_to_subtract:.2f} $ "
+                f"sur la ligne GL {entry.row_number}"
+            ),
+            payload={
+                "entry_id": entry.pk,
+                "row_number": entry.row_number,
+                "source_amount": str(entry.net_amount),
+                "previous": previous,
+                "current": {
+                    "amount_to_subtract": str(adjustment.amount_to_subtract),
+                    "reason": adjustment.reason,
+                },
+            },
+            ip_address=request.META.get("REMOTE_ADDR"),
+        )
+        GrandLivreReconciliationService.match_expenses(upload, use_ai=False)
+        GrandLivreReconciliationService.build_reconciliation(upload)
+        messages.success(request, "Ajustement enregistré sans modifier le Grand Livre source.")
+        return redirect(
+            reverse("budget:grand-livre-detail", kwargs={"pk": upload.pk})
+            + f"#gl-entry-{entry.pk}"
+        )
+
+
+class GrandLivreAdjustmentArchiveView(TreasurerRequiredMixin, View):
+    """Archive an adjustment after external accounting confirmation."""
+
+    @transaction.atomic
+    def post(self, request, pk, entry_pk, adjustment_pk):
+        from audits.models import AuditLogEntry
+        from .gl_reconciliation import GrandLivreReconciliationService
+
+        upload = get_object_or_404(GrandLivreUpload, pk=pk)
+        check_house_permission(request.user, upload.budget_year.house)
+        entry = get_object_or_404(
+            GrandLivreEntry.objects.select_for_update(),
+            pk=entry_pk,
+            upload=upload,
+        )
+        adjustment = get_object_or_404(
+            GrandLivreAdjustment.objects.select_for_update(),
+            pk=adjustment_pk,
+            entry=entry,
+            archived_at__isnull=True,
+        )
+        archive_reason = (
+            request.POST.get("archive_reason", "").strip()
+            or "Confirmation reçue de la coopérative centrale"
+        )
+        adjustment.archived_at = timezone.now()
+        adjustment.archived_by = request.user
+        adjustment.archive_reason = archive_reason
+        adjustment.save(update_fields=[
+            "archived_at",
+            "archived_by",
+            "archive_reason",
+            "updated_at",
+        ])
+        AuditLogEntry.objects.create(
+            actor=request.user,
+            action="grand_livre.adjustment_archived",
+            target_app_label="budget",
+            target_model="grandlivreadjustment",
+            target_object_id=str(adjustment.pk),
+            summary=(
+                f"Ajustement archivé pour la ligne GL {entry.row_number}"
+            ),
+            payload={
+                "entry_id": entry.pk,
+                "row_number": entry.row_number,
+                "amount_to_subtract": str(adjustment.amount_to_subtract),
+                "archive_reason": archive_reason,
+            },
+            ip_address=request.META.get("REMOTE_ADDR"),
+        )
+        GrandLivreReconciliationService.match_expenses(upload, use_ai=False)
+        GrandLivreReconciliationService.build_reconciliation(upload)
+        messages.success(request, "Ajustement archivé; le Grand Livre source reste inchangé.")
+        return redirect(
+            reverse("budget:grand-livre-detail", kwargs={"pk": upload.pk})
+            + f"#gl-entry-{entry.pk}"
+        )
+
+
 # ──────────────────────────────────────────────────────────────────
 #  Grille de dépenses — export PDF / XLSX
 # ──────────────────────────────────────────────────────────────────
@@ -964,7 +1193,8 @@ class ExpenseLedgerExportPDFView(RoleRequiredMixin, View):
         from .export_service import generate_expense_ledger_pdf
         pdf_bytes = generate_expense_ledger_pdf(by, include_cancelled=include_cancelled)
 
-        filename = f"Grille_depenses_{by.house.code}_{by.year}.pdf"
+        export_date = timezone.localdate().isoformat()
+        filename = f"Grille_depenses_{by.house.code}_{export_date}.pdf"
         resp = HttpResponse(pdf_bytes, content_type="application/pdf")
         resp["Content-Disposition"] = f'attachment; filename="{filename}"'
         return resp
@@ -980,7 +1210,8 @@ class ExpenseLedgerExportXLSXView(RoleRequiredMixin, View):
         from .export_service import generate_expense_ledger_xlsx
         xlsx_bytes = generate_expense_ledger_xlsx(by, include_cancelled=include_cancelled)
 
-        filename = f"Grille_depenses_{by.house.code}_{by.year}.xlsx"
+        export_date = timezone.localdate().isoformat()
+        filename = f"Grille_depenses_{by.house.code}_{export_date}.xlsx"
         resp = HttpResponse(
             xlsx_bytes,
             content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

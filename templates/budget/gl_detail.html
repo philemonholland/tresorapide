@@ -28,6 +28,9 @@
     {# Status light and summary #}
     {% if reconciliation %}
         <section class="card">
+            <p class="text-muted" style="margin-top:0;">
+                Le Grand Livre importé est la source comptable de référence. Un ajustement reste séparé de l'écriture source et modifie seulement le total après ajustements.
+            </p>
             <div style="display:flex;gap:2rem;flex-wrap:wrap;align-items:flex-start;">
                 <div style="text-align:center;min-width:120px;">
                     <div style="font-size:4rem;line-height:1;">
@@ -42,11 +45,21 @@
                     <table class="summary-table" style="max-width:500px;">
                         <tbody>
                             <tr>
-                                <td>Solde fin Grand Livre</td>
+                                <td>Grand Livre source</td>
                                 <td class="text-right money-col">{{ reconciliation.gl_total|floatformat:2 }} $</td>
                             </tr>
                             <tr>
-                                <td>Dépenses effectuées (Grille)</td>
+                                <td>Ajustements actifs</td>
+                                <td class="text-right money-col{% if reconciliation.adjustment_total %} gl-adjustment-amount{% endif %}">
+                                    {% if reconciliation.adjustment_total %}-{{ reconciliation.adjustment_total|floatformat:2 }}{% else %}0.00{% endif %} $
+                                </td>
+                            </tr>
+                            <tr>
+                                <td>Grand Livre après ajustements</td>
+                                <td class="text-right money-col">{{ reconciliation.adjusted_gl_total|floatformat:2 }} $</td>
+                            </tr>
+                            <tr>
+                                <td>Dépenses actives (Grille)</td>
                                 <td class="text-right money-col">{{ reconciliation.grille_total|floatformat:2 }} $</td>
                             </tr>
                             <tr class="summary-divider{% if reconciliation.is_balanced %} summary-highlight{% endif %}">
@@ -109,6 +122,7 @@
                 <table class="data-table enhanced-table ledger-table">
                     <thead>
                         <tr>
+                            <th class="gl-status-col" title="Ajustement actif">Avis</th>
                             <th>Date GL</th>
                             <th>Source</th>
                             <th>Description GL</th>
@@ -118,15 +132,21 @@
                             <th>Description Grille</th>
                             <th class="text-right money-col">Montant Grille</th>
                             <th>Confiance</th>
+                            {% if can_manage %}<th>Action</th>{% endif %}
                         </tr>
                     </thead>
                     <tbody>
                         {% for e in matched_entries %}
-                            <tr>
+                            <tr id="gl-entry-{{ e.pk }}">
+                                <td class="gl-status-col">
+                                    {% if e.current_adjustment %}
+                                        <span class="gl-override-icon" title="Ajustement actif" aria-label="Ajustement actif">!</span>
+                                    {% endif %}
+                                </td>
                                 <td class="nowrap date-col">{{ e.date|date:"Y-m-d"|default:"—" }}</td>
                                 <td>{{ e.source }}</td>
                                 <td>{{ e.description_clean|default:e.description_raw }}</td>
-                                <td class="text-right nowrap money-col">{{ e.debit|floatformat:2 }} $</td>
+                                <td class="text-right nowrap money-col">{{ e.net_amount|floatformat:2 }} $</td>
                                 <td class="text-center">
                                     {% if e.match_confidence == 'exact' %}✅{% else %}⚠️{% endif %}
                                 </td>
@@ -140,7 +160,28 @@
                                         <span style="color:#f39c12;">Probable</span>
                                     {% endif %}
                                 </td>
+                                {% if can_manage %}
+                                    <td><a href="{% url 'budget:grand-livre-adjustment-edit' upload.pk e.pk %}">Ajuster</a></td>
+                                {% endif %}
                             </tr>
+                            {% if e.current_adjustment %}
+                            <tr class="gl-adjustment-row" data-parent-entry="{{ e.pk }}">
+                                <td class="gl-status-col"></td>
+                                <td></td>
+                                <td>Ajustement</td>
+                                <td>{{ e.current_adjustment.reason }}</td>
+                                <td class="text-right nowrap money-col gl-adjustment-amount">-{{ e.current_adjustment.amount_to_subtract|floatformat:2 }} $</td>
+                                <td colspan="5">Soustrait du Grand Livre sans modifier l'écriture source.</td>
+                                {% if can_manage %}
+                                <td>
+                                    <form method="post" action="{% url 'budget:grand-livre-adjustment-archive' upload.pk e.pk e.current_adjustment.pk %}" onsubmit="return confirm('Archiver cet ajustement après confirmation de la coopérative centrale ?');">
+                                        {% csrf_token %}
+                                        <button type="submit" class="button-link">Archiver</button>
+                                    </form>
+                                </td>
+                                {% endif %}
+                            </tr>
+                            {% endif %}
                         {% endfor %}
                     </tbody>
                 </table>
@@ -159,6 +200,7 @@
                     <table class="data-table enhanced-table ledger-table">
                         <thead>
                             <tr>
+                                <th class="gl-status-col" title="Ajustement actif">Avis</th>
                                 <th style="width:40px;"><input type="checkbox" id="select-all-unmatched" title="Tout sélectionner"></th>
                                 <th>Date</th>
                                 <th>Source</th>
@@ -168,12 +210,18 @@
                                 <th>BC #</th>
                                 <th class="text-right money-col">Débit</th>
                                 <th class="text-right money-col">Crédit</th>
+                                {% if can_manage %}<th>Action</th>{% endif %}
                             </tr>
                         </thead>
                         <tbody>
                             {% for e in unmatched_entries %}
-                                <tr>
-                                    <td><input type="checkbox" name="entry_ids" value="{{ e.pk }}"></td>
+                                <tr id="gl-entry-{{ e.pk }}">
+                                    <td class="gl-status-col">
+                                        {% if e.current_adjustment %}
+                                            <span class="gl-override-icon" title="Ajustement actif" aria-label="Ajustement actif">!</span>
+                                        {% endif %}
+                                    </td>
+                                    <td><input type="checkbox" name="entry_ids" value="{{ e.pk }}"{% if not e.effective_amount %} disabled title="Écriture entièrement ajustée"{% endif %}></td>
                                     <td class="nowrap date-col">{{ e.date|date:"Y-m-d"|default:"—" }}</td>
                                     <td>{{ e.source }}</td>
                                     <td style="font-size:0.85rem;color:#666;">{{ e.description_raw }}</td>
@@ -182,7 +230,30 @@
                                     <td>{{ e.extracted_bc_number|default:"—" }}</td>
                                     <td class="text-right nowrap money-col">{% if e.debit %}{{ e.debit|floatformat:2 }} ${% endif %}</td>
                                     <td class="text-right nowrap money-col">{% if e.credit %}{{ e.credit|floatformat:2 }} ${% endif %}</td>
+                                    {% if can_manage %}
+                                        <td><a href="{% url 'budget:grand-livre-adjustment-edit' upload.pk e.pk %}">Ajuster</a></td>
+                                    {% endif %}
                                 </tr>
+                                {% if e.current_adjustment %}
+                                <tr class="gl-adjustment-row" data-parent-entry="{{ e.pk }}">
+                                    <td class="gl-status-col"></td>
+                                    <td></td>
+                                    <td></td>
+                                    <td>Ajustement</td>
+                                    <td>{{ e.current_adjustment.reason }}</td>
+                                    <td colspan="3">Soustrait du Grand Livre sans modifier l'écriture source.</td>
+                                    <td class="text-right nowrap money-col gl-adjustment-amount">-{{ e.current_adjustment.amount_to_subtract|floatformat:2 }} $</td>
+                                    <td></td>
+                                    {% if can_manage %}
+                                    <td>
+                                        <form method="post" action="{% url 'budget:grand-livre-adjustment-archive' upload.pk e.pk e.current_adjustment.pk %}" onsubmit="return confirm('Archiver cet ajustement après confirmation de la coopérative centrale ?');">
+                                            {% csrf_token %}
+                                            <button type="submit" class="button-link">Archiver</button>
+                                        </form>
+                                    </td>
+                                    {% endif %}
+                                </tr>
+                                {% endif %}
                             {% endfor %}
                         </tbody>
                     </table>

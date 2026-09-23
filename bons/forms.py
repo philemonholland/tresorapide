@@ -1,4 +1,5 @@
 import datetime
+from decimal import Decimal
 
 from django import forms
 from django.core.exceptions import ValidationError
@@ -9,6 +10,7 @@ from .export_formatting import (
     EXPORT_NUMBER_FORMAT_CHOICES,
 )
 from .models import BonDeCommande, BonStatus, ReceiptFile
+from .amounts import MONEY_EPSILON
 from .services import generate_bon_number
 from budget.models import BudgetYear, SubBudget
 from members.models import Member
@@ -478,6 +480,27 @@ class OcrReviewForm(forms.Form):
         untaxed_extra_amount = cleaned.get("untaxed_extra_amount")
         if untaxed_extra_amount is not None and untaxed_extra_amount < 0:
             self.add_error("untaxed_extra_amount", "Les frais non taxables ne peuvent pas être négatifs.")
+
+        subtotal = cleaned.get("subtotal")
+        tps = cleaned.get("tps")
+        tvq = cleaned.get("tvq")
+        total = cleaned.get("total")
+        if all(value is not None for value in (subtotal, tps, tvq, total)):
+            entered_sum = (
+                subtotal
+                + tps
+                + tvq
+                + (untaxed_extra_amount or Decimal("0.00"))
+            ).quantize(MONEY_EPSILON)
+            if abs(entered_sum - total) > MONEY_EPSILON:
+                self.add_error(
+                    "total",
+                    (
+                        f"Le sous-total, les taxes et les frais donnent "
+                        f"{entered_sum:.2f} $, pas {total:.2f} $. "
+                        "Corrigez les montants avant de confirmer."
+                    ),
+                )
 
         return cleaned
 

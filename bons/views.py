@@ -257,23 +257,33 @@ def _names_match(ocr_name: str, member_name: str, threshold: float = 0.80) -> bo
     return SequenceMatcher(None, a, b).ratio() >= threshold
 
 
-def _get_house_members_queryset(house):
-    """Return active members currently residing in the given house."""
+def _get_house_members_queryset(
+    house,
+    *,
+    on_date=None,
+    include_historical=False,
+):
+    """Return house members for a date, current day, or full history."""
     from members.models import Member, Residency
 
-    house_member_ids = Residency.objects.filter(
-        apartment__house=house, end_date__isnull=True,
-    ).values_list("member_id", flat=True)
-    return Member.objects.filter(
-        pk__in=house_member_ids, is_active=True,
-    ).order_by("last_name", "first_name")
+    residencies = Residency.objects.filter(apartment__house=house)
+    if on_date is not None:
+        residencies = residencies.active_on(on_date)
+    elif not include_historical:
+        residencies = residencies.current()
+    members = Member.objects.filter(
+        pk__in=residencies.values_list("member_id", flat=True),
+    )
+    if on_date is None and not include_historical:
+        members = members.filter(is_active=True)
+    return members.distinct().order_by("last_name", "first_name")
 
 
-def _match_member_by_name(house, signer_name: str):
-    """Match a signer name against active house members, accent-insensitively."""
+def _match_member_by_name(house, signer_name: str, *, on_date=None):
+    """Match a signer name against members resident on the document date."""
     if not signer_name or signer_name.upper() == "ILLISIBLE":
         return None
-    for member in _get_house_members_queryset(house):
+    for member in _get_house_members_queryset(house, on_date=on_date):
         if _names_match(signer_name, member.display_name):
             return member
     return None
@@ -310,6 +320,11 @@ def _find_duplicate_bons_for_validation(bon, receipts):
             match_receipt = match_ef.receipt_file
             match_bon = match_receipt.bon_de_commande
             if match_bon.pk == bon.pk or match_bon.pk in seen_bon_pks:
+                continue
+            if not DuplicateDetectionService.is_confirmed_duplicate_pair(
+                receipt,
+                match_receipt,
+            ):
                 continue
             seen_bon_pks.add(match_bon.pk)
 
@@ -478,11 +493,14 @@ class BonDetailView(RoleRequiredMixin, DetailView):
                     "unverifiable": True,
                 }
 
-        for receipt in bon.active_receipt_files:
-            warning = _get_amount_consistency_warning(receipt)
-            if warning:
-                ctx["amount_consistency_warning"] = warning
-                break
+        amount_warnings = _get_amount_consistency_warnings(receipts)
+        ctx["amount_consistency_warnings"] = amount_warnings
+        if amount_warnings:
+            # Backward-compatible single warning for older templates/tests.
+            ctx["amount_consistency_warning"] = amount_warnings[0]
+        ctx["bon_amount_consistency_warning"] = (
+            _get_bon_amount_consistency_warning(bon)
+        )
 
         return ctx
 
@@ -691,11 +709,14 @@ class BonValidateView(TreasurerRequiredMixin, FormView):
                     "unverifiable": True,
                 }
 
-        for receipt in self.bon.active_receipt_files:
-            warning = _get_amount_consistency_warning(receipt)
-            if warning:
-                ctx["amount_consistency_warning"] = warning
-                break
+        amount_warnings = _get_amount_consistency_warnings(receipts)
+        ctx["amount_consistency_warnings"] = amount_warnings
+        if amount_warnings:
+            # Backward-compatible single warning for older templates/tests.
+            ctx["amount_consistency_warning"] = amount_warnings[0]
+        ctx["bon_amount_consistency_warning"] = (
+            _get_bon_amount_consistency_warning(self.bon)
+        )
 
         return ctx
 
@@ -708,8 +729,20 @@ class BonValidateView(TreasurerRequiredMixin, FormView):
             ))
             return redirect(self.get_success_url())
 
-        # --- Duplicate gate: require explicit confirmation when duplicates exist ---
         receipts = list(bon.active_receipt_files.order_by("created_at", "pk"))
+        amount_warnings = _get_amount_consistency_warnings(receipts)
+        bon_amount_warning = _get_bon_amount_consistency_warning(bon)
+        if amount_warnings or bon_amount_warning:
+            form.add_error(
+                None,
+                (
+                    "Validation bloquée : les montants ne s'additionnent pas. "
+                    "Corrigez les documents signalés avant de valider."
+                ),
+            )
+            return self.form_invalid(form)
+
+        # --- Duplicate gate: require explicit confirmation when duplicates exist ---
         validated_dupes, unvalidated_dupes = _find_duplicate_bons_for_validation(
             bon, receipts
         )
@@ -855,9 +888,17 @@ class ReceiptReviewSingleView(TreasurerRequiredMixin, View):
             doc_type = ef.final_document_type or ef.document_type_candidate or "receipt"
             apt_code = ef.final_apartment_number or ef.apartment_number_candidate
             member_name_raw = ef.member_name_candidate
+            document_date = (
+                ef.final_purchase_date
+                or ef.purchase_date_candidate
+                or bon.purchase_date
+            )
 
             apartment, member = _resolve_member_assignment(
-                bon.house, apt_code, member_name_raw,
+                bon.house,
+                apt_code,
+                member_name_raw,
+                on_date=document_date,
             )
             if apartment:
                 apt_code = apartment.code
@@ -900,8 +941,6 @@ class ReceiptReviewSingleView(TreasurerRequiredMixin, View):
                     _paper_bc_signer_initials(bon.house, ef)
                 )
                 initial.update(signer_initials)
-                _supplement_supplier_details_from_invoices(initial, receipt)
-                _supplement_amounts_from_invoices(initial, receipt)
                 reimburse_target = _infer_paper_bc_reimburse_target(
                     bon.house,
                     receipt,
@@ -910,6 +949,13 @@ class ReceiptReviewSingleView(TreasurerRequiredMixin, View):
                 )
                 if reimburse_target:
                     initial["reimburse_to"] = reimburse_target
+                _supplement_supplier_details_from_invoices(initial, receipt)
+                _supplement_merchant_from_supporting_documents(
+                    initial,
+                    receipt,
+                    preserve_existing=bool(ef.final_merchant),
+                )
+                _supplement_amounts_from_invoices(initial, receipt)
 
             # Pre-select existing bon's sub_budget if not set in extracted data
             if ef.sub_budget_id:
@@ -923,7 +969,10 @@ class ReceiptReviewSingleView(TreasurerRequiredMixin, View):
         prefix = f"receipt_{receipt.pk}"
         form = OcrReviewForm(prefix=prefix, initial=initial)
 
-        members_qs = _get_house_members_queryset(bon.house)
+        members_qs = _get_house_members_queryset(
+            bon.house,
+            include_historical=True,
+        )
         form.fields["purchaser_member"].queryset = members_qs
         form.fields["expense_member"].queryset = members_qs
         form.fields["validator_member"].queryset = members_qs
@@ -972,7 +1021,10 @@ class ReceiptReviewSingleView(TreasurerRequiredMixin, View):
 
         prefix = f"receipt_{receipt.pk}"
         form = OcrReviewForm(data=request.POST, prefix=prefix)
-        members_qs = _get_house_members_queryset(bon.house)
+        members_qs = _get_house_members_queryset(
+            bon.house,
+            include_historical=True,
+        )
         form.fields["purchaser_member"].queryset = members_qs
         form.fields["expense_member"].queryset = members_qs
         form.fields["validator_member"].queryset = members_qs
@@ -1086,53 +1138,110 @@ class ReceiptReviewSingleView(TreasurerRequiredMixin, View):
 # OCR Workflow — Step 1: Upload receipts
 # ---------------------------------------------------------------------------
 
-def _match_member_for_apartment(house, apartment_code):
-    """Look up current member from apartment code in the house."""
+def _match_member_for_apartment(house, apartment_code, *, on_date=None):
+    """Look up the primary resident for an apartment on the document date."""
     from members.models import Apartment, Residency
     apartment = Apartment.objects.filter(
         house=house, code=apartment_code, is_active=True
     ).first()
     if not apartment:
         return None, None
-    residency = Residency.objects.filter(
-        apartment=apartment, end_date__isnull=True
-    ).select_related("member").first()
+    residencies = Residency.objects.filter(apartment=apartment)
+    if on_date is not None:
+        residencies = residencies.active_on(on_date)
+    else:
+        residencies = residencies.current()
+    residency = (
+        residencies.select_related("member")
+        .order_by("-is_primary_contact", "-is_coop_member", "id")
+        .first()
+    )
     if residency:
         return apartment, residency.member
     return apartment, None
 
 
-def _resolve_member_assignment(house, apartment_code: str, member_name: str):
-    """Resolve a member using apartment first, but let a strong name match override a bad apartment."""
+def _resolve_member_assignment(
+    house,
+    apartment_code: str,
+    member_name: str,
+    *,
+    on_date=None,
+):
+    """Resolve a member on the purchase date, with strong name override."""
     apartment = None
     member = None
     if apartment_code:
-        apartment, member = _match_member_for_apartment(house, apartment_code)
+        apartment, member = _match_member_for_apartment(
+            house,
+            apartment_code,
+            on_date=on_date,
+        )
     if member_name and member_name.upper() != "ILLISIBLE":
-        matched_by_name = _match_member_by_name(house, member_name)
+        matched_by_name = _match_member_by_name(
+            house,
+            member_name,
+            on_date=on_date,
+        )
         if matched_by_name and (not member or not _names_match(member_name, member.display_name)):
             member = matched_by_name
-            apartment = matched_by_name.current_apartment() or apartment
+            residency = (
+                matched_by_name.residency_on(on_date)
+                if on_date is not None
+                else matched_by_name.current_residency()
+            )
+            apartment = residency.apartment if residency else apartment
     elif not member and member_name:
-        member = _match_member_by_name(house, member_name)
+        member = _match_member_by_name(
+            house,
+            member_name,
+            on_date=on_date,
+        )
         if member:
-            apartment = member.current_apartment() or apartment
+            residency = (
+                member.residency_on(on_date)
+                if on_date is not None
+                else member.current_residency()
+            )
+            apartment = residency.apartment if residency else apartment
     return apartment, member
 
 
-def _resolve_signer_assignment(house, apartment_code: str, signer_name: str):
+def _resolve_signer_assignment(
+    house,
+    apartment_code: str,
+    signer_name: str,
+    *,
+    on_date=None,
+):
     """Backward-compatible wrapper for signer assignment."""
-    return _resolve_member_assignment(house, apartment_code, signer_name)
+    return _resolve_member_assignment(
+        house,
+        apartment_code,
+        signer_name,
+        on_date=on_date,
+    )
 
 
-def _resolve_validator_assignment(house, apartment_code: str, validator_name: str):
+def _resolve_validator_assignment(
+    house,
+    apartment_code: str,
+    validator_name: str,
+    *,
+    on_date=None,
+):
     """Resolve the paper-BC validator, allowing external non-members.
 
     If an OCR-guessed apartment points to a coop member but the handwritten
     validator name does not credibly match that member, treat the validator as
     external instead of forcing the house member.
     """
-    apartment, member = _resolve_signer_assignment(house, apartment_code, validator_name)
+    apartment, member = _resolve_signer_assignment(
+        house,
+        apartment_code,
+        validator_name,
+        on_date=on_date,
+    )
     is_external = False
     validator_name = (validator_name or "").strip()
     if validator_name and validator_name.upper() != "ILLISIBLE":
@@ -1410,12 +1519,61 @@ def _linked_invoice_documents_for_current_receipt(documents, *, bc_number="") ->
     return []
 
 
-def _supplement_amounts_from_invoices(initial, receipt):
-    """Fill missing subtotal/tps/tvq in *initial* from invoice docs in the same PDF.
+def _supporting_documents_for_current_receipt(documents, *, bc_number="") -> list[dict]:
+    """Return supporting invoices/receipts for one paper BC without duplicates."""
+    normalized_bc = _normalize_bc_reference(bc_number)
+    paper_bc_count = sum(
+        1
+        for document in documents
+        if str(document.get("document_type") or "").strip() == "paper_bc"
+    )
+    supporting = []
+    for document in documents:
+        document_type = str(document.get("document_type") or "").strip()
+        if document_type == "invoice":
+            associated_bc = _normalize_bc_reference(
+                document.get("associated_bc_number")
+            )
+            if associated_bc and normalized_bc and associated_bc != normalized_bc:
+                continue
+            if not associated_bc and paper_bc_count > 1:
+                continue
+            supporting.append(document)
+        elif document_type == "receipt" and paper_bc_count <= 1:
+            supporting.append(document)
 
-    When a paper BC doesn't have taxes written on it but the associated
-    invoice(s) do, we pull them into the review form so the treasurer sees
-    the correct values instead of empty fields.
+    # One photographed page can contain both an invoice and its card receipt.
+    # If both carry the same total, count the purchase once and prefer the
+    # invoice because it usually has the fuller tax breakdown.
+    deduplicated = []
+    page_total_indexes = {}
+    for document in supporting:
+        filename = str(document.get("filename") or "").strip()
+        total = _money(document.get("total"))
+        key = None
+        if " - Page " in filename and total is not None:
+            key = (filename.casefold(), total)
+        if key is None or key not in page_total_indexes:
+            if key is not None:
+                page_total_indexes[key] = len(deduplicated)
+            deduplicated.append(document)
+            continue
+
+        existing_index = page_total_indexes[key]
+        existing = deduplicated[existing_index]
+        existing_type = str(existing.get("document_type") or "").strip()
+        if document_type == "invoice" and existing_type != "invoice":
+            deduplicated[existing_index] = document
+
+    return deduplicated
+
+
+def _supplement_amounts_from_invoices(initial, receipt):
+    """Fill missing amounts from reconciled supporting docs in the same PDF.
+
+    The historical function name is retained for callers. Invoices and member
+    receipts are both eligible, but their deduplicated totals must reconcile
+    to the paper BC before any partial financials are copied into the form.
     """
     needs_subtotal = initial.get("subtotal") is None
     needs_tps = initial.get("tps") is None
@@ -1431,14 +1589,38 @@ def _supplement_amounts_from_invoices(initial, receipt):
         documents=all_docs,
         explicit_bc_number=initial.get("bc_number"),
     )
-    invoices = _linked_invoice_documents_for_current_receipt(
+    supporting_documents = _supporting_documents_for_current_receipt(
         all_docs,
         bc_number=current_bc_number,
     )
-    if not invoices:
+    if not supporting_documents:
         return
 
-    aggregated = _aggregate_json_document_amounts(invoices)
+    aggregated = _aggregate_json_document_amounts(supporting_documents)
+    bc_total = _money(initial.get("total"))
+    invoice_total = aggregated["total"]
+    invoice_subtotal = aggregated["subtotal"]
+    invoice_untaxed_extra = aggregated["untaxed_extra_amount"]
+
+    # Do not mix a partial linked-invoice subset into a larger paper BC. The
+    # invoice set must either total to the BC or have a subtotal whose standard
+    # tax breakdown reconciles to it.
+    if bc_total is not None and invoice_subtotal is not None:
+        candidate_totals = []
+        if invoice_total is not None:
+            candidate_totals.append(invoice_total)
+        standard_invoice_breakdown = _standard_tax_breakdown(
+            invoice_subtotal,
+            invoice_untaxed_extra,
+        )
+        if standard_invoice_breakdown:
+            candidate_totals.append(standard_invoice_breakdown["total"])
+        if candidate_totals and not any(
+            abs(candidate_total - bc_total) <= MONEY_EPSILON
+            for candidate_total in candidate_totals
+        ):
+            return
+
     if needs_subtotal and aggregated["subtotal"] is not None:
         initial["subtotal"] = aggregated["subtotal"]
     if needs_tps and aggregated["tps"] is not None:
@@ -1454,8 +1636,6 @@ def _supplement_amounts_from_invoices(initial, receipt):
     subtotal = _money(initial.get("subtotal"))
     total = _money(initial.get("total"))
     untaxed_extra_amount = _money(initial.get("untaxed_extra_amount"))
-    invoice_subtotal = aggregated["subtotal"]
-    invoice_untaxed_extra = aggregated["untaxed_extra_amount"]
 
     # Some paper BC OCRs incorrectly copy the total into the subtotal field
     # when taxes are omitted on the BC. If the invoice subtotal plus standard
@@ -1552,13 +1732,75 @@ def _supplement_supplier_details_from_invoices(initial, receipt):
     invoice_supplier_address = str(best_invoice.get("supplier_address") or "").strip()
     previous_supplier_name = str(initial.get("supplier_name") or "").strip()
     current_merchant_name = str(initial.get("merchant_name") or "").strip()
+    is_member_reimbursement = initial.get("reimburse_to") == ReimburseTarget.MEMBER
 
     if invoice_supplier_name:
-        initial["supplier_name"] = invoice_supplier_name
+        if not is_member_reimbursement:
+            initial["supplier_name"] = invoice_supplier_name
         if not current_merchant_name or current_merchant_name == previous_supplier_name:
             initial["merchant_name"] = invoice_supplier_name
-    if invoice_supplier_address:
+    if invoice_supplier_address and not is_member_reimbursement:
         initial["supplier_address"] = invoice_supplier_address
+
+
+def _supplement_merchant_from_supporting_documents(
+    initial,
+    receipt,
+    *,
+    preserve_existing=False,
+):
+    """Use one unambiguous supporting merchant without inventing a roll-up.
+
+    A member-reimbursement BC can contain one merchant, or several receipts
+    from different merchants. Preserve a confirmed merchant, fill a single
+    unambiguous supporting merchant, and leave the field blank when the
+    package genuinely contains several merchants.
+    """
+    if preserve_existing:
+        return
+
+    documents = _load_receipt_ai_documents(receipt)
+    current_bc_number = _current_receipt_bc_number(
+        receipt,
+        documents=documents,
+        explicit_bc_number=initial.get("bc_number"),
+    )
+    paper_bcs = _paper_bc_documents_for_current_receipt(
+        documents,
+        bc_number=current_bc_number,
+    )
+    if len(paper_bcs) != 1:
+        return
+
+    merchant_names = []
+    seen = set()
+    for document in documents:
+        document_type = str(document.get("document_type") or "").strip()
+        if document_type == "invoice":
+            associated_bc = _normalize_bc_reference(
+                document.get("associated_bc_number")
+            )
+            if (
+                associated_bc
+                and current_bc_number
+                and associated_bc != current_bc_number
+            ):
+                continue
+            merchant_name = str(document.get("supplier_name") or "").strip()
+        elif document_type == "receipt":
+            merchant_name = str(document.get("merchant") or "").strip()
+        else:
+            continue
+
+        key = merchant_name.casefold()
+        if merchant_name and key not in seen:
+            seen.add(key)
+            merchant_names.append(merchant_name)
+
+    if len(merchant_names) == 1:
+        initial["merchant_name"] = merchant_names[0]
+    elif len(merchant_names) > 1:
+        initial["merchant_name"] = ""
 
 
 def _aggregate_extracted_amounts(extracted_fields, *, prefer_invoice_totals=False):
@@ -1566,6 +1808,7 @@ def _aggregate_extracted_amounts(extracted_fields, *, prefer_invoice_totals=Fals
     documents = []
     paper_bc_documents = []
     invoice_documents = []
+    supporting_documents = []
 
     for ef in extracted_fields:
         doc = {
@@ -1575,13 +1818,39 @@ def _aggregate_extracted_amounts(extracted_fields, *, prefer_invoice_totals=Fals
         documents.append(doc)
         if doc["document_type"] == "paper_bc":
             paper_bc_documents.append(doc)
-        elif doc["document_type"] == "invoice":
-            invoice_documents.append(doc)
+        else:
+            supporting_documents.append(doc)
+            if doc["document_type"] == "invoice":
+                invoice_documents.append(doc)
 
     chosen_documents = documents
     using_invoices = False
     if prefer_invoice_totals:
-        if invoice_documents and all(doc["total"] is not None for doc in invoice_documents):
+        paper_total = None
+        if paper_bc_documents and all(
+            doc["total"] is not None for doc in paper_bc_documents
+        ):
+            paper_total = sum(
+                (doc["total"] for doc in paper_bc_documents),
+                Decimal("0.00"),
+            ).quantize(MONEY_EPSILON)
+        supporting_total = None
+        if supporting_documents and all(
+            doc["total"] is not None for doc in supporting_documents
+        ):
+            supporting_total = sum(
+                (doc["total"] for doc in supporting_documents),
+                Decimal("0.00"),
+            ).quantize(MONEY_EPSILON)
+
+        if (
+            paper_total is not None
+            and supporting_total is not None
+            and abs(paper_total - supporting_total) <= MONEY_EPSILON
+        ):
+            chosen_documents = supporting_documents
+            using_invoices = True
+        elif invoice_documents and all(doc["total"] is not None for doc in invoice_documents):
             chosen_documents = invoice_documents
             using_invoices = True
         elif paper_bc_documents:
@@ -1646,6 +1915,40 @@ def _aggregate_receipt_amounts(receipts, *, prefer_invoice_totals=False):
         extracted_fields,
         prefer_invoice_totals=prefer_invoice_totals,
     )
+
+
+def _regular_receipts_matching_single_paper_bc(
+    paper_bc_receipts,
+    invoice_receipts,
+    regular_receipts,
+):
+    """Return unlinked receipts that unambiguously reconcile to one paper BC.
+
+    Supporting cash-register receipts often have no printed BC number and are
+    correctly classified as ``receipt`` rather than ``invoice``. When a scan
+    package contains exactly one paper BC, attach those receipts only if every
+    total is known and their combined total (plus any explicitly linked
+    invoices) equals the paper BC total exactly.
+    """
+    if len(paper_bc_receipts) != 1 or not regular_receipts:
+        return []
+
+    bc_number, paper_bc_receipt = next(iter(paper_bc_receipts.items()))
+    paper_amounts = _aggregate_receipt_amounts([paper_bc_receipt])
+    paper_total = paper_amounts.get("total")
+    if paper_total is None:
+        return []
+
+    explicit_support = list(invoice_receipts.get(bc_number, []))
+    proposed_support = explicit_support + list(regular_receipts)
+    supporting_amounts = _aggregate_receipt_amounts(proposed_support)
+    supporting_total = supporting_amounts.get("total")
+    if (
+        supporting_total is None
+        or abs(paper_total - supporting_total) > MONEY_EPSILON
+    ):
+        return []
+    return list(regular_receipts)
 
 
 def _aggregate_json_document_amounts(documents, *, prefer_invoice_totals=False):
@@ -1729,6 +2032,7 @@ def _paper_bc_signer_initials(house, ef):
     purchaser_apt = ef.final_expense_apartment or ef.expense_apartment_candidate or ""
     validator_name = ef.final_validator_member_name or ef.validator_member_name_candidate or ""
     validator_apt = ef.final_validator_apartment or ef.validator_apartment_candidate or ""
+    document_date = ef.final_purchase_date or ef.purchase_date_candidate
     is_confirmed = bool(ef.confirmed_at or ef.confirmed_by_id)
     roles_ambiguous = (
         ef.signer_roles_ambiguous_final
@@ -1748,7 +2052,10 @@ def _paper_bc_signer_initials(house, ef):
     validator_mismatch = False
 
     purchaser_apartment, purchaser_member = _resolve_signer_assignment(
-        house, purchaser_apt, purchaser_name,
+        house,
+        purchaser_apt,
+        purchaser_name,
+        on_date=document_date,
     )
     if purchaser_apartment:
         initial["expense_apartment"] = purchaser_apartment.code
@@ -1760,7 +2067,10 @@ def _paper_bc_signer_initials(house, ef):
         purchaser_mismatch = True
 
     validator_apartment, validator_member, validator_is_external = _resolve_validator_assignment(
-        house, validator_apt, validator_name,
+        house,
+        validator_apt,
+        validator_name,
+        on_date=document_date,
     )
     if validator_apartment:
         initial["validator_apartment"] = validator_apartment.code
@@ -1786,13 +2096,28 @@ def _save_paper_bc_extracted_fields(ef, form, house=None):
     validator_member = form.cleaned_data.get("validator_member")
     expense_apartment = form.cleaned_data.get("expense_apartment") or ""
     validator_apartment = form.cleaned_data.get("validator_apartment") or ""
+    document_date = (
+        form.cleaned_data.get("purchase_date")
+        or ef.final_purchase_date
+        or ef.purchase_date_candidate
+    )
 
     if expense_member:
-        member_apartment = expense_member.current_apartment()
+        residency = (
+            expense_member.residency_on(document_date)
+            if document_date is not None
+            else expense_member.current_residency()
+        )
+        member_apartment = residency.apartment if residency else None
         if member_apartment and (house is None or member_apartment.house_id == house.id):
             expense_apartment = member_apartment.code
     if validator_member:
-        member_apartment = validator_member.current_apartment()
+        residency = (
+            validator_member.residency_on(document_date)
+            if document_date is not None
+            else validator_member.current_residency()
+        )
+        member_apartment = residency.apartment if residency else None
         if member_apartment and (house is None or member_apartment.house_id == house.id):
             validator_apartment = member_apartment.code
 
@@ -2045,15 +2370,40 @@ class MobileCaptureResetView(TreasurerRequiredMixin, View):
     def post(self, request):
         scan_session = _get_mobile_capture_session(request)
         if scan_session is not None:
+            from audits.models import AuditLogEntry
+
             archive_reason = (
                 f"Capture mobile abandonnée par {request.user.get_username()}"
             )
-            for receipt in scan_session.active_receipt_files.order_by("created_at", "pk"):
+            receipts = list(
+                scan_session.active_receipt_files.order_by("created_at", "pk")
+            )
+            receipt_manifest = [
+                {
+                    "id": receipt.pk,
+                    "filename": receipt.original_filename,
+                    "sha256": receipt.sha256_checksum,
+                }
+                for receipt in receipts
+            ]
+            for receipt in receipts:
                 receipt.archive(reason=archive_reason)
             BonDeCommande.objects.filter(pk=scan_session.pk).update(
                 status=BonStatus.VOID,
                 void_reason="Capture mobile abandonnée",
                 voided_at=timezone.now(),
+            )
+            AuditLogEntry.objects.create(
+                actor=request.user,
+                action="scan_session.abandoned",
+                target_app_label="bons",
+                target_model="bondecommande",
+                target_object_id=str(scan_session.pk),
+                summary=(
+                    f"Capture mobile abandonnée : {len(receipts)} fichier(s) archivé(s)"
+                ),
+                payload={"receipts": receipt_manifest},
+                ip_address=request.META.get("REMOTE_ADDR"),
             )
             messages.info(request, "La capture mobile a été réinitialisée.")
         _clear_mobile_capture_session(request)
@@ -2077,19 +2427,18 @@ def _get_mismatch_warning(receipt):
         all_docs,
         bc_number=current_bc_number,
     )
-    invoices = _linked_invoice_documents_for_current_receipt(
+    supporting_documents = _supporting_documents_for_current_receipt(
         all_docs,
         bc_number=current_bc_number,
     )
 
-    if not paper_bcs or not invoices:
+    if not paper_bcs or not supporting_documents:
         return None
 
     try:
         paper_amounts = _aggregate_json_document_amounts(paper_bcs)
         invoice_amounts = _aggregate_json_document_amounts(
-            invoices,
-            prefer_invoice_totals=True,
+            supporting_documents,
         )
         bc_total = paper_amounts["total"]
         invoice_total = invoice_amounts["total"]
@@ -2191,6 +2540,30 @@ def _get_amount_consistency_warning(receipt):
     return warning
 
 
+def _get_amount_consistency_warnings(receipts):
+    """Return every inconsistent document instead of hiding all but the first."""
+    return [
+        warning
+        for receipt in receipts
+        for warning in [_get_amount_consistency_warning(receipt)]
+        if warning is not None
+    ]
+
+
+def _get_bon_amount_consistency_warning(bon):
+    """Return an aggregate warning when the bon components miss its total."""
+    warning = build_amount_consistency_warning(
+        subtotal=bon.subtotal,
+        tps=bon.tps,
+        tvq=bon.tvq,
+        untaxed_extra_amount=bon.untaxed_extra_amount,
+        total=bon.total,
+    )
+    if warning:
+        warning["filename"] = f"BC {bon.number} (total agrégé)"
+    return warning
+
+
 class OcrReviewView(TreasurerRequiredMixin, View):
     """Step 2: Review extracted data one receipt at a time with prev/next."""
     template_name = "bons/review.html"
@@ -2247,8 +2620,16 @@ class OcrReviewView(TreasurerRequiredMixin, View):
 
             # Only do member matching for receipts
             if doc_type == "receipt":
+                document_date = (
+                    ef.final_purchase_date
+                    or ef.purchase_date_candidate
+                    or bon.purchase_date
+                )
                 apartment, member = _resolve_member_assignment(
-                    bon.house, apt_code, member_name_raw,
+                    bon.house,
+                    apt_code,
+                    member_name_raw,
+                    on_date=document_date,
                 )
                 if apartment:
                     apt_code = apartment.code
@@ -2283,8 +2664,6 @@ class OcrReviewView(TreasurerRequiredMixin, View):
             # For paper BCs: when subtotal/taxes are missing on the BC,
             # try to fill supplier details and amounts from linked invoices.
             if doc_type == "paper_bc":
-                _supplement_supplier_details_from_invoices(initial, receipt)
-                _supplement_amounts_from_invoices(initial, receipt)
                 reimburse_target = _infer_paper_bc_reimburse_target(
                     bon.house,
                     receipt,
@@ -2293,13 +2672,23 @@ class OcrReviewView(TreasurerRequiredMixin, View):
                 )
                 if reimburse_target:
                     initial["reimburse_to"] = reimburse_target
+                _supplement_supplier_details_from_invoices(initial, receipt)
+                _supplement_merchant_from_supporting_documents(
+                    initial,
+                    receipt,
+                    preserve_existing=bool(ef.final_merchant),
+                )
+                _supplement_amounts_from_invoices(initial, receipt)
         except ReceiptExtractedFields.DoesNotExist:
             initial["document_type"] = "receipt"
 
         form = OcrReviewForm(data=post_data, prefix=prefix, initial=initial)
 
         # Populate member choices: all active members with residency in this house
-        members_qs = _get_house_members_queryset(bon.house)
+        members_qs = _get_house_members_queryset(
+            bon.house,
+            include_historical=True,
+        )
         form.fields["purchaser_member"].queryset = members_qs
         form.fields["expense_member"].queryset = members_qs
         form.fields["validator_member"].queryset = members_qs
@@ -2349,7 +2738,10 @@ class OcrReviewView(TreasurerRequiredMixin, View):
         form = OcrReviewForm(data=request.POST, prefix=prefix)
         # Populate querysets so validation works
         from budget.models import SubBudget
-        members_qs = _get_house_members_queryset(bon.house)
+        members_qs = _get_house_members_queryset(
+            bon.house,
+            include_historical=True,
+        )
         form.fields["purchaser_member"].queryset = members_qs
         form.fields["expense_member"].queryset = members_qs
         form.fields["validator_member"].queryset = members_qs
@@ -2488,6 +2880,29 @@ class OcrReviewView(TreasurerRequiredMixin, View):
                     regular_receipts.append(receipt)
             else:
                 regular_receipts.append(receipt)
+
+        # A supporting store receipt normally carries no BC number. If there
+        # is exactly one paper BC in the package and the complete supporting
+        # set reconciles to it, keep the package together. Any ambiguity or
+        # missing amount leaves the receipts separate for manual review.
+        reconciled_regular_receipts = _regular_receipts_matching_single_paper_bc(
+            paper_bc_receipts,
+            invoice_receipts,
+            regular_receipts,
+        )
+        if reconciled_regular_receipts:
+            only_bc_number = next(iter(paper_bc_receipts))
+            invoice_receipts.setdefault(only_bc_number, []).extend(
+                reconciled_regular_receipts
+            )
+            reconciled_ids = {
+                receipt.pk for receipt in reconciled_regular_receipts
+            }
+            regular_receipts = [
+                receipt
+                for receipt in regular_receipts
+                if receipt.pk not in reconciled_ids
+            ]
 
         created_bons = []
         duplicate_warnings = []
@@ -2747,6 +3162,11 @@ class OcrReviewView(TreasurerRequiredMixin, View):
                         purchaser_apt_code = ef.final_expense_apartment or ef.expense_apartment_candidate
                         validator_name = ef.final_validator_member_name or ef.validator_member_name_candidate
                         validator_apt_code = ef.final_validator_apartment or ef.validator_apartment_candidate
+                        document_date = (
+                            ef.final_purchase_date
+                            or ef.purchase_date_candidate
+                            or bon.purchase_date
+                        )
                         reimburse_val = _infer_paper_bc_reimburse_target(
                             bon.house,
                             r,
@@ -2757,7 +3177,10 @@ class OcrReviewView(TreasurerRequiredMixin, View):
                             update_fields["reimburse_to"] = reimburse_val
 
                         purchaser_apartment, purchaser_member = _resolve_signer_assignment(
-                            bon.house, purchaser_apt_code, purchaser_name,
+                            bon.house,
+                            purchaser_apt_code,
+                            purchaser_name,
+                            on_date=document_date,
                         )
                         if purchaser_apartment:
                             update_fields["purchaser_apartment_id"] = purchaser_apartment.pk
@@ -2765,7 +3188,10 @@ class OcrReviewView(TreasurerRequiredMixin, View):
                             update_fields["purchaser_member_id"] = purchaser_member.pk
 
                         validator_apartment, validator_member, validator_is_external = _resolve_validator_assignment(
-                            bon.house, validator_apt_code, validator_name,
+                            bon.house,
+                            validator_apt_code,
+                            validator_name,
+                            on_date=document_date,
                         )
                         if validator_member and purchaser_member and validator_member.pk == purchaser_member.pk:
                             validator_member = None
@@ -2838,7 +3264,16 @@ class OcrReviewView(TreasurerRequiredMixin, View):
         if not is_paper_bc:
             apt_code = first_ef.final_apartment_number if first_ef else ""
             if apt_code:
-                apartment, member = _match_member_for_apartment(bon.house, apt_code)
+                document_date = (
+                    first_ef.final_purchase_date
+                    or first_ef.purchase_date_candidate
+                    or bon.purchase_date
+                )
+                apartment, member = _match_member_for_apartment(
+                    bon.house,
+                    apt_code,
+                    on_date=document_date,
+                )
                 if apartment:
                     update_fields["purchaser_apartment_id"] = apartment.pk
                 if member:

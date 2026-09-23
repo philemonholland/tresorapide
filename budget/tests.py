@@ -1,5 +1,6 @@
 from datetime import date
 from decimal import Decimal
+from unittest.mock import patch
 from django.test import TestCase, RequestFactory
 from django.contrib.sessions.middleware import SessionMiddleware
 from django.core.files.uploadedfile import SimpleUploadedFile
@@ -337,6 +338,91 @@ class BudgetLedgerSignerDisplayTests(TestCase):
         self.assertContains(response, "202 / Marylin Lamarche")
         self.assertContains(response, "204 / Trésorier Test")
 
+    def test_year_detail_uses_discreet_duplicate_column_without_row_highlight(self):
+        from bons.models import (
+            DuplicateFlag,
+            DuplicateFlagStatus,
+            ReceiptExtractedFields,
+        )
+
+        original_bon = BonDeCommande.objects.create(
+            house=self.house,
+            budget_year=self.by,
+            number="BB260001",
+            purchase_date=date(2026, 1, 7),
+            short_description="Original",
+            total=Decimal("36.78"),
+            sub_budget=self.sub_budget,
+            purchaser_member=self.purchaser,
+            status=BonStatus.VALIDATED,
+        )
+        duplicate_bon = BonDeCommande.objects.create(
+            house=self.house,
+            budget_year=self.by,
+            number="BB260002",
+            purchase_date=date(2026, 1, 7),
+            short_description="Possible duplicate",
+            total=Decimal("36.78"),
+            sub_budget=self.sub_budget,
+            purchaser_member=self.purchaser,
+            status=BonStatus.VALIDATED,
+        )
+        original_receipt = ReceiptFile.objects.create(
+            bon_de_commande=original_bon,
+            file=SimpleUploadedFile("original.png", b"same", content_type="image/png"),
+            original_filename="original.png",
+            content_type="image/png",
+            ocr_status=OcrStatus.CORRECTED,
+        )
+        duplicate_receipt = ReceiptFile.objects.create(
+            bon_de_commande=duplicate_bon,
+            file=SimpleUploadedFile("duplicate.png", b"same", content_type="image/png"),
+            original_filename="duplicate.png",
+            content_type="image/png",
+            ocr_status=OcrStatus.CORRECTED,
+        )
+        ReceiptExtractedFields.objects.create(
+            receipt_file=original_receipt,
+            final_total=Decimal("36.78"),
+            final_purchase_date=date(2026, 1, 7),
+        )
+        ReceiptExtractedFields.objects.create(
+            receipt_file=duplicate_receipt,
+            final_total=Decimal("36.78"),
+            final_purchase_date=date(2026, 1, 7),
+        )
+        DuplicateFlag.objects.create(
+            receipt_file=duplicate_receipt,
+            suspected_duplicate_receipt=original_receipt,
+            confidence=Decimal("1.00"),
+            status=DuplicateFlagStatus.CONFIRMED_DUPLICATE,
+        )
+        Expense.objects.create(
+            budget_year=self.by,
+            sub_budget=self.sub_budget,
+            bon_de_commande=duplicate_bon,
+            entry_date=date(2026, 1, 7),
+            description="Possible duplicate",
+            bon_number=duplicate_bon.number,
+            spent_by_label="202 / Marylin",
+            amount=Decimal("36.78"),
+        )
+
+        self.client.login(username="tresorier", password="test123")
+        response = self.client.get(
+            reverse("budget:year-detail", kwargs={"pk": self.by.pk})
+        )
+        html = response.content.decode("utf-8")
+
+        self.assertContains(response, 'class="duplicate-notice"')
+        self.assertContains(response, 'aria-label="Doublon possible détecté"')
+        self.assertNotContains(response, 'style="background: #fff3cd;"')
+        self.assertNotContains(response, "⚠️ DOUBLON")
+        self.assertLess(
+            html.index('<td class="duplicate-status-col">'),
+            html.index('<td class="nowrap date-col">'),
+        )
+
     def test_expense_ledger_prefers_explicit_bon_approver_label(self):
         bon = BonDeCommande.objects.create(
             house=self.house,
@@ -371,7 +457,7 @@ class BudgetLedgerSignerDisplayTests(TestCase):
         self.assertContains(response, "202 / Marylin Lamarche")
         self.assertContains(response, "203 / René Côté")
 
-    def test_expense_ledger_shows_chce_for_gl_imported_entries(self):
+    def test_expense_ledger_separates_bb_spender_from_chce_validator(self):
         Expense.objects.create(
             budget_year=self.by,
             sub_budget=self.sub_budget,
@@ -379,7 +465,7 @@ class BudgetLedgerSignerDisplayTests(TestCase):
             description="Entrée GL importée",
             bon_number="16739",
             supplier_name="PARENT",
-            spent_by_label="CHCE",
+            spent_by_label="BB",
             amount=Decimal("19.49"),
             validated_gl=True,
             source_type=ExpenseSourceType.GL_IMPORT,
@@ -387,7 +473,53 @@ class BudgetLedgerSignerDisplayTests(TestCase):
 
         self.client.login(username="tresorier", password="test123")
         response = self.client.get(reverse("budget:expense-ledger", kwargs={"budget_year_pk": self.by.pk}))
-        self.assertContains(response, "CHCE", count=2)
+        self.assertContains(response, ">BB<")
+        self.assertContains(response, ">CHCE<")
+
+    def test_editing_gl_spender_creates_persistent_override(self):
+        from audits.models import AuditLogEntry
+
+        expense = Expense.objects.create(
+            budget_year=self.by,
+            sub_budget=self.sub_budget,
+            entry_date=date(2026, 3, 20),
+            description="Scellant",
+            bon_number="360856",
+            supplier_name="QU PARENT",
+            spent_by_label="103 / Carole Lacourse",
+            amount=Decimal("9.30"),
+            validated_gl=True,
+            source_type=ExpenseSourceType.GL_IMPORT,
+        )
+        self.client.login(username="tresorier", password="test123")
+        response = self.client.post(
+            reverse("budget:expense-edit", kwargs={"pk": expense.pk}),
+            {
+                "entry_date": "2026-03-20",
+                "description": "Scellant",
+                "amount": "9.30",
+                "sub_budget": self.sub_budget.pk,
+                "bon_number": "360856",
+                "supplier_name": "QU PARENT",
+                "spent_by_label": "202 / Marylin Lamarche",
+                "validated_gl": "on",
+                "source_type": ExpenseSourceType.GL_IMPORT,
+                "notes": "",
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        expense.refresh_from_db()
+        self.assertEqual(expense.spent_by_label, "202 / Marylin Lamarche")
+        self.assertTrue(expense.gl_spent_by_override)
+        self.assertIn("manuellement", expense.gl_spent_by_override_reason)
+        self.assertEqual(
+            AuditLogEntry.objects.filter(
+                action="grand_livre.spent_by_overridden",
+                target_object_id=str(expense.pk),
+            ).count(),
+            1,
+        )
 
 
 class ExpenseDateEditTests(TestCase):
@@ -701,20 +833,120 @@ class ExpenseLedgerExportTests(TestCase):
         )
         self.client.login(username="tresorier", password="test123")
 
-    def test_pdf_export_returns_pdf(self):
+    @patch("budget.views.timezone.localdate", return_value=date(2026, 9, 13))
+    def test_pdf_export_returns_pdf(self, _localdate):
         url = reverse("budget:expense-ledger-pdf", kwargs={"budget_year_pk": self.by.pk})
         resp = self.client.get(url)
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp["Content-Type"], "application/pdf")
-        self.assertIn("Grille_depenses_BB_2025.pdf", resp["Content-Disposition"])
+        self.assertEqual(
+            resp["Content-Disposition"],
+            'attachment; filename="Grille_depenses_BB_2026-09-13.pdf"',
+        )
         self.assertTrue(resp.content[:5] == b"%PDF-")
 
-    def test_xlsx_export_returns_xlsx(self):
+    def test_pdf_member_layout_uses_two_clear_pages(self):
+        import io
+        from pypdf import PdfReader
+
+        Expense.objects.filter(budget_year=self.by).update(validated_gl=True)
+        url = reverse("budget:expense-ledger-pdf", kwargs={"budget_year_pk": self.by.pk})
+        with patch(
+            "budget.export_service.timezone.localdate",
+            return_value=date(2026, 9, 13),
+        ):
+            resp = self.client.get(url)
+
+        reader = PdfReader(io.BytesIO(resp.content))
+        self.assertEqual(len(reader.pages), 2)
+        page_one = reader.pages[0].extract_text()
+        page_two = reader.pages[1].extract_text()
+
+        self.assertIn("Dépenses enregistrées", page_one)
+        self.assertIn("Plomberie", page_one)
+        self.assertIn("Peinture", page_one)
+        self.assertIn("Au GL", page_one)
+        # Two validated rows plus the plain-language legend example.
+        self.assertEqual(page_one.count("Oui"), 3)
+        self.assertNotIn("Résumé budgétaire", page_one)
+        self.assertNotIn("Sous-budgets", page_one)
+
+        expected_summary_labels = [
+            "Budget d'entretien de la maison",
+            "Budget de déneigement",
+            "Imprévus (15 %)",
+            "Budget après réserve de 15 %",
+            "Dépenses effectuées à ce jour",
+            "Budget réparations - prévu",
+            "Budget réparations - utilisé",
+            "Budget réparations - restant",
+            "Imprévus utilisés",
+            "Imprévus restants",
+            "Argent total disponible",
+            "Disponible après réserve de 15 %",
+        ]
+        for label in expected_summary_labels:
+            self.assertIn(label, page_two)
+        self.assertIn("Sous-budgets", page_two)
+        self.assertIn("Réparations", page_two)
+
+        heading_x_positions = {}
+
+        def capture_heading_position(text, cm, tm, _font_dict, _font_size):
+            for heading in ("Résumé budgétaire", "Sous-budgets"):
+                if heading in text and heading not in heading_x_positions:
+                    heading_x_positions[heading] = (
+                        tm[4] * cm[0] + tm[5] * cm[2] + cm[4]
+                    )
+
+        reader.pages[1].extract_text(visitor_text=capture_heading_position)
+        self.assertLess(
+            heading_x_positions["Résumé budgétaire"],
+            heading_x_positions["Sous-budgets"],
+        )
+
+    def test_pdf_summary_stays_isolated_after_a_multi_page_ledger(self):
+        import io
+        from pypdf import PdfReader
+
+        for index in range(24):
+            Expense.objects.create(
+                budget_year=self.by,
+                sub_budget=self.sub,
+                entry_date=date(2025, 5, 1),
+                description=(
+                    f"Dépense supplémentaire {index + 1} avec une description "
+                    "assez longue pour vérifier la pagination"
+                ),
+                bon_number=f"TEST{index + 1:03d}",
+                supplier_name="Fournisseur test",
+                spent_by_label="Membre test",
+                amount=Decimal("1.00"),
+                validated_gl=True,
+            )
+
+        url = reverse("budget:expense-ledger-pdf", kwargs={"budget_year_pk": self.by.pk})
+        resp = self.client.get(url)
+        reader = PdfReader(io.BytesIO(resp.content))
+        texts = [page.extract_text() for page in reader.pages]
+
+        self.assertGreater(len(reader.pages), 2)
+        self.assertTrue(all("Résumé budgétaire" not in text for text in texts[:-1]))
+        self.assertTrue(all("Sous-budgets" not in text for text in texts[:-1]))
+        self.assertIn("Résumé budgétaire", texts[-1])
+        self.assertIn("Sous-budgets", texts[-1])
+        self.assertNotIn("sur 2", "".join(texts))
+
+    @patch("budget.views.timezone.localdate", return_value=date(2026, 9, 13))
+    def test_xlsx_export_returns_xlsx(self, _localdate):
         url = reverse("budget:expense-ledger-xlsx", kwargs={"budget_year_pk": self.by.pk})
         resp = self.client.get(url)
         self.assertEqual(resp.status_code, 200)
         self.assertIn("spreadsheetml", resp["Content-Type"])
-        self.assertIn("Grille_depenses_BB_2025.xlsx", resp["Content-Disposition"])
+        self.assertEqual(
+            resp["Content-Disposition"],
+            'attachment; filename="Grille_depenses_BB_2026-09-13.xlsx"',
+        )
         # Verify it's a valid XLSX (ZIP magic bytes)
         self.assertTrue(resp.content[:2] == b"PK")
 
@@ -860,6 +1092,7 @@ class BudgetYearInactiveProtectionTests(TestCase):
 
         upload = GrandLivreUpload.objects.create(
             budget_year=self.past_by, uploaded_by=self.user,
+            account_number=self.past_by.house.account_number,
             status="parsed",
         )
         entry = GrandLivreEntry.objects.create(

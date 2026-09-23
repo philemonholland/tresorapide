@@ -4,26 +4,27 @@ Grand Livre reconciliation service.
 Matches parsed GL entries against existing expenses, uses AI for fuzzy matching,
 extracts apartment/BC numbers from GL descriptions, and performs balance checks.
 """
+import hashlib
 import json
 import logging
 import re
+import unicodedata
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import List, Optional
 
 from django.conf import settings
+from django.core.exceptions import ValidationError
 from django.db import transaction
-from django.db.models import Sum
+from django.db.models import Q, Sum
 
 from .models import (
     BudgetYear, Expense, ExpenseSourceType, SubBudget,
-    GrandLivreUpload, GrandLivreEntry, ReconciliationResult,
+    GrandLivreUpload, GrandLivreEntry, GrandLivreAdjustment, ReconciliationResult,
     GLMatchConfidence, GLUploadStatus,
 )
 from .gl_parser import GLTransaction, GLAccountSection, parse_grand_livre
-from .services import BudgetCalculationService
 
 logger = logging.getLogger(__name__)
-CHCE_LABEL = "CHCE"
 AI_CONFIDENCE_MISSING = "NA"
 GL_PARSE_CONFIDENCE_KEYS = ("bc_number", "apartment", "description_clean")
 
@@ -31,6 +32,191 @@ GL_PARSE_CONFIDENCE_KEYS = ("bc_number", "apartment", "description_clean")
 BC_PATTERN = re.compile(r"BC\s*#?\s*(\d{4,7})", re.IGNORECASE)
 APT_PATTERN = re.compile(r"#\s*(\d{3})")
 RECEIPT_NUM_PATTERN = re.compile(r"^(\d{4,10})-")
+
+GL_IMPORT_CATEGORY_RULES = (
+    (11, ("peinture",)),
+    (5, ("terminix", "extermin")),
+    (9, ("photocopi",)),
+    (8, ("transport",)),
+    (7, ("nettoy", "produit menager", "entretien menager")),
+    (10, ("activite sociale",)),
+    (3, ("extincteur", "systeme d'alarme")),
+)
+
+
+def _normalize_gl_text(value):
+    text = unicodedata.normalize("NFKD", str(value or ""))
+    text = "".join(char for char in text if not unicodedata.combining(char))
+    return re.sub(r"\s+", " ", text.casefold()).strip()
+
+
+def _normalize_account_number(value):
+    return re.sub(r"\D", "", str(value or ""))
+
+
+def _gl_entry_fingerprint(entry):
+    """Stable identity for the same accountant transaction across uploads."""
+    payload = {
+        "account": _normalize_account_number(entry.upload.account_number),
+        "date": entry.date.isoformat() if entry.date else "",
+        "source": _normalize_gl_text(entry.source),
+        "description": _normalize_gl_text(entry.description_raw),
+        "debit": str(entry.debit.quantize(Decimal("0.01"))),
+        "credit": str(entry.credit.quantize(Decimal("0.01"))),
+    }
+    serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _clean_gl_import_description(entry):
+    """Remove accounting identifiers while preserving the described purchase."""
+    text = re.sub(r"^\s*\d{4,10}\s*-\s*", "", entry.description_raw or "")
+    text = re.sub(
+        r"^\s*BC\s*#?\s*\d{4,7}\s*-\s*",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = text.replace("+", " et ").replace("charni;ere", "charnière")
+    text = re.sub(r"\bpoigée\b", "poignée", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bpilliers\b", "piliers", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bferme[ -]?porte\b", "ferme-porte", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bpoignée porte\b", "poignée de porte", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bpeinture piliers\b", "peinture des piliers", text, flags=re.IGNORECASE)
+    text = re.sub(
+        r"\bclapet et levier toilette\b",
+        "clapet et levier de toilette",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(
+        r"\bbatterie d'urgence éclairage\b",
+        "batterie d'urgence pour l'éclairage",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(
+        r"contratannueldu1septau31août2027",
+        "contrat annuel du 1er septembre au 31 août 2027",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(r"\s*#\s*(\d{3})\b", r" - appartement \1", text)
+    text = re.sub(r"\s+", " ", text).strip(" -")
+    if not text:
+        text = (entry.description_raw or "Dépense du Grand Livre").strip()
+    return text[:1].upper() + text[1:]
+
+
+def _validate_upload_account(upload):
+    expected = _normalize_account_number(upload.budget_year.house.account_number)
+    actual = _normalize_account_number(upload.account_number)
+    if not expected or actual != expected:
+        raise ValidationError(
+            "Le compte du Grand Livre ne correspond pas au compte de la maison "
+            f"({upload.account_number or 'absent'} != "
+            f"{upload.budget_year.house.account_number or 'absent'})."
+        )
+
+
+def _resolve_gl_import_sub_budget(
+    budget_year,
+    entry,
+    *,
+    existing_by_bc,
+    fallback_sub_budget,
+):
+    """Choose a category only from strong local or textual evidence."""
+    if entry.extracted_apartment:
+        apartment_repairs = budget_year.sub_budgets.filter(trace_code=1).first()
+        if apartment_repairs:
+            return apartment_repairs
+
+    bc_key = re.sub(r"\D", "", entry.extracted_bc_number or "")
+    if bc_key:
+        related = existing_by_bc.get(bc_key)
+        if related:
+            return related.sub_budget
+
+    evidence = _normalize_gl_text(
+        f"{entry.source} {entry.description_clean} {entry.description_raw}"
+    )
+    for trace_code, keywords in GL_IMPORT_CATEGORY_RULES:
+        if any(keyword in evidence for keyword in keywords):
+            category = budget_year.sub_budgets.filter(trace_code=trace_code).first()
+            if category:
+                return category
+
+    return fallback_sub_budget
+
+
+def _gl_import_spent_by_label(budget_year, entry):
+    """Return the apartment/contact label, or the house code when unknown."""
+    apartment_code = (entry.extracted_apartment or "").strip()
+    if not apartment_code:
+        return budget_year.house.code
+
+    from members.models import Apartment
+
+    apartment = Apartment.objects.filter(
+        house=budget_year.house,
+        code=apartment_code,
+    ).first()
+    if apartment is None:
+        return apartment_code
+
+    on_date = entry.date
+    if on_date is None:
+        from datetime import date
+        on_date = date(budget_year.year, 12, 31)
+    residency = (
+        apartment.residencies.active_on(on_date)
+        .select_related("member")
+        .order_by("-is_primary_contact", "-is_coop_member", "id")
+        .first()
+    )
+    if residency is None:
+        return apartment.code
+    return f"{apartment.code} / {residency.member.display_name}"
+
+
+def active_expenses_queryset(budget_year):
+    """Return expenses that currently contribute to the active grid.
+
+    Cancellation rows, originals with a reversal, and expenses owned by void
+    bons are audit history rather than reconciliation candidates.
+    """
+    return (
+        Expense.objects.filter(
+            budget_year=budget_year,
+            is_cancellation=False,
+            reversals__isnull=True,
+        )
+        .filter(
+            Q(bon_de_commande__isnull=True)
+            | ~Q(bon_de_commande__status="VOID")
+        )
+        .distinct()
+    )
+
+
+def active_adjustments_by_entry(upload):
+    return {
+        adjustment.entry_id: adjustment
+        for adjustment in GrandLivreAdjustment.objects.filter(
+            entry__upload=upload,
+            archived_at__isnull=True,
+        ).select_related("entry")
+    }
+
+
+def effective_gl_amount(entry, adjustment=None):
+    """Return source net amount after one active subtractive adjustment."""
+    source_amount = entry.net_amount
+    if adjustment is None:
+        return source_amount
+    direction = Decimal("1") if source_amount >= 0 else Decimal("-1")
+    return source_amount - (direction * adjustment.amount_to_subtract)
 
 
 def _extract_bc_number(description: str) -> str:
@@ -440,24 +626,112 @@ class GrandLivreReconciliationService:
         upload.status = GLUploadStatus.PARSED
         upload.save()
 
+        # Preserve row identities when the same upload is reprocessed. Active
+        # adjustments stay attached to their accountant source row even when
+        # the dashboard is sorted or the parser is corrected.
+        existing_by_row = {
+            entry.row_number: entry
+            for entry in upload.entries.all()
+        }
         entries_to_create = []
+        entries_to_update = []
+        parsed_row_numbers = set()
         for tx in section.transactions:
-            entries_to_create.append(GrandLivreEntry(
-                upload=upload,
-                row_number=tx.row_number,
-                period=tx.period,
-                date=tx.date,
-                source=tx.source,
-                description_raw=tx.description,
-                debit=tx.debit,
-                credit=tx.credit,
-                solde_fin=tx.solde_fin,
-                extracted_bc_number=_extract_bc_number(tx.description),
-                extracted_apartment=_extract_apartment(tx.description),
-            ))
+            parsed_row_numbers.add(tx.row_number)
+            entry = existing_by_row.get(tx.row_number)
+            if entry is None:
+                entries_to_create.append(GrandLivreEntry(
+                    upload=upload,
+                    row_number=tx.row_number,
+                    period=tx.period,
+                    date=tx.date,
+                    source=tx.source,
+                    description_raw=tx.description,
+                    debit=tx.debit,
+                    credit=tx.credit,
+                    solde_fin=tx.solde_fin,
+                    extracted_bc_number=_extract_bc_number(tx.description),
+                    extracted_apartment=_extract_apartment(tx.description),
+                ))
+                continue
+
+            entry.period = tx.period
+            entry.date = tx.date
+            entry.source = tx.source
+            entry.description_raw = tx.description
+            entry.debit = tx.debit
+            entry.credit = tx.credit
+            entry.solde_fin = tx.solde_fin
+            entry.extracted_bc_number = _extract_bc_number(tx.description)
+            entry.extracted_apartment = _extract_apartment(tx.description)
+            entries_to_update.append(entry)
 
         GrandLivreEntry.objects.bulk_create(entries_to_create)
+        if entries_to_update:
+            GrandLivreEntry.objects.bulk_update(entries_to_update, [
+                "period",
+                "date",
+                "source",
+                "description_raw",
+                "debit",
+                "credit",
+                "solde_fin",
+                "extracted_bc_number",
+                "extracted_apartment",
+            ])
+        upload.entries.exclude(row_number__in=parsed_row_numbers).delete()
+        GrandLivreReconciliationService.propagate_apartment_context(upload)
         return section
+
+    @staticmethod
+    def propagate_apartment_context(upload: GrandLivreUpload):
+        """Carry an explicit apartment through the rest of its GL period."""
+        entries = list(upload.entries.order_by("row_number"))
+        current_period = None
+        current_apartment = ""
+        changed = []
+        for entry in entries:
+            period = entry.period or (
+                entry.date.strftime("%Y-%m") if entry.date else ""
+            )
+            if period != current_period:
+                current_period = period
+                current_apartment = ""
+
+            explicit = _extract_apartment(entry.description_raw)
+            if explicit:
+                current_apartment = explicit
+                source = "explicit"
+            elif entry.extracted_apartment and not current_apartment:
+                current_apartment = entry.extracted_apartment
+                source = "extracted"
+            elif current_apartment:
+                source = "period_inherited"
+            else:
+                source = "none"
+
+            target_apartment = current_apartment
+            metadata = _entry_ai_metadata(entry)
+            context = {
+                "period": period,
+                "source": source,
+                "apartment": target_apartment,
+            }
+            if (
+                entry.extracted_apartment != target_apartment
+                or metadata.get("apartment_context") != context
+            ):
+                entry.extracted_apartment = target_apartment
+                metadata["apartment_context"] = context
+                entry.ai_metadata = metadata
+                changed.append(entry)
+
+        if changed:
+            GrandLivreEntry.objects.bulk_update(
+                changed,
+                ["extracted_apartment", "ai_metadata"],
+            )
+        return entries
 
     @staticmethod
     def enrich_with_ai(upload: GrandLivreUpload):
@@ -507,17 +781,17 @@ class GrandLivreReconciliationService:
                 "ai_metadata",
             ],
         )
+        GrandLivreReconciliationService.propagate_apartment_context(upload)
 
     @staticmethod
-    def match_expenses(upload: GrandLivreUpload):
+    def match_expenses(upload: GrandLivreUpload, *, use_ai=True):
         """Match GL entries against existing expenses."""
         upload.status = GLUploadStatus.RECONCILING
         upload.save()
 
         budget_year = upload.budget_year
         expenses = list(
-            Expense.objects.filter(budget_year=budget_year)
-            .exclude(is_cancellation=True)
+            active_expenses_queryset(budget_year)
             .select_related("sub_budget")
         )
 
@@ -526,6 +800,12 @@ class GrandLivreReconciliationService:
         for exp in expenses:
             key = exp.amount.quantize(Decimal("0.01"))
             expenses_by_amount.setdefault(key, []).append(exp)
+
+        expenses_by_gl_fingerprint = {
+            exp.gl_source_fingerprint: exp
+            for exp in expenses
+            if exp.gl_source_fingerprint
+        }
 
         # Build by bon_number for BC matching — normalize: strip non-digits
         expenses_by_bc = {}
@@ -538,55 +818,82 @@ class GrandLivreReconciliationService:
                 if raw and raw != normalized:
                     expenses_by_bc.setdefault(raw, []).append(exp)
 
+        # Re-evaluate every link against current source values, active grid
+        # rows and active adjustments. This prevents stale matches surviving
+        # a corrected import or a newly created adjustment.
+        upload.entries.update(
+            matched_expense=None,
+            match_confidence=GLMatchConfidence.UNMATCHED,
+            match_notes="",
+            needs_import=False,
+        )
         gl_entries = list(upload.entries.all())
+        adjustments = active_adjustments_by_entry(upload)
         matched_expense_ids = set()
 
         for entry in gl_entries:
-            if entry.matched_expense_id:
+            entry_amount = effective_gl_amount(
+                entry,
+                adjustments.get(entry.pk),
+            ).quantize(Decimal("0.01"))
+            if entry_amount == Decimal("0.00"):
                 metadata = _entry_ai_metadata(entry)
-                if entry.match_confidence != GLMatchConfidence.PROBABLE:
-                    metadata.pop("semantic_match", None)
-                    entry.ai_metadata = metadata
-                matched_expense_ids.add(entry.matched_expense_id)
+                metadata.pop("semantic_match", None)
+                entry.ai_metadata = metadata
+                entry.needs_import = False
                 continue
 
             best_match = None
             best_confidence = GLMatchConfidence.UNMATCHED
             match_note = ""
 
+            # 0. Preserve the exact accountant-source identity across uploads.
+            fingerprint = _gl_entry_fingerprint(entry)
+            fingerprint_match = expenses_by_gl_fingerprint.get(fingerprint)
+            if (
+                fingerprint_match
+                and fingerprint_match.id not in matched_expense_ids
+                and fingerprint_match.amount.quantize(Decimal("0.01"))
+                == entry_amount
+            ):
+                best_match = fingerprint_match
+                best_confidence = GLMatchConfidence.EXACT
+                match_note = "Même écriture source du Grand Livre"
+
             # 1. Try BC number match (normalized — digits only)
-            if entry.extracted_bc_number:
+            if not best_match and entry.extracted_bc_number:
+                amount = entry_amount
                 bc_key = re.sub(r"\D", "", entry.extracted_bc_number)
                 candidates = (
                     expenses_by_bc.get(bc_key, [])
                     or expenses_by_bc.get(entry.extracted_bc_number, [])
                 )
-                unmatched_bc = [c for c in candidates if c.id not in matched_expense_ids]
+                unmatched_bc = [
+                    candidate
+                    for candidate in candidates
+                    if candidate.id not in matched_expense_ids
+                    and candidate.amount.quantize(Decimal("0.01")) == amount
+                ]
                 if len(unmatched_bc) == 1:
                     best_match = unmatched_bc[0]
                     best_confidence = GLMatchConfidence.EXACT
-                    match_note = f"BC #{entry.extracted_bc_number} match"
+                    match_note = (
+                        f"BC #{entry.extracted_bc_number} + montant {amount}$"
+                    )
                 elif len(unmatched_bc) > 1:
-                    # Tiebreak by amount
-                    amount = entry.debit if entry.debit else entry.credit
-                    amt_match = [
-                        c for c in unmatched_bc
-                        if c.amount.quantize(Decimal("0.01")) == amount.quantize(Decimal("0.01"))
-                    ]
-                    if amt_match:
-                        ranked = _sort_expense_match_candidates(
-                            amt_match,
-                            entry.date,
-                        )
-                        best_match = ranked[0]
-                        best_confidence = GLMatchConfidence.EXACT
-                        match_note = (
-                            f"BC #{entry.extracted_bc_number} + montant {amount}$"
-                        )
+                    ranked = _sort_expense_match_candidates(
+                        unmatched_bc,
+                        entry.date,
+                    )
+                    best_match = ranked[0]
+                    best_confidence = GLMatchConfidence.EXACT
+                    match_note = (
+                        f"BC #{entry.extracted_bc_number} + montant {amount}$"
+                    )
 
             # 2. Try exact amount match
             if not best_match:
-                amount = entry.debit if entry.debit else entry.credit
+                amount = entry_amount
                 candidates = expenses_by_amount.get(
                     amount.quantize(Decimal("0.01")), []
                 )
@@ -596,8 +903,21 @@ class GrandLivreReconciliationService:
 
                 if len(unmatched_candidates) == 1:
                     best_match = unmatched_candidates[0]
-                    best_confidence = GLMatchConfidence.EXACT
-                    match_note = f"Montant unique: {amount}$"
+                    dates_match = bool(
+                        entry.date
+                        and best_match.entry_date
+                        and entry.date == best_match.entry_date
+                    )
+                    best_confidence = (
+                        GLMatchConfidence.EXACT
+                        if dates_match
+                        else GLMatchConfidence.PROBABLE
+                    )
+                    match_note = (
+                        f"Montant et date exacts: {amount}$"
+                        if dates_match
+                        else f"Montant unique: {amount}$"
+                    )
                 elif len(unmatched_candidates) > 1:
                     # Multiple candidates — try date proximity
                     if entry.date:
@@ -646,12 +966,12 @@ class GrandLivreReconciliationService:
         # 4. GPT semantic matching for remaining unmatched entries
         still_unmatched = [e for e in gl_entries if not e.matched_expense_id]
         unmatched_exps = [e for e in expenses if e.id not in matched_expense_ids]
-        if still_unmatched and unmatched_exps:
+        if use_ai and still_unmatched and unmatched_exps:
             gpt_gl = [
                 {
                     "gl_id": e.pk,
                     "description": e.description_clean or e.description_raw,
-                    "amount": str(e.debit if e.debit else e.credit),
+                    "amount": str(effective_gl_amount(e, adjustments.get(e.pk))),
                     "bc_number": e.extracted_bc_number or "",
                 }
                 for e in still_unmatched
@@ -672,7 +992,21 @@ class GrandLivreReconciliationService:
                 for gm in gpt_matches:
                     entry = entry_by_id.get(gm["gl_id"])
                     exp = exp_by_id.get(gm["expense_id"])
-                    if entry and exp and exp.id not in matched_expense_ids:
+                    amounts_match = bool(
+                        entry
+                        and exp
+                        and effective_gl_amount(
+                            entry,
+                            adjustments.get(entry.pk),
+                        ).quantize(Decimal("0.01"))
+                        == exp.amount.quantize(Decimal("0.01"))
+                    )
+                    if (
+                        entry
+                        and exp
+                        and exp.id not in matched_expense_ids
+                        and amounts_match
+                    ):
                         entry.matched_expense = exp
                         entry.match_confidence = GLMatchConfidence.PROBABLE
                         score_display = gm.get("confidence_score", AI_CONFIDENCE_MISSING)
@@ -705,38 +1039,78 @@ class GrandLivreReconciliationService:
             ],
         )
 
+        exact_expense_ids = {
+            entry.matched_expense_id
+            for entry in gl_entries
+            if entry.matched_expense_id
+            and entry.match_confidence == GLMatchConfidence.EXACT
+        }
+        if exact_expense_ids:
+            Expense.objects.filter(pk__in=exact_expense_ids).update(
+                validated_gl=True,
+            )
+
         return matched_expense_ids
 
     @staticmethod
     def build_reconciliation(upload: GrandLivreUpload) -> ReconciliationResult:
         """Build the reconciliation result with balance check and anomaly detection."""
         budget_year = upload.budget_year
-        base = BudgetCalculationService.base_values(budget_year)
 
         gl_entries = list(upload.entries.all())
+        adjustments = active_adjustments_by_entry(upload)
         matched = [e for e in gl_entries if e.matched_expense_id]
-        unmatched_gl = [e for e in gl_entries if not e.matched_expense_id]
+        unmatched_gl = [
+            entry for entry in gl_entries if not entry.matched_expense_id
+        ]
 
         # Expenses that exist in grille but not in GL
         matched_expense_ids = {e.matched_expense_id for e in matched}
-        all_expenses = Expense.objects.filter(
-            budget_year=budget_year
-        ).exclude(is_cancellation=True)
+        all_expenses = list(active_expenses_queryset(budget_year))
         missing_from_gl = [
             e for e in all_expenses if e.id not in matched_expense_ids
         ]
 
         gl_total = upload.gl_solde_fin or Decimal("0")
-        grille_total = base["expenses_to_date"]
-        difference = gl_total - grille_total
+        adjustment_total = sum(
+            (
+                entry.net_amount
+                - effective_gl_amount(entry, adjustments.get(entry.pk))
+                for entry in gl_entries
+            ),
+            Decimal("0"),
+        ).quantize(Decimal("0.01"))
+        adjusted_gl_total = (gl_total - adjustment_total).quantize(
+            Decimal("0.01")
+        )
+        grille_total = sum(
+            (expense.amount for expense in all_expenses),
+            Decimal("0"),
+        ).quantize(Decimal("0.01"))
+        difference = adjusted_gl_total - grille_total
 
         # Anomaly detection
         anomalies = []
 
         # Sum of unmatched GL debits (expenses from GL not in grille)
         unmatched_gl_total = sum(
-            (e.debit for e in unmatched_gl if e.debit > 0), Decimal("0")
-        )
+            (
+                effective_gl_amount(entry, adjustments.get(entry.pk))
+                for entry in unmatched_gl
+            ),
+            Decimal("0"),
+        ).quantize(Decimal("0.01"))
+
+        if adjustment_total != Decimal("0.00"):
+            anomalies.append({
+                "type": "active_adjustments",
+                "severity": "warning",
+                "message": (
+                    f"Grand Livre source : {gl_total}$ · "
+                    f"Ajustements actifs : -{adjustment_total}$ · "
+                    f"Grand Livre après ajustements : {adjusted_gl_total}$."
+                ),
+            })
 
         # 1. Balance analysis with detailed breakdown
         gl_end = upload.period_end_date
@@ -751,7 +1125,8 @@ class GrandLivreReconciliationService:
                 "severity": "info",
                 "message": (
                     f"Le compte balance parfaitement. "
-                    f"Solde GL : {gl_total}$ · Grille : {grille_total}$."
+                    f"Grand Livre après ajustements : {adjusted_gl_total}$ · "
+                    f"Grille : {grille_total}$."
                 ),
             })
         else:
@@ -794,7 +1169,8 @@ class GrandLivreReconciliationService:
                     "type": "balance_ok_with_pending",
                     "severity": "info",
                     "message": (
-                        f"Solde GL : {gl_total}$ · Grille : {grille_total}$ · "
+                        f"Grand Livre après ajustements : {adjusted_gl_total}$ · "
+                        f"Grille : {grille_total}$ · "
                         f"Écart : {difference}$."
                     ),
                 })
@@ -820,7 +1196,8 @@ class GrandLivreReconciliationService:
                     "type": anom_type,
                     "severity": sev,
                     "message": (
-                        f"Solde GL : {gl_total}$ · Grille : {grille_total}$ · "
+                        f"Grand Livre après ajustements : {adjusted_gl_total}$ · "
+                        f"Grille : {grille_total}$ · "
                         f"Écart : {difference}$."
                     ),
                 })
@@ -856,7 +1233,8 @@ class GrandLivreReconciliationService:
                     "type": "balance_mismatch",
                     "severity": "warning",
                     "message": (
-                        f"Solde GL : {gl_total}$ · Grille : {grille_total}$ · "
+                        f"Grand Livre après ajustements : {adjusted_gl_total}$ · "
+                        f"Grille : {grille_total}$ · "
                         f"Écart : {difference}$."
                     ),
                 })
@@ -878,7 +1256,7 @@ class GrandLivreReconciliationService:
                     )
                 if parts:
                     parts.append(
-                        f"Écart résiduel inexpliqué : {fully_adjusted}$"
+                        f"Écart restant après les éléments listés : {fully_adjusted}$"
                     )
                     anomalies.append({
                         "type": "balance_explanation",
@@ -906,7 +1284,10 @@ class GrandLivreReconciliationService:
 
         # 3. Unmatched GL entries with large amounts
         large_unmatched = [
-            e for e in unmatched_gl if e.debit > Decimal("500")
+            entry
+            for entry in unmatched_gl
+            if abs(effective_gl_amount(entry, adjustments.get(entry.pk)))
+            > Decimal("500")
         ]
         if large_unmatched:
             anomalies.append({
@@ -956,6 +1337,8 @@ class GrandLivreReconciliationService:
             upload=upload,
             defaults={
                 "gl_total": gl_total,
+                "adjustment_total": adjustment_total,
+                "adjusted_gl_total": adjusted_gl_total,
                 "grille_total": grille_total,
                 "difference": difference,
                 "matched_count": len(matched),
@@ -983,9 +1366,10 @@ class GrandLivreReconciliationService:
         gl_entries = list(upload.entries.values(
             "description_raw", "debit", "credit", "match_confidence",
         )[:50])
-        expenses = list(Expense.objects.filter(
-            budget_year=upload.budget_year,
-        ).values("description", "amount", "entry_date")[:50])
+        expenses = list(
+            active_expenses_queryset(upload.budget_year)
+            .values("description", "amount", "entry_date")[:50]
+        )
 
         extra_anomalies = _try_gpt_anomaly_analysis(
             result,
@@ -1002,19 +1386,18 @@ class GrandLivreReconciliationService:
     @transaction.atomic
     def import_validated_entries(upload: GrandLivreUpload, entry_ids: list):
         """Import validated GL entries as new expenses in the grille."""
-        entries = upload.entries.filter(
+        _validate_upload_account(upload)
+        entries = list(upload.entries.filter(
             id__in=entry_ids,
             is_validated=True,
             needs_import=True,
             matched_expense__isnull=True,
-        )
+        ).select_related("upload").order_by("row_number"))
         budget_year = upload.budget_year
+        adjustments = active_adjustments_by_entry(upload)
 
         # Pre-build lookup of existing expenses to prevent duplicates
-        existing_expenses = list(
-            Expense.objects.filter(budget_year=budget_year)
-            .exclude(is_cancellation=True)
-        )
+        existing_expenses = list(active_expenses_queryset(budget_year))
         existing_by_bc = {}
         for exp in existing_expenses:
             if exp.bon_number and exp.bon_number.strip() not in ("", "n/a"):
@@ -1025,34 +1408,47 @@ class GrandLivreReconciliationService:
         for exp in existing_expenses:
             key = exp.amount.quantize(Decimal("0.01"))
             existing_by_amount.setdefault(key, []).append(exp)
+        existing_by_fingerprint = {
+            exp.gl_source_fingerprint: exp
+            for exp in existing_expenses
+            if exp.gl_source_fingerprint
+        }
 
-        # Get or create a default sub-budget for GL imports
+        # Unclassified accountant entries must not consume the contingency.
         default_sub, _ = SubBudget.objects.get_or_create(
             budget_year=budget_year,
-            trace_code=0,
+            trace_code=99,
             defaults={
-                "name": "Imprévues",
-                "is_contingency": True,
-                "planned_amount": budget_year.imprevues_amount,
+                "name": "Autre dépenses",
+                "sort_order": 99,
+                "is_contingency": False,
+                "planned_amount": Decimal("0.00"),
             },
         )
 
         created = []
         skipped = 0
         for entry in entries:
+            amount = effective_gl_amount(
+                entry,
+                adjustments.get(entry.pk),
+            ).quantize(Decimal("0.01"))
             # ── Duplicate guard: check if this entry already has an equivalent ──
-            duplicate = None
-            if entry.extracted_bc_number:
+            fingerprint = _gl_entry_fingerprint(entry)
+            duplicate = existing_by_fingerprint.get(fingerprint)
+            if not duplicate and entry.extracted_bc_number:
                 bc_key = re.sub(r"\D", "", entry.extracted_bc_number)
-                duplicate = existing_by_bc.get(bc_key)
+                bc_candidate = existing_by_bc.get(bc_key)
+                if (
+                    bc_candidate
+                    and bc_candidate.amount.quantize(Decimal("0.01")) == amount
+                ):
+                    duplicate = bc_candidate
 
             if not duplicate:
-                amount = entry.debit if entry.debit else entry.credit
                 amt_key = amount.quantize(Decimal("0.01"))
                 same_amount = existing_by_amount.get(amt_key, [])
-                if len(same_amount) == 1:
-                    duplicate = same_amount[0]
-                elif len(same_amount) > 1 and entry.date:
+                if entry.date:
                     for cand in same_amount:
                         if abs((cand.entry_date - entry.date).days) <= 30:
                             duplicate = cand
@@ -1069,15 +1465,13 @@ class GrandLivreReconciliationService:
                 continue
 
             # ── Create new expense ──
-            sub_budget = default_sub
-            if entry.extracted_apartment:
-                apt_sub = SubBudget.objects.filter(
-                    budget_year=budget_year, trace_code=1,
-                ).first()
-                if apt_sub:
-                    sub_budget = apt_sub
-
-            desc = entry.description_clean or entry.description_raw
+            sub_budget = _resolve_gl_import_sub_budget(
+                budget_year,
+                entry,
+                existing_by_bc=existing_by_bc,
+                fallback_sub_budget=default_sub,
+            )
+            desc = entry.description_clean or _clean_gl_import_description(entry)
             expense = Expense(
                 budget_year=budget_year,
                 sub_budget=sub_budget,
@@ -1086,19 +1480,145 @@ class GrandLivreReconciliationService:
                 bon_number=entry.extracted_bc_number or "n/a",
                 validated_gl=True,
                 supplier_name=entry.source,
-                spent_by_label=CHCE_LABEL,
-                amount=entry.debit if entry.debit else -entry.credit,
+                spent_by_label=_gl_import_spent_by_label(budget_year, entry),
+                amount=amount,
                 source_type=ExpenseSourceType.GL_IMPORT,
-                is_cancellation=entry.credit > 0 and entry.debit == 0,
+                gl_source_fingerprint=fingerprint,
+                entered_by=upload.uploaded_by,
+                is_cancellation=False,
+                notes=(
+                    f"Import automatique du Grand Livre {upload.account_number}, "
+                    f"téléversement #{upload.pk}, ligne {entry.row_number}."
+                ),
             )
             expense.save()
             entry.matched_expense = expense
             entry.match_confidence = GLMatchConfidence.EXACT
             entry.needs_import = False
             entry.save()
+            from audits.services import create_audit_log_entry
+            create_audit_log_entry(
+                action="grand_livre.entry_materialized",
+                target=expense,
+                summary=(
+                    f"Écriture GL {upload.account_number} ligne "
+                    f"{entry.row_number} matérialisée automatiquement"
+                ),
+                actor=upload.uploaded_by,
+                payload={
+                    "upload_id": upload.pk,
+                    "gl_entry_id": entry.pk,
+                    "row_number": entry.row_number,
+                    "account_number": upload.account_number,
+                    "source_date": entry.date.isoformat() if entry.date else None,
+                    "source_description": entry.description_raw,
+                    "source_debit": str(entry.debit),
+                    "source_credit": str(entry.credit),
+                    "effective_amount": str(amount),
+                    "source_fingerprint": fingerprint,
+                    "sub_budget_trace": sub_budget.trace_code,
+                },
+            )
             created.append(expense)
+            existing_expenses.append(expense)
+            existing_by_fingerprint[fingerprint] = expense
+            existing_by_amount.setdefault(amount, []).append(expense)
+            if entry.extracted_bc_number:
+                bc_key = re.sub(r"\D", "", entry.extracted_bc_number)
+                if bc_key:
+                    existing_by_bc[bc_key] = expense
 
         return created, skipped
+
+    @staticmethod
+    @transaction.atomic
+    def materialize_unmatched_entries(upload: GrandLivreUpload):
+        """Automatically add every unmatched row from the house account."""
+        _validate_upload_account(upload)
+        pending_ids = list(
+            upload.entries.filter(
+                needs_import=True,
+                matched_expense__isnull=True,
+            ).values_list("pk", flat=True)
+        )
+        if not pending_ids:
+            return [], 0
+        upload.entries.filter(pk__in=pending_ids).update(is_validated=True)
+        return GrandLivreReconciliationService.import_validated_entries(
+            upload,
+            pending_ids,
+        )
+
+    @staticmethod
+    @transaction.atomic
+    def sync_materialized_import_context(upload: GrandLivreUpload):
+        """Update only GL-import attribution from current source context."""
+        apartment_repairs = upload.budget_year.sub_budgets.filter(
+            trace_code=1
+        ).first()
+        entries = list(
+            upload.entries.filter(
+                matched_expense__source_type=ExpenseSourceType.GL_IMPORT,
+            ).select_related(
+                "matched_expense",
+                "matched_expense__sub_budget",
+            ).order_by("row_number")
+        )
+        changed_count = 0
+        for entry in entries:
+            expense = entry.matched_expense
+            desired_spent_by = (
+                expense.spent_by_label
+                if expense.gl_spent_by_override
+                else _gl_import_spent_by_label(upload.budget_year, entry)
+            )
+            old_values = {
+                "spent_by_label": expense.spent_by_label,
+                "sub_budget_trace": expense.sub_budget.trace_code,
+            }
+            update_fields = []
+            if expense.spent_by_label != desired_spent_by:
+                expense.spent_by_label = desired_spent_by
+                update_fields.append("spent_by_label")
+            if (
+                entry.extracted_apartment
+                and apartment_repairs
+                and expense.sub_budget_id != apartment_repairs.pk
+            ):
+                expense.sub_budget = apartment_repairs
+                update_fields.append("sub_budget")
+            if not update_fields:
+                continue
+
+            expense.save(update_fields=[*update_fields, "updated_at"])
+            from audits.services import create_audit_log_entry
+            create_audit_log_entry(
+                action="grand_livre.import_context_synchronized",
+                target=expense,
+                summary=(
+                    f"Attribution GL ligne {entry.row_number} synchronisée "
+                    f"pour {upload.account_number}"
+                ),
+                actor=upload.uploaded_by,
+                payload={
+                    "upload_id": upload.pk,
+                    "gl_entry_id": entry.pk,
+                    "row_number": entry.row_number,
+                    "period": entry.period,
+                    "apartment": entry.extracted_apartment,
+                    "apartment_context": _entry_ai_metadata(entry).get(
+                        "apartment_context",
+                        {},
+                    ),
+                    "before": old_values,
+                    "after": {
+                        "spent_by_label": expense.spent_by_label,
+                        "sub_budget_trace": expense.sub_budget.trace_code,
+                    },
+                },
+            )
+            changed_count += 1
+        return changed_count
 
     @staticmethod
     def full_reconciliation(upload: GrandLivreUpload):
@@ -1117,10 +1637,16 @@ class GrandLivreReconciliationService:
         # Step 3: Match
         GrandLivreReconciliationService.match_expenses(upload)
 
-        # Step 4: Build reconciliation result
+        # Step 4: Apply apartment/house context to prior GL imports.
+        GrandLivreReconciliationService.sync_materialized_import_context(upload)
+
+        # Step 5: Materialize every remaining row from the house's account.
+        GrandLivreReconciliationService.materialize_unmatched_entries(upload)
+
+        # Step 6: Build reconciliation result
         result = GrandLivreReconciliationService.build_reconciliation(upload)
 
-        # Step 5: AI analysis (optional, non-blocking)
+        # Step 7: AI analysis (optional, non-blocking)
         try:
             GrandLivreReconciliationService.analyze_with_ai(upload)
         except Exception:

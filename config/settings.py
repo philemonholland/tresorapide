@@ -183,6 +183,7 @@ if _REQUIRE_HTTPS:
 DATA_UPLOAD_MAX_MEMORY_SIZE = 20 * 1024 * 1024  # 20 MB
 FILE_UPLOAD_MAX_MEMORY_SIZE = 10 * 1024 * 1024   # 10 MB
 
-# OpenAI API for receipt analysis (GPT-5.4 Vision)
+# OpenAI API for receipt analysis
 OPENAI_API_KEY = get_env("OPENAI_API_KEY", "")
-OPENAI_MODEL = get_env("OPENAI_MODEL", "gpt-5.4")
+OPENAI_MODEL = get_env("OPENAI_MODEL", "gpt-5.6-sol")
+OPENAI_REASONING_EFFORT = get_env("OPENAI_REASONING_EFFORT", "medium")

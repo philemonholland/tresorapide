@@ -1,16 +1,16 @@
-"""Receipt analysis service using OpenAI Vision API.
+"""Receipt analysis service using the OpenAI Vision API.
 
-Consolidates multiple receipt images into a single composite image
-to minimize API costs (1 call instead of N).
+Preserves each source page as a separate image while grouping a bounded number
+of pages into each request.  This avoids the destructive downscaling caused by
+very tall multi-page composite images.
 """
 import base64
 import io
 import json
 import logging
-import tempfile
+from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal, InvalidOperation
-from pathlib import Path
 
 from django.conf import settings
 
@@ -30,7 +30,7 @@ except ImportError:
     OPENAI_AVAILABLE = False
 
 try:
-    from PIL import Image, ImageDraw, ImageFont, ImageOps
+    from PIL import Image, ImageOps
     PILLOW_AVAILABLE = True
 except ImportError:
     PILLOW_AVAILABLE = False
@@ -41,31 +41,69 @@ try:
 except ImportError:
     PDF2IMAGE_AVAILABLE = False
 
-# ── Prompt for batch analysis (multiple receipts in one composite image) ─────
+# ── Prompt for batch analysis ────────────────────────────────────────────────
 
 MAX_PAGES_PER_BATCH = 4  # Max pages per API call to preserve accuracy
+
+
+@dataclass(frozen=True)
+class _PdfPageRange:
+    """A bounded range of one PDF to render for a single OCR request."""
+
+    path: str
+    first_page: int
+    last_page: int
+
+
+_MEANINGFUL_EXTRACTION_FIELDS = (
+    "bc_number",
+    "associated_bc_number",
+    "supplier_name",
+    "supplier_address",
+    "expense_member_name",
+    "expense_apartment",
+    "validator_member_name",
+    "validator_apartment",
+    "member_name",
+    "apartment_number",
+    "merchant",
+    "purchase_date",
+    "subtotal",
+    "tps",
+    "tvq",
+    "untaxed_extra_amount",
+    "total",
+)
 
 RECEIPT_BATCH_PROMPT = """\
 Tu es un assistant spécialisé dans l'extraction de données de documents \
 financiers pour une coopérative d'habitation au Québec.
 
-L'image contient un ou plusieurs documents (reçus, factures, bons de commande \
-papier), chacun précédé d'un bandeau avec le nom du fichier original et le \
-numéro de page (ex: «BC16011.pdf - Page 1» ou «TestRecu1.png»).
+Le message contient une ou plusieurs images de documents (reçus, factures, \
+bons de commande papier). Chaque image est immédiatement précédée d'un libellé \
+texte avec le nom du fichier original et le numéro de page (ex: \
+«BC16011.pdf - Page 1» ou «TestRecu1.png»).
 
 PHOTOS MOBILES: L'image peut provenir d'un téléphone et montrer un document \
 (reçu, facture, bon de commande) posé sur une surface (table, comptoir, \
 plancher) avec de l'arrière-plan visible. Concentre-toi UNIQUEMENT sur le \
 document lui-même — ignore complètement l'arrière-plan, les surfaces, les \
 ombres et tout objet non pertinent. Si le document n'occupe qu'une partie de \
-l'image, extrais quand même toutes les données possibles de ce document. Si \
-l'image ne contient pas de bandeau avec un nom de fichier, traite l'image \
-entière comme UN SEUL document.
+l'image, extrais quand même toutes les données possibles de ce document.
 
 IMPORTANT: Un même document peut s'étendre sur PLUSIEURS sous-images \
 consécutives (ex: facture de plusieurs pages, reçu photographié en 2 parties). \
 Dans ce cas, combine les informations en UNE SEULE entrée JSON et utilise le \
 nom de fichier de la PREMIÈRE sous-image comme "filename".
+
+COUVERTURE OBLIGATOIRE DES PAGES:
+- Examine chaque image fournie et n'omets aucune page contenant un document.
+- Des pages du même fournisseur avec des dates, numéros de facture ou montants \
+différents sont des documents DISTINCTS: retourne une entrée JSON par document.
+- Ne combine des pages que si elles sont clairement la continuation du même \
+document (même numéro de facture/transaction ou pagination explicite).
+- Une seule image peut montrer plusieurs documents physiques superposés; dans \
+ce cas, retourne une entrée JSON distincte pour chacun avec le même filename.
 
 Types de documents — classifie chaque document:
 1. "paper_bc" — Bon de commande PAPIER officiel de la coopérative. Se reconnaît \
@@ -130,10 +168,9 @@ Retourne UNIQUEMENT un tableau JSON. Chaque élément = un document distinct:
 ]
 
 Règles:
-- filename: reproduis EXACTEMENT le nom affiché dans le bandeau au-dessus du \
-document. Si un document s'étend sur plusieurs sous-images, utilise le nom de \
-la première. Si aucun bandeau n'est visible (photo mobile directe), utilise \
-le nom de fichier fourni dans le message ou "mobile_capture" comme fallback.
+- filename: reproduis EXACTEMENT le libellé texte « FICHIER/PAGE » fourni \
+immédiatement avant l'image. Si un document s'étend sur plusieurs sous-images, \
+utilise le libellé de la première image. N'invente jamais un autre nom.
 - document_type: "paper_bc", "invoice", ou "receipt".
 - bc_number: pour "paper_bc" seulement — le numéro sous "Notre numéro de \
 commande". Laisser "" pour les autres types.
@@ -171,7 +208,10 @@ Si complètement illisible, utilise "ILLISIBLE".
 - apartment_number: pour "receipt" seulement — le numéro d'appartement manuscrit \
 (souvent 3 chiffres: 101, 202, 307).
 - merchant: pour "receipt" — le nom du commerce sur le reçu.
-- purchase_date: date au format ISO YYYY-MM-DD. Si absente, null.
+- purchase_date: date au format ISO YYYY-MM-DD. Cherche la date imprimée sur \
+le reçu ET les annotations manuscrites dans toutes les marges, notamment \
+au-dessus du reçu. Interprète une date québécoise manuscrite JJ/MM/AA comme \
+jour/mois/année (ex: 27/12/23 = 2023-12-27). Si absente, null.
 - subtotal: sous-total AVANT taxes. Si absent, null (NE PAS calculer).
 - tps: TPS (taxe fédérale, ~5%). Si absente, null.
 - tvq: TVQ (taxe provinciale, ~9.975%). Si absente, null.
@@ -217,7 +257,15 @@ prix × quantité comme subtotal.
 
 def _get_openai_model() -> str:
     """Return the configured model name."""
-    return getattr(settings, "OPENAI_MODEL", "") or "gpt-5.4"
+    return getattr(settings, "OPENAI_MODEL", "") or "gpt-5.6-sol"
+
+
+def _get_openai_reasoning_effort() -> str:
+    """Return a validated reasoning effort for OCR and verification."""
+    effort = str(
+        getattr(settings, "OPENAI_REASONING_EFFORT", "medium") or "medium"
+    ).strip().lower()
+    return effort if effort in {"none", "low", "medium", "high", "xhigh", "max"} else "medium"
 
 
 class ReceiptOcrService:
@@ -231,7 +279,7 @@ class ReceiptOcrService:
 
     @staticmethod
     def _build_member_directory(house) -> list[str]:
-        """Return canonical member/apartment lines for the OCR prompt."""
+        """Return dated residency lines so historical receipts resolve correctly."""
         if not house:
             return []
 
@@ -242,11 +290,14 @@ class ReceiptOcrService:
             .filter(
                 apartment__house=house,
                 apartment__is_active=True,
-                end_date__isnull=True,
-                member__is_active=True,
             )
             .select_related("member", "apartment")
-            .order_by("apartment__code", "member__last_name", "member__first_name")
+            .order_by(
+                "apartment__code",
+                "start_date",
+                "member__last_name",
+                "member__first_name",
+            )
         )
 
         lines = []
@@ -256,14 +307,19 @@ class ReceiptOcrService:
             apartment_code = (residency.apartment.code or "").strip()
             if not member_name:
                 continue
-            key = (member_name.casefold(), apartment_code)
+            start = residency.start_date.isoformat() if residency.start_date else "date inconnue"
+            end = residency.end_date.isoformat() if residency.end_date else "présent"
+            key = (member_name.casefold(), apartment_code, start, end)
             if key in seen:
                 continue
             seen.add(key)
             if apartment_code:
-                lines.append(f"Appartement {apartment_code}: {member_name}")
+                lines.append(
+                    f"Appartement {apartment_code}: {member_name} "
+                    f"({start} au {end})"
+                )
             else:
-                lines.append(member_name)
+                lines.append(f"{member_name} ({start} au {end})")
         return lines
 
     @classmethod
@@ -277,11 +333,14 @@ class ReceiptOcrService:
         member_directory = "\n".join(f"- {line}" for line in member_lines)
         return (
             f"{prompt}\n\n"
-            "RÉPERTOIRE OFFICIEL DES MEMBRES ACTIFS DE LA MAISON:\n"
+            "RÉPERTOIRE OFFICIEL DES RÉSIDENCES DE LA MAISON:\n"
             f"{member_directory}\n\n"
             "Normalisation des noms de membres:\n"
             "- Quand un document mentionne un membre (member_name, expense_member_name, "
             "validator_member_name), compare avec ce répertoire.\n"
+            "- Utilise la date d'achat du document pour choisir la résidence active à "
+            "cette date. Une date de fin est inclusive. Un ancien achat reste attribué "
+            "à l'ancien résident; un achat postérieur au déménagement va au nouveau.\n"
             "- Si le nom OCR ressemble clairement à un membre du répertoire malgré une "
             "variation mineure (accent manquant, lettre en moins/en trop, OCR approximatif), "
             "retourne EXACTEMENT le nom officiel du répertoire dans le JSON.\n"
@@ -297,103 +356,96 @@ class ReceiptOcrService:
             "n'existe, conserve le texte lu tel quel.\n"
         )
 
-    # ── Composite image builder ──────────────────────────────────────────
+    # ── Page image preparation ───────────────────────────────────────────
 
     @staticmethod
-    def _build_composite_image(file_map: dict[str, str]) -> tuple[bytes, list[str]]:
+    def _build_analysis_images(
+        file_map: dict[str, str | _PdfPageRange],
+    ) -> list[tuple[str, bytes]]:
+        """Render each source page as its own PNG for the vision request.
+
+        PDF page ranges are created by ``_split_file_map`` so no request has
+        more than ``MAX_PAGES_PER_BATCH`` pages.  Keeping the pages separate
+        prevents the vision API from shrinking a tall composite until its text
+        is unreadable.
         """
-        Stitch multiple receipt images into one vertical composite.
-        Each sub-image gets a filename label banner above it.
-        Supports images (JPEG/PNG) and PDFs (converted to images).
+        max_target_width = 2200
+        analysis_images = []
 
-        Args:
-            file_map: {label: file_path} — label is used in the banner
+        for label, file_ref in file_map.items():
+            if isinstance(file_ref, _PdfPageRange):
+                file_path = file_ref.path
+                first_page = file_ref.first_page
+                last_page = file_ref.last_page
+            else:
+                file_path = file_ref
+                first_page = None
+                last_page = None
 
-        Returns:
-            (PNG bytes of the composite image, list of page labels in order)
-        """
-        BANNER_HEIGHT = 40
-        MAX_TARGET_WIDTH = 2200
-        PADDING = 10
-
-        panels = []
-        page_labels = []
-
-        for label, file_path in file_map.items():
             lower_path = file_path.lower()
             page_images = []
 
-            if lower_path.endswith(".pdf") and PDF2IMAGE_AVAILABLE:
+            if lower_path.endswith(".pdf"):
+                if not PDF2IMAGE_AVAILABLE:
+                    logger.warning("PDF conversion is unavailable for %s", file_path)
+                    continue
                 try:
-                    pdf_pages = convert_from_path(file_path, dpi=300)
-                    for i, page_img in enumerate(pdf_pages):
-                        page_label = f"{label} - Page {i + 1}" if len(pdf_pages) > 1 else label
-                        page_images.append((page_label, page_img))
+                    pdf_pages = convert_from_path(
+                        file_path,
+                        dpi=300,
+                        first_page=first_page,
+                        last_page=last_page,
+                    )
+                    page_number = first_page or 1
+                    for offset, page_img in enumerate(pdf_pages):
+                        page_images.append(
+                            (f"{label} - Page {page_number + offset}", page_img)
+                        )
                 except Exception:
-                    logger.warning("Cannot convert PDF %s, skipping", file_path)
+                    logger.exception("Cannot convert PDF %s", file_path)
                     continue
             else:
                 try:
-                    img = Image.open(file_path)
-                    page_images.append((label, img))
+                    with Image.open(file_path) as source_image:
+                        page_images.append((label, source_image.copy()))
                 except Exception:
-                    logger.warning("Cannot open image %s, skipping", file_path)
+                    logger.exception("Cannot open image %s", file_path)
                     continue
 
-            for page_label, img in page_images:
-                img = ImageOps.exif_transpose(img)
-                if img.mode != "RGB":
-                    img = img.convert("RGB")
+            for page_label, source_image in page_images:
+                image = ImageOps.exif_transpose(source_image)
+                if image.mode != "RGB":
+                    image = image.convert("RGB")
 
-                if img.width > MAX_TARGET_WIDTH:
-                    ratio = MAX_TARGET_WIDTH / img.width
-                    new_h = int(img.height * ratio)
-                    img = img.resize((MAX_TARGET_WIDTH, new_h), Image.LANCZOS)
-
-                banner = Image.new("RGB", (img.width, BANNER_HEIGHT), (40, 40, 40))
-                draw = ImageDraw.Draw(banner)
-                try:
-                    font = ImageFont.truetype(
-                        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 22
+                if image.width > max_target_width:
+                    ratio = max_target_width / image.width
+                    image = image.resize(
+                        (max_target_width, int(image.height * ratio)),
+                        Image.LANCZOS,
                     )
-                except (OSError, IOError):
-                    font = ImageFont.load_default()
-                draw.text((PADDING, 8), f"📄 {page_label}", fill=(255, 255, 255), font=font)
 
-                panels.append(banner)
-                panels.append(img)
-                page_labels.append(page_label)
+                buffer = io.BytesIO()
+                image.save(buffer, format="PNG", optimize=True)
+                analysis_images.append((page_label, buffer.getvalue()))
 
-        if not panels:
+        if not analysis_images:
             raise ValueError("Aucune image valide à analyser.")
 
-        composite_width = max(panel.width for panel in panels)
-        total_height = sum(p.height for p in panels) + PADDING * (len(panels) - 1)
-        composite = Image.new("RGB", (composite_width, total_height), (255, 255, 255))
-        y = 0
-        for panel in panels:
-            composite.paste(panel, (0, y))
-            y += panel.height + PADDING
-
-        buf = io.BytesIO()
-        composite.save(buf, format="PNG", optimize=True)
-        return buf.getvalue(), page_labels
+        return analysis_images
 
     # ── API call ─────────────────────────────────────────────────────────
 
     @classmethod
     def _count_pages(cls, file_map: dict[str, str]) -> dict[str, int]:
-        """Count how many composite pages each file will produce."""
+        """Count how many analysis pages each file will produce."""
         counts = {}
         for label, file_path in file_map.items():
             lower_path = file_path.lower()
             if lower_path.endswith(".pdf") and PDF2IMAGE_AVAILABLE:
                 try:
-                    pdf_pages = convert_from_path(file_path, dpi=72, first_page=1, last_page=1)
-                    # Quick count via pdfinfo
                     from pdf2image.pdf2image import pdfinfo_from_path
                     info = pdfinfo_from_path(file_path)
-                    counts[label] = info.get("Pages", 1)
+                    counts[label] = max(1, int(info.get("Pages", 1)))
                 except Exception:
                     counts[label] = 1
             else:
@@ -401,13 +453,16 @@ class ReceiptOcrService:
         return counts
 
     @classmethod
-    def _split_file_map(cls, file_map: dict[str, str]) -> list[dict[str, str]]:
+    def _split_file_map(
+        cls,
+        file_map: dict[str, str],
+    ) -> list[dict[str, str | _PdfPageRange]]:
         """Split file_map into sub-batches for OCR accuracy.
 
         Strategy:
-        - Each PDF gets its own batch, since a PDF typically contains a
-          complete set (paper BC + its invoices) and mixing multiple PDFs
-          in one GPT call causes cross-contamination and misreads.
+        - Each PDF is isolated from other uploads and split into bounded page
+          ranges. This preserves document grouping without ever constructing
+          an over-tall image.
         - Individual images (PNG/JPG) are grouped together up to
           MAX_PAGES_PER_BATCH to remain efficient for single-receipt photos.
         """
@@ -426,8 +481,15 @@ class ReceiptOcrService:
                     batches.append(image_batch)
                     image_batch = {}
                     image_pages = 0
-                # Each PDF is its own batch
-                batches.append({label: path})
+                # Keep one PDF isolated, but split long PDFs into page ranges.
+                for first_page in range(1, file_pages + 1, MAX_PAGES_PER_BATCH):
+                    last_page = min(
+                        first_page + MAX_PAGES_PER_BATCH - 1,
+                        file_pages,
+                    )
+                    batches.append({
+                        label: _PdfPageRange(path, first_page, last_page),
+                    })
             else:
                 # Group images together, respecting page limit
                 if image_pages + file_pages > MAX_PAGES_PER_BATCH and image_batch:
@@ -443,45 +505,62 @@ class ReceiptOcrService:
         return batches
 
     @classmethod
-    def _analyze_single_batch(cls, file_map: dict[str, str], house=None) -> list[dict]:
-        """Send one composite image to OpenAI and return parsed results."""
-        composite_bytes, page_labels = cls._build_composite_image(file_map)
-        image_b64 = base64.b64encode(composite_bytes).decode("utf-8")
+    def _analyze_single_batch(
+        cls,
+        file_map: dict[str, str | _PdfPageRange],
+        house=None,
+    ) -> list[dict]:
+        """Send separately preserved page images to OpenAI and parse results."""
+        analysis_images = cls._build_analysis_images(file_map)
+        page_labels = [label for label, _ in analysis_images]
         num_pages = len(page_labels)
 
         client = OpenAI(api_key=settings.OPENAI_API_KEY)
         model = _get_openai_model()
+        reasoning_effort = _get_openai_reasoning_effort()
         prompt = cls._build_batch_prompt(house)
 
-        response = client.chat.completions.create(
-            model=model,
-            messages=[
+        user_content = [{
+            "type": "text",
+            "text": (
+                f"Ce message contient {num_pages} page(s) provenant "
+                f"de {len(file_map)} fichier(s). Chaque image est précédée "
+                "de son libellé exact. Analyse chaque page, classifie les "
+                "documents et extrais les informations en JSON."
+            ),
+        }]
+        for page_label, image_bytes in analysis_images:
+            image_b64 = base64.b64encode(image_bytes).decode("utf-8")
+            user_content.extend([
+                {
+                    "type": "text",
+                    "text": f"FICHIER/PAGE: {page_label}",
+                },
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:image/png;base64,{image_b64}",
+                        "detail": "original",
+                    },
+                },
+            ])
+
+        request_options = {
+            "model": model,
+            "messages": [
                 {"role": "system", "content": prompt},
                 {
                     "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": (
-                                f"Cette image contient {num_pages} page(s) provenant "
-                                f"de {len(file_map)} fichier(s). "
-                                "Analyse chaque page, classifie les documents et "
-                                "extrais les informations en JSON."
-                            ),
-                        },
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/png;base64,{image_b64}",
-                                "detail": "high",
-                            },
-                        },
-                    ],
+                    "content": user_content,
                 },
             ],
-            max_completion_tokens=16000,
-            temperature=0,
-        )
+            "reasoning_effort": reasoning_effort,
+            "max_completion_tokens": 16000,
+        }
+        if reasoning_effort == "none":
+            request_options["temperature"] = 0
+
+        response = client.chat.completions.create(**request_options)
 
         raw = response.choices[0].message.content.strip()
         logger.info("GPT batch analysis (model=%s, %d pages): %s",
@@ -562,6 +641,10 @@ class ReceiptOcrService:
     @classmethod
     def _parse_one(cls, data: dict) -> dict:
         """Parse a single document entry from the GPT JSON response."""
+        reimburse_to = str(data.get("reimburse_to") or "").strip().lower()
+        if reimburse_to not in {"member", "supplier"}:
+            reimburse_to = ""
+
         parsed = {
             "filename": str(data.get("filename") or ""),
             "document_type": str(data.get("document_type") or "receipt").strip(),
@@ -569,6 +652,7 @@ class ReceiptOcrService:
             "associated_bc_number": str(data.get("associated_bc_number") or "").strip(),
             "supplier_name": str(data.get("supplier_name") or "").strip(),
             "supplier_address": str(data.get("supplier_address") or "").strip(),
+            "reimburse_to": reimburse_to,
             "expense_member_name": str(data.get("expense_member_name") or "").strip(),
             "expense_apartment": str(data.get("expense_apartment") or "").strip(),
             "validator_member_name": str(data.get("validator_member_name") or "").strip(),
@@ -590,6 +674,14 @@ class ReceiptOcrService:
             ),
         }
         return cls._apply_conservative_confidence_guards(parsed)
+
+    @staticmethod
+    def _has_meaningful_extraction(result: dict) -> bool:
+        """Return whether OCR found at least one reviewable source field."""
+        return any(
+            result.get(field_name) not in (None, "")
+            for field_name in _MEANINGFUL_EXTRACTION_FIELDS
+        )
 
     @staticmethod
     def _apply_conservative_confidence_guards(parsed: dict) -> dict:
@@ -692,6 +784,7 @@ class ReceiptOcrService:
             "associated_bc_number": "",
             "supplier_name": "",
             "supplier_address": "",
+            "reimburse_to": "",
             "expense_member_name": "",
             "expense_apartment": "",
             "validator_member_name": "",
@@ -741,7 +834,6 @@ class ReceiptOcrService:
         # Use unique keys (filename::rPK) to avoid collisions when
         # multiple uploads share the same original_filename.
         file_map = {}
-        receipt_key_map = {}
         for r in receipt_file_objs:
             r.ocr_status = OcrStatus.PENDING
             r.save(update_fields=["ocr_status"])
@@ -749,7 +841,6 @@ class ReceiptOcrService:
             if ct.startswith("image/") or ct == "application/pdf":
                 unique_key = f"{r.original_filename}::r{r.pk}"
                 file_map[unique_key] = r.file.path
-                receipt_key_map[unique_key] = r
 
         if not file_map:
             msg = "Aucun fichier analysable (images et PDF supportés)."
@@ -776,32 +867,49 @@ class ReceiptOcrService:
                 results_by_source[r.get("source_filename", r["filename"])].append(r)
 
             model = _get_openai_model()
+            extraction_warnings = []
 
             for receipt_obj in receipt_file_objs:
                 unique_key = f"{receipt_obj.original_filename}::r{receipt_obj.pk}"
                 fn = receipt_obj.original_filename
                 file_results = results_by_source.get(unique_key, [cls._empty_result(fn)])
                 json_safe_file_results = cls._json_safe_value(file_results)
+                raw_result_text = json.dumps(json_safe_file_results)
+                meaningful_results = [
+                    result
+                    for result in file_results
+                    if cls._has_meaningful_extraction(result)
+                ]
 
-                # Store ALL results from this file as raw JSON
-                receipt_obj.ocr_raw_text = json.dumps(json_safe_file_results)
-                receipt_obj.ocr_status = OcrStatus.EXTRACTED
+                if meaningful_results:
+                    receipt_obj.ocr_raw_text = raw_result_text
+                    receipt_obj.ocr_status = OcrStatus.EXTRACTED
+                    primary = next(
+                        (
+                            result
+                            for result in meaningful_results
+                            if result.get("document_type") == "paper_bc"
+                        ),
+                        meaningful_results[0],
+                    )
+                else:
+                    warning = (
+                        f"Aucune donnée exploitable extraite de « {fn} ». "
+                        "Vérifiez le document et relancez l'analyse OCR."
+                    )
+                    extraction_warnings.append(warning)
+                    receipt_obj.ocr_raw_text = warning
+                    receipt_obj.ocr_status = OcrStatus.FAILED
+                    primary = cls._empty_result(fn)
+
                 receipt_obj.save(update_fields=["ocr_raw_text", "ocr_status"])
 
                 ReceiptOcrResult.objects.create(
                     receipt_file=receipt_obj,
                     engine_name=f"openai-{model}",
-                    raw_text=json.dumps(json_safe_file_results),
+                    raw_text=raw_result_text,
                     raw_json=json_safe_file_results,
                 )
-
-                # Primary extracted fields: use the first result (paper_bc if
-                # present, otherwise the first document)
-                primary = file_results[0]
-                for r in file_results:
-                    if r.get("document_type") == "paper_bc":
-                        primary = r
-                        break
 
                 ReceiptExtractedFields.objects.update_or_create(
                     receipt_file=receipt_obj,
@@ -831,7 +939,7 @@ class ReceiptOcrService:
                     },
                 )
 
-            return results, ""
+            return results, " ".join(extraction_warnings)
 
         except Exception as e:
             error_str = str(e)
@@ -880,17 +988,34 @@ Concentre-toi sur le CONTENU, pas la qualité de l'image.
 
 Réponds UNIQUEMENT avec un JSON valide :
 {
+  "date_new": "YYYY-MM-DD ou chaîne vide",
+  "date_old": "YYYY-MM-DD ou chaîne vide",
+  "document_number_new": "numéro de facture/reçu/transaction ou chaîne vide",
+  "document_number_old": "numéro de facture/reçu/transaction ou chaîne vide",
+  "dates_match": true/false,
+  "document_numbers_match": true/false,
   "is_same_purchase": true/false,
   "confidence": 0.0 à 1.0,
   "reasoning": "Explication courte de ta décision",
   "field_confidence_scores": {
+    "date_new": 0 à 9,
+    "date_old": 0 à 9,
+    "document_number_new": 0 à 9,
+    "document_number_old": 0 à 9,
+    "dates_match": 0 à 9,
+    "document_numbers_match": 0 à 9,
     "is_same_purchase": 0 à 9,
     "confidence": 0 à 9,
     "reasoning": 0 à 9
   }
 }
 
-Si une information manque, utilise "NA" dans field_confidence_scores plutôt que 0.
+Règles obligatoires :
+- si les deux dates sont lisibles et différentes, is_same_purchase doit être false;
+- si les deux numéros sont lisibles et différents, is_same_purchase doit être false;
+- n'invente jamais une date ou un numéro;
+- si une information manque, utilise une chaîne vide pour sa valeur et "NA"
+  dans field_confidence_scores plutôt que 0.
 """
 
 
@@ -916,6 +1041,118 @@ class DuplicateDetectionService:
         if confidence > 1.0:
             return 1.0
         return confidence
+
+    @staticmethod
+    def _normalize_comparison_date(value) -> str:
+        if isinstance(value, date):
+            return value.isoformat()
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        try:
+            return date.fromisoformat(text).isoformat()
+        except ValueError:
+            return ""
+
+    @staticmethod
+    def _normalize_document_number(value) -> str:
+        return "".join(
+            character.casefold()
+            for character in str(value or "")
+            if character.isalnum()
+        )
+
+    @staticmethod
+    def _receipt_purchase_date(receipt_file):
+        try:
+            extracted_fields = receipt_file.extracted_fields
+        except Exception:
+            return None
+        return (
+            extracted_fields.final_purchase_date
+            or extracted_fields.purchase_date_candidate
+        )
+
+    @classmethod
+    def _stored_dates_conflict(cls, receipt_file_new, receipt_file_old) -> bool:
+        new_date = cls._receipt_purchase_date(receipt_file_new)
+        old_date = cls._receipt_purchase_date(receipt_file_old)
+        return bool(new_date and old_date and new_date != old_date)
+
+    @staticmethod
+    def _same_file_checksum(receipt_file_new, receipt_file_old) -> bool:
+        new_checksum = str(receipt_file_new.sha256_checksum or "").strip().lower()
+        old_checksum = str(receipt_file_old.sha256_checksum or "").strip().lower()
+        return bool(new_checksum and old_checksum and new_checksum == old_checksum)
+
+    @classmethod
+    def _enforce_comparison_evidence(cls, result: dict) -> dict:
+        """Apply deterministic date/identifier gates to an AI comparison."""
+        date_new = cls._normalize_comparison_date(result.get("date_new"))
+        date_old = cls._normalize_comparison_date(result.get("date_old"))
+        number_new_raw = str(result.get("document_number_new") or "").strip()
+        number_old_raw = str(result.get("document_number_old") or "").strip()
+        number_new = cls._normalize_document_number(number_new_raw)
+        number_old = cls._normalize_document_number(number_old_raw)
+
+        date_conflict = bool(date_new and date_old and date_new != date_old)
+        number_conflict = bool(
+            number_new and number_old and number_new != number_old
+        )
+        dates_match = bool(date_new and date_old and date_new == date_old)
+        document_numbers_match = bool(
+            number_new and number_old and number_new == number_old
+        )
+        evidence_complete = dates_match and document_numbers_match
+
+        enforced = dict(result)
+        enforced.update({
+            "date_new": date_new,
+            "date_old": date_old,
+            "document_number_new": number_new_raw,
+            "document_number_old": number_old_raw,
+            "dates_match": dates_match,
+            "document_numbers_match": document_numbers_match,
+            "evidence_complete": evidence_complete,
+            "hard_conflict": date_conflict or number_conflict,
+        })
+        if date_conflict or number_conflict:
+            conflicts = []
+            if date_conflict:
+                conflicts.append(f"dates différentes ({date_new} / {date_old})")
+            if number_conflict:
+                conflicts.append(
+                    "numéros différents "
+                    f"({number_new_raw} / {number_old_raw})"
+                )
+            original_reason = str(result.get("reasoning") or "").strip()
+            enforced["is_same_purchase"] = False
+            enforced["confidence"] = 0.0
+            enforced["reasoning"] = (
+                f"Pas un doublon : {', '.join(conflicts)}."
+                + (f" {original_reason}" if original_reason else "")
+            )
+        return enforced
+
+    @classmethod
+    def is_confirmed_duplicate_pair(cls, receipt_file_new, receipt_file_old) -> bool:
+        """Return whether a pair has evidence stronger than a matching total."""
+        if cls._stored_dates_conflict(receipt_file_new, receipt_file_old):
+            return False
+        if cls._same_file_checksum(receipt_file_new, receipt_file_old):
+            return True
+
+        from .models import DuplicateFlag, DuplicateFlagStatus
+
+        return DuplicateFlag.objects.filter(
+            receipt_file=receipt_file_new,
+            suspected_duplicate_receipt=receipt_file_old,
+            status=DuplicateFlagStatus.CONFIRMED_DUPLICATE,
+        ).exists() or DuplicateFlag.objects.filter(
+            receipt_file=receipt_file_old,
+            suspected_duplicate_receipt=receipt_file_new,
+            status=DuplicateFlagStatus.CONFIRMED_DUPLICATE,
+        ).exists()
 
     @staticmethod
     def find_matching_totals(receipt_file, house, lookback_years=2):
@@ -1040,10 +1277,11 @@ class DuplicateDetectionService:
         try:
             client = OpenAI(api_key=settings.OPENAI_API_KEY)
             model = _get_openai_model()
+            reasoning_effort = _get_openai_reasoning_effort()
 
-            response = client.chat.completions.create(
-                model=model,
-                messages=[
+            request_options = {
+                "model": model,
+                "messages": [
                     {"role": "system", "content": DUPLICATE_COMPARISON_PROMPT},
                     {
                         "role": "user",
@@ -1070,9 +1308,13 @@ class DuplicateDetectionService:
                         ],
                     },
                 ],
-                max_completion_tokens=4000,
-                temperature=0,
-            )
+                "reasoning_effort": reasoning_effort,
+                "max_completion_tokens": 4000,
+            }
+            if reasoning_effort == "none":
+                request_options["temperature"] = 0
+
+            response = client.chat.completions.create(**request_options)
 
             raw = response.choices[0].message.content.strip()
             logger.info("GPT duplicate comparison (model=%s): %s", model, raw)
@@ -1084,15 +1326,20 @@ class DuplicateDetectionService:
 
             result = json.loads(raw)
             confidence = cls._normalize_confidence(result.get("confidence", 0.0))
-            return {
+            normalized_result = {
                 "is_same_purchase": ReceiptOcrService._safe_bool(result.get("is_same_purchase", False)),
                 "confidence": confidence,
                 "reasoning": str(result.get("reasoning", "")),
+                "date_new": result.get("date_new", ""),
+                "date_old": result.get("date_old", ""),
+                "document_number_new": result.get("document_number_new", ""),
+                "document_number_old": result.get("document_number_old", ""),
                 "field_confidence_scores": build_complete_ai_confidence_scores(
                     result.get("field_confidence_scores"),
                     allowed_keys=DUPLICATE_FIELD_CONFIDENCE_KEYS,
                 ),
             }
+            return cls._enforce_comparison_evidence(normalized_result)
 
         except Exception as e:
             logger.exception("GPT duplicate comparison failed: %s", e)
@@ -1136,10 +1383,57 @@ class DuplicateDetectionService:
             if already:
                 continue
 
-            comparison = cls.compare_with_gpt(receipt_file, existing_receipt)
+            # A known date conflict is a deterministic negative and must not
+            # incur an AI call or create a warning.
+            if cls._stored_dates_conflict(receipt_file, existing_receipt):
+                continue
+
+            exact_file_match = cls._same_file_checksum(
+                receipt_file,
+                existing_receipt,
+            )
+            if exact_file_match:
+                purchase_date = cls._receipt_purchase_date(receipt_file)
+                date_note = (
+                    f", date {purchase_date.isoformat()}"
+                    if purchase_date
+                    else ""
+                )
+                comparison = {
+                    "is_same_purchase": True,
+                    "confidence": 1.0,
+                    "reasoning": (
+                        "Fichier source identique (SHA-256 exact)"
+                        f"{date_note}."
+                    ),
+                    "field_confidence_scores": (
+                        build_complete_ai_confidence_scores(
+                            {},
+                            allowed_keys=DUPLICATE_FIELD_CONFIDENCE_KEYS,
+                        )
+                    ),
+                    "evidence_complete": True,
+                    "hard_conflict": False,
+                }
+            else:
+                comparison = cls.compare_with_gpt(
+                    receipt_file,
+                    existing_receipt,
+                )
+
+            # A negative comparison or conflicting date/document number is
+            # not a duplicate warning.
+            if (
+                not comparison.get("is_same_purchase")
+                or comparison.get("hard_conflict")
+            ):
+                continue
 
             status = DuplicateFlagStatus.PENDING
-            if comparison["confidence"] >= 0.90 and comparison["is_same_purchase"]:
+            if exact_file_match or (
+                comparison["confidence"] >= 0.90
+                and comparison.get("evidence_complete")
+            ):
                 status = DuplicateFlagStatus.CONFIRMED_DUPLICATE
 
             flag = DuplicateFlag.objects.create(

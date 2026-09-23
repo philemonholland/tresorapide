@@ -21,7 +21,11 @@ from bons.models import (
     ReceiptFile, ReceiptExtractedFields, ReceiptOcrResult, OcrStatus,
 )
 from bons.services import generate_bon_number
-from bons.ocr_service import ReceiptOcrService, DuplicateDetectionService
+from bons.ocr_service import (
+    DuplicateDetectionService,
+    ReceiptOcrService,
+    _PdfPageRange,
+)
 from bons.scan_sessions import create_scan_session
 from bons.views import (
     _names_match,
@@ -270,6 +274,30 @@ class ReceiptOcrParseTests(TestCase):
         self.assertEqual(results[0]["validator_member_name"], "René Côté")
         self.assertEqual(results[0]["validator_apartment"], "203")
         self.assertTrue(results[0]["signer_roles_ambiguous"])
+
+    def test_parse_batch_preserves_valid_reimburse_to(self):
+        raw = json.dumps([{
+            "filename": "BC16011.pdf - Page 1",
+            "document_type": "paper_bc",
+            "bc_number": "16011",
+            "reimburse_to": "SUPPLIER",
+        }])
+
+        results = ReceiptOcrService._parse_batch_response(raw, ["BC16011.pdf"])
+
+        self.assertEqual(results[0]["reimburse_to"], "supplier")
+
+    def test_parse_batch_rejects_unknown_reimburse_to(self):
+        raw = json.dumps([{
+            "filename": "BC16011.pdf - Page 1",
+            "document_type": "paper_bc",
+            "bc_number": "16011",
+            "reimburse_to": "someone_else",
+        }])
+
+        results = ReceiptOcrService._parse_batch_response(raw, ["BC16011.pdf"])
+
+        self.assertEqual(results[0]["reimburse_to"], "")
 
     def test_is_available_without_key(self):
         with self.settings(OPENAI_API_KEY=""):
@@ -522,6 +550,69 @@ class ReceiptOcrBatchPersistenceTests(TestCase):
         self.assertEqual(extracted.purchase_date_candidate, date(2025, 1, 15))
         self.assertEqual(extracted.total_candidate, Decimal("4.31"))
 
+    @patch.object(ReceiptOcrService, "is_available", return_value=True)
+    @patch.object(ReceiptOcrService, "analyze_batch")
+    def test_process_receipts_batch_marks_empty_result_failed(
+        self,
+        mock_analyze_batch,
+        mock_is_available,
+    ):
+        unique_key = f"{self.receipt.original_filename}::r{self.receipt.pk}"
+        empty_result = ReceiptOcrService._empty_result(unique_key)
+        empty_result.update({
+            "source_filename": unique_key,
+            "document_type": "paper_bc",
+            "summary": "Document manuscrit peu lisible",
+        })
+        mock_analyze_batch.return_value = [empty_result]
+
+        _, error_message = ReceiptOcrService.process_receipts_batch(
+            [self.receipt],
+            house=self.house,
+        )
+
+        self.receipt.refresh_from_db()
+        self.assertEqual(self.receipt.ocr_status, OcrStatus.FAILED)
+        self.assertIn("Aucune donnée exploitable", error_message)
+        self.assertIn("Aucune donnée exploitable", self.receipt.ocr_raw_text)
+
+        ocr_result = ReceiptOcrResult.objects.get(receipt_file=self.receipt)
+        self.assertEqual(
+            ocr_result.raw_json[0]["summary"],
+            "Document manuscrit peu lisible",
+        )
+
+        extracted = ReceiptExtractedFields.objects.get(receipt_file=self.receipt)
+        self.assertEqual(extracted.document_type_candidate, "receipt")
+        self.assertEqual(extracted.summary_candidate, "")
+
+    @patch.object(ReceiptOcrService, "is_available", return_value=True)
+    @patch.object(ReceiptOcrService, "analyze_batch")
+    def test_process_receipts_batch_persists_reimburse_to(
+        self,
+        mock_analyze_batch,
+        mock_is_available,
+    ):
+        unique_key = f"{self.receipt.original_filename}::r{self.receipt.pk}"
+        paper_bc_result = ReceiptOcrService._empty_result(unique_key)
+        paper_bc_result.update({
+            "source_filename": unique_key,
+            "document_type": "paper_bc",
+            "bc_number": "17181",
+            "supplier_name": "Carl-David Fortin",
+            "reimburse_to": "member",
+        })
+        mock_analyze_batch.return_value = [paper_bc_result]
+
+        _, error_message = ReceiptOcrService.process_receipts_batch(
+            [self.receipt],
+            house=self.house,
+        )
+
+        self.assertEqual(error_message, "")
+        extracted = ReceiptExtractedFields.objects.get(receipt_file=self.receipt)
+        self.assertEqual(extracted.reimburse_to_candidate, "member")
+
 
 class ReceiptOcrDuplicateFilenameTests(TestCase):
     """Two receipts with the same original_filename must both be OCR-analysed."""
@@ -673,10 +764,131 @@ class OcrMemberDirectoryTests(TestCase):
 
     def test_batch_prompt_includes_canonical_member_directory(self):
         prompt = ReceiptOcrService._build_batch_prompt(self.house)
-        self.assertIn("RÉPERTOIRE OFFICIEL DES MEMBRES ACTIFS", prompt)
-        self.assertIn("Appartement 105: Serge Laroche", prompt)
+        self.assertIn("RÉPERTOIRE OFFICIEL DES RÉSIDENCES", prompt)
+        self.assertIn(
+            "Appartement 105: Serge Laroche (2020-01-01 au présent)",
+            prompt,
+        )
+        self.assertIn("Utilise la date d'achat du document", prompt)
         self.assertIn("retourne EXACTEMENT le nom officiel", prompt)
         self.assertIn("le 2e signataire peut être une personne EXTERNE", prompt)
+
+    def test_member_resolution_uses_residency_on_purchase_date(self):
+        old_residency = self.member.residencies.get(apartment=self.apartment)
+        old_residency.end_date = date(2026, 6, 30)
+        old_residency.save()
+        self.member.is_active = False
+        self.member.save(update_fields=["is_active"])
+
+        new_member = Member.objects.create(first_name="Nouveau", last_name="Membre")
+        Residency.objects.create(
+            member=new_member,
+            apartment=self.apartment,
+            start_date=date(2026, 7, 1),
+            is_primary_contact=True,
+        )
+
+        apartment, member = _resolve_member_assignment(
+            self.house,
+            "105",
+            "",
+            on_date=date(2026, 6, 30),
+        )
+        self.assertEqual(apartment, self.apartment)
+        self.assertEqual(member, self.member)
+
+        apartment, member = _resolve_member_assignment(
+            self.house,
+            "105",
+            "",
+            on_date=date(2026, 7, 1),
+        )
+        self.assertEqual(apartment, self.apartment)
+        self.assertEqual(member, new_member)
+
+        apartment, member = _resolve_member_assignment(
+            self.house,
+            "",
+            "Serge Laroch",
+            on_date=date(2026, 5, 15),
+        )
+        self.assertEqual(apartment, self.apartment)
+        self.assertEqual(member, self.member)
+
+        historical_bon = BonDeCommande.objects.create(
+            house=self.house,
+            budget_year=self.budget_year,
+            number="BB260098",
+            purchase_date=date(2026, 6, 30),
+            short_description="Achat avant déménagement",
+            total=Decimal("12.00"),
+            sub_budget=self.sub_budget,
+            purchaser_member=self.member,
+            purchaser_apartment=self.apartment,
+            status=BonStatus.VALIDATED,
+        )
+        historical_bon.refresh_snapshot_fields()
+        historical_bon.save()
+        historical_bon.refresh_from_db()
+        self.assertEqual(
+            historical_bon.purchaser_display_label,
+            "105 / Serge Laroche",
+        )
+        self.assertEqual(historical_bon.purchaser_name_snapshot, "Serge Laroche")
+        self.assertEqual(historical_bon.purchaser_unit_snapshot, "105")
+
+        directory = ReceiptOcrService._build_member_directory(self.house)
+        self.assertIn(
+            "Appartement 105: Serge Laroche (2020-01-01 au 2026-06-30)",
+            directory,
+        )
+        self.assertIn(
+            "Appartement 105: Nouveau Membre (2026-07-01 au présent)",
+            directory,
+        )
+
+    def test_paper_bc_signer_uses_resident_on_document_date(self):
+        old_residency = self.member.residencies.get(apartment=self.apartment)
+        old_residency.end_date = date(2026, 6, 30)
+        old_residency.save()
+        new_member = Member.objects.create(first_name="Nouveau", last_name="Membre")
+        Residency.objects.create(
+            member=new_member,
+            apartment=self.apartment,
+            start_date=date(2026, 7, 1),
+            is_primary_contact=True,
+        )
+        bon = BonDeCommande.objects.create(
+            house=self.house,
+            budget_year=self.budget_year,
+            number="BB260099",
+            purchase_date=date(2026, 6, 30),
+            short_description="Historique",
+            total=Decimal("10.00"),
+            sub_budget=self.sub_budget,
+            purchaser_member=self.member,
+            purchaser_apartment=self.apartment,
+        )
+        receipt = ReceiptFile.objects.create(
+            bon_de_commande=bon,
+            file=SimpleUploadedFile("historique.pdf", b"pdf", content_type="application/pdf"),
+            original_filename="historique.pdf",
+            content_type="application/pdf",
+        )
+        extracted = ReceiptExtractedFields.objects.create(
+            receipt_file=receipt,
+            document_type_candidate="paper_bc",
+            expense_apartment_candidate="105",
+            purchase_date_candidate=date(2026, 6, 30),
+        )
+
+        initial, _, _, _, _ = _paper_bc_signer_initials(self.house, extracted)
+        self.assertEqual(initial["expense_member"], self.member.pk)
+
+        extracted.purchase_date_candidate = date(2026, 7, 1)
+        extracted.save(update_fields=["purchase_date_candidate"])
+        initial, _, _, _, _ = _paper_bc_signer_initials(self.house, extracted)
+        self.assertEqual(initial["expense_member"], new_member.pk)
 
     def test_resolve_member_assignment_prefers_fuzzy_name_match(self):
         other_member = Member.objects.create(first_name="Pierre", last_name="Bouchard")
@@ -738,7 +950,14 @@ class ExportNumberFormattingTests(TestCase):
 
 
 class OcrBatchSplittingTests(TestCase):
-    """Test that PDFs are isolated into their own batches."""
+    """Test that OCR requests preserve page detail and stay bounded."""
+
+    def test_prompt_requires_page_coverage_and_distinct_transactions(self):
+        prompt = ReceiptOcrService._build_batch_prompt()
+
+        self.assertIn("n'omets aucune page", prompt)
+        self.assertIn("sont des documents DISTINCTS", prompt)
+        self.assertIn("plusieurs documents physiques superposés", prompt)
 
     def test_each_pdf_gets_own_batch(self):
         file_map = {
@@ -753,6 +972,27 @@ class OcrBatchSplittingTests(TestCase):
         self.assertEqual(len(batches), 2)
         self.assertIn("BC16011.pdf", batches[0])
         self.assertIn("BC16739.pdf", batches[1])
+
+    def test_long_pdf_is_split_into_bounded_page_ranges(self):
+        file_map = {"BC17181.pdf": "/tmp/BC17181.pdf"}
+        with patch.object(
+            ReceiptOcrService,
+            "_count_pages",
+            return_value={"BC17181.pdf": 8},
+        ):
+            batches = ReceiptOcrService._split_file_map(file_map)
+
+        self.assertEqual(len(batches), 2)
+        first_range = batches[0]["BC17181.pdf"]
+        second_range = batches[1]["BC17181.pdf"]
+        self.assertEqual(
+            (first_range.first_page, first_range.last_page),
+            (1, 4),
+        )
+        self.assertEqual(
+            (second_range.first_page, second_range.last_page),
+            (5, 8),
+        )
 
     def test_images_grouped_together(self):
         file_map = {
@@ -793,22 +1033,51 @@ class OcrBatchSplittingTests(TestCase):
         self.assertEqual(len(batches[0]), 4)
         self.assertEqual(len(batches[1]), 2)
 
-    def test_build_composite_image_does_not_upscale_small_images(self):
+    def test_build_analysis_images_preserves_separate_small_image(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             image_path = Path(tmp_dir) / "small.png"
             Image.new("RGB", (800, 1200), "white").save(image_path)
-            composite_bytes, labels = ReceiptOcrService._build_composite_image(
+            analysis_images = ReceiptOcrService._build_analysis_images(
                 {"small.png": str(image_path)}
             )
 
-        self.assertEqual(labels, ["small.png"])
-        with Image.open(io.BytesIO(composite_bytes)) as composite:
-            self.assertEqual(composite.width, 800)
+        self.assertEqual(len(analysis_images), 1)
+        label, image_bytes = analysis_images[0]
+        self.assertEqual(label, "small.png")
+        with Image.open(io.BytesIO(image_bytes)) as image:
+            self.assertEqual(image.size, (800, 1200))
 
-    @patch.object(ReceiptOcrService, "_build_composite_image", return_value=(b"fake-bytes", ["r1.png"]))
+    @patch("bons.ocr_service.convert_from_path")
+    def test_build_analysis_images_respects_pdf_page_range(self, mock_convert):
+        mock_convert.return_value = [
+            Image.new("RGB", (1000, 1400), "white"),
+            Image.new("RGB", (1000, 1400), "white"),
+        ]
+        page_range = _PdfPageRange("/tmp/BC17181.pdf", 5, 6)
+
+        analysis_images = ReceiptOcrService._build_analysis_images({
+            "BC17181.pdf": page_range,
+        })
+
+        mock_convert.assert_called_once_with(
+            "/tmp/BC17181.pdf",
+            dpi=300,
+            first_page=5,
+            last_page=6,
+        )
+        self.assertEqual(
+            [label for label, _ in analysis_images],
+            ["BC17181.pdf - Page 5", "BC17181.pdf - Page 6"],
+        )
+
+    @patch.object(
+        ReceiptOcrService,
+        "_build_analysis_images",
+        return_value=[("r1.png", b"first"), ("r2.png", b"second")],
+    )
     @patch.object(ReceiptOcrService, "_parse_batch_response", return_value=[])
     @patch("bons.ocr_service.OpenAI")
-    def test_analyze_single_batch_requests_high_detail_images(
+    def test_analyze_single_batch_sends_separate_original_detail_images(
         self,
         mock_openai,
         mock_parse,
@@ -818,12 +1087,33 @@ class OcrBatchSplittingTests(TestCase):
         response.choices = [MagicMock(message=MagicMock(content="[]"))]
         mock_openai.return_value.chat.completions.create.return_value = response
 
-        with self.settings(OPENAI_API_KEY="test-key"):
+        with self.settings(
+            OPENAI_API_KEY="test-key",
+            OPENAI_MODEL="gpt-5.6-sol",
+            OPENAI_REASONING_EFFORT="medium",
+        ):
             ReceiptOcrService._analyze_single_batch({"r1.png": r"C:\tmp\r1.png"})
 
         request_kwargs = mock_openai.return_value.chat.completions.create.call_args.kwargs
-        image_part = request_kwargs["messages"][1]["content"][1]
-        self.assertEqual(image_part["image_url"]["detail"], "high")
+        self.assertEqual(request_kwargs["model"], "gpt-5.6-sol")
+        self.assertEqual(request_kwargs["reasoning_effort"], "medium")
+        self.assertNotIn("temperature", request_kwargs)
+        content = request_kwargs["messages"][1]["content"]
+        image_parts = [part for part in content if part["type"] == "image_url"]
+        page_labels = [
+            part["text"]
+            for part in content
+            if part["type"] == "text" and part["text"].startswith("FICHIER/PAGE:")
+        ]
+        self.assertEqual(len(image_parts), 2)
+        self.assertTrue(all(
+            part["image_url"]["detail"] == "original"
+            for part in image_parts
+        ))
+        self.assertEqual(
+            page_labels,
+            ["FICHIER/PAGE: r1.png", "FICHIER/PAGE: r2.png"],
+        )
 
 
 class PaperBcFinalizationTests(TestCase):
@@ -998,6 +1288,69 @@ class PaperBcFinalizationTests(TestCase):
         # Scan session should be voided
         self.scan_session.refresh_from_db()
         self.assertEqual(self.scan_session.status, BonStatus.VOID)
+
+    def test_finalize_attaches_regular_receipts_when_they_reconcile_to_single_paper_bc(self):
+        """Store receipts without BC numbers stay with one exactly reconciled paper BC."""
+        from django.contrib.messages.storage.fallback import FallbackStorage
+        from django.test import RequestFactory
+        from bons.views import OcrReviewView
+
+        paper_fields = self.receipt_bc.extracted_fields
+        paper_fields.final_total = Decimal("60.70")
+        paper_fields.total_candidate = Decimal("60.70")
+        paper_fields.save()
+
+        first_support = self.receipt_inv.extracted_fields
+        first_support.final_document_type = "receipt"
+        first_support.document_type_candidate = "receipt"
+        first_support.final_associated_bc_number = ""
+        first_support.associated_bc_number_candidate = ""
+        first_support.final_member_name = "Marylin Lamarche"
+        first_support.final_apartment_number = "202"
+        first_support.final_total = Decimal("35.70")
+        first_support.total_candidate = Decimal("35.70")
+        first_support.save()
+
+        regular_fields = self.receipt_regular.extracted_fields
+        regular_fields.final_total = Decimal("25.00")
+        regular_fields.save()
+
+        request = RequestFactory().get("/")
+        request.user = self.user
+        setattr(request, "session", "session")
+        setattr(request, "_messages", FallbackStorage(request))
+
+        OcrReviewView()._finalize_bons(request, self.scan_session)
+
+        created_bons = BonDeCommande.objects.filter(
+            is_scan_session=False,
+        ).exclude(status=BonStatus.VOID)
+        self.assertEqual(created_bons.count(), 1)
+        paper_bon = created_bons.get()
+        self.assertTrue(paper_bon.is_paper_bc)
+        self.assertEqual(paper_bon.receipt_files.count(), 3)
+        self.assertEqual(paper_bon.total, Decimal("60.70"))
+
+    def test_review_form_rejects_amount_components_that_do_not_add_to_total(self):
+        from bons.forms import OcrReviewForm
+
+        form = OcrReviewForm(data={
+            "document_type": "receipt",
+            "purchaser_member": self.member.pk,
+            "apartment_number": "202",
+            "sub_budget": self.sub_budget.pk,
+            "subtotal": "31.58",
+            "tps": "1.58",
+            "tvq": "3.15",
+            "total": "36.70",
+        })
+        form.fields["purchaser_member"].queryset = Member.objects.all()
+        form.fields["expense_member"].queryset = Member.objects.all()
+        form.fields["validator_member"].queryset = Member.objects.all()
+        form.fields["sub_budget"].queryset = SubBudget.objects.all()
+
+        self.assertFalse(form.is_valid())
+        self.assertIn("pas 36.70", form.errors["total"][0])
 
     def test_finalize_handles_duplicate_paper_bc_number(self):
         """If a paper BC number already exists, append suffix."""
@@ -1314,6 +1667,37 @@ class MobileCaptureFlowTests(TestCase):
         self.assertEqual(response.status_code, 302)
         self.assertTrue(ReceiptFile.objects.exists())
 
+    @patch("bons.ocr_service.ReceiptOcrService.is_available", return_value=True)
+    def test_mobile_capture_reset_is_explicit_and_audited(self, mock_ocr_available):
+        from audits.models import AuditLogEntry
+
+        scan_session = create_scan_session(user=self.user, budget_year=self.budget_year)
+        receipt = ReceiptFile.objects.create(
+            bon_de_commande=scan_session,
+            file=self._mobile_photo("paper-bc.jpg"),
+            original_filename="paper-bc.jpg",
+            content_type="image/jpeg",
+            uploaded_by=self.user,
+        )
+        self._set_mobile_capture_session(scan_session)
+
+        page = self.client.get(reverse("bons:mobile-capture"))
+        self.assertContains(page, "Supprimer les 1 photos et recommencer")
+        self.assertContains(page, "ne seront pas inclus dans le prochain bon")
+
+        response = self.client.post(reverse("bons:mobile-capture-reset"))
+
+        self.assertEqual(response.status_code, 302)
+        scan_session.refresh_from_db()
+        receipt.refresh_from_db()
+        self.assertEqual(scan_session.status, BonStatus.VOID)
+        self.assertTrue(receipt.is_archived)
+        audit = AuditLogEntry.objects.get(
+            action="scan_session.abandoned",
+            target_object_id=str(scan_session.pk),
+        )
+        self.assertEqual(audit.payload["receipts"][0]["id"], receipt.pk)
+
     @patch("bons.ocr_service.ReceiptOcrService.process_receipts_batch")
     @patch("bons.ocr_service.ReceiptOcrService.is_available", return_value=True)
     def test_mobile_capture_finalize_warns_but_allows_missing_signature_and_apartment(
@@ -1473,6 +1857,18 @@ class MismatchWarningTests(TestCase):
         self.assertTrue(warning["missing_tvq"])
         self.assertEqual(warning["entered_sum"], "100.00")
 
+    def test_amount_consistency_accepts_mixed_tax_grocery_receipt_when_sum_matches(self):
+        from bons.amounts import build_amount_consistency_warning
+
+        warning = build_amount_consistency_warning(
+            subtotal=Decimal("84.92"),
+            tps=Decimal("2.40"),
+            tvq=Decimal("4.78"),
+            total=Decimal("92.10"),
+        )
+
+        self.assertIsNone(warning)
+
     def test_matching_totals_no_warning(self):
         from bons.views import _get_mismatch_warning
         from unittest.mock import MagicMock
@@ -1482,6 +1878,33 @@ class MismatchWarningTests(TestCase):
             {"document_type": "paper_bc", "bc_number": "16011", "total": 547.93},
             {"document_type": "invoice", "associated_bc_number": "16011", "total": 547.93},
         ])
+        self.assertIsNone(_get_mismatch_warning(receipt))
+
+    def test_matching_paper_bc_uses_all_supporting_receipts_and_invoices(self):
+        from bons.views import _get_mismatch_warning
+        from unittest.mock import MagicMock
+
+        receipt = MagicMock()
+        receipt.ocr_raw_text = json.dumps([
+            {"document_type": "paper_bc", "bc_number": "17181", "total": 30.00},
+            {
+                "filename": "BC17181.pdf::r1 - Page 2",
+                "document_type": "receipt",
+                "total": 10.00,
+            },
+            {
+                "filename": "BC17181.pdf::r1 - Page 3",
+                "document_type": "invoice",
+                "associated_bc_number": "17181",
+                "total": 20.00,
+            },
+            {
+                "filename": "BC17181.pdf::r1 - Page 3",
+                "document_type": "receipt",
+                "total": 20.00,
+            },
+        ])
+
         self.assertIsNone(_get_mismatch_warning(receipt))
 
     def test_mismatched_totals_returns_warning(self):
@@ -1706,6 +2129,165 @@ class MismatchWarningTests(TestCase):
         self.assertEqual(initial["subtotal"], Decimal("47.47"))
         self.assertEqual(initial["tps"], Decimal("2.37"))
         self.assertEqual(initial["tvq"], Decimal("4.74"))
+
+    def test_supplement_rejects_partial_invoice_subset_that_misses_bc_total(self):
+        from bons.views import _supplement_amounts_from_invoices
+        from unittest.mock import MagicMock
+
+        receipt = MagicMock()
+        receipt.ocr_raw_text = json.dumps([
+            {
+                "document_type": "paper_bc",
+                "bc_number": "17181",
+                "total": 347.36,
+            },
+            {
+                "document_type": "invoice",
+                "associated_bc_number": "17181",
+                "subtotal": 92.98,
+                "tps": 4.65,
+                "tvq": 9.27,
+                "total": 106.90,
+            },
+        ])
+        initial = {
+            "bc_number": "17181",
+            "subtotal": None,
+            "tps": None,
+            "tvq": None,
+            "untaxed_extra_amount": None,
+            "total": Decimal("347.36"),
+        }
+
+        _supplement_amounts_from_invoices(initial, receipt)
+
+        self.assertIsNone(initial["subtotal"])
+        self.assertIsNone(initial["tps"])
+        self.assertIsNone(initial["tvq"])
+        self.assertEqual(initial["total"], Decimal("347.36"))
+
+    def test_supplement_uses_single_receipt_that_matches_bc_total(self):
+        from bons.views import _supplement_amounts_from_invoices
+        from unittest.mock import MagicMock
+
+        receipt = MagicMock()
+        receipt.ocr_raw_text = json.dumps([
+            {
+                "filename": "BC17190.pdf::r1 - Page 1",
+                "document_type": "paper_bc",
+                "bc_number": "17190",
+                "total": 22.98,
+            },
+            {
+                "filename": "BC17190.pdf::r1 - Page 2",
+                "document_type": "receipt",
+                "subtotal": 19.99,
+                "tps": 1.00,
+                "tvq": 1.99,
+                "total": 22.98,
+            },
+        ])
+        initial = {
+            "bc_number": "17190",
+            "subtotal": None,
+            "tps": None,
+            "tvq": None,
+            "untaxed_extra_amount": None,
+            "total": Decimal("22.98"),
+        }
+
+        _supplement_amounts_from_invoices(initial, receipt)
+
+        self.assertEqual(initial["subtotal"], Decimal("19.99"))
+        self.assertEqual(initial["tps"], Decimal("1.00"))
+        self.assertEqual(initial["tvq"], Decimal("1.99"))
+
+    def test_supplement_deduplicates_invoice_and_card_receipt_on_same_page(self):
+        from bons.views import _supplement_amounts_from_invoices
+        from unittest.mock import MagicMock
+
+        receipt = MagicMock()
+        receipt.ocr_raw_text = json.dumps([
+            {
+                "filename": "BC17181.pdf::r1 - Page 1",
+                "document_type": "paper_bc",
+                "bc_number": "17181",
+                "total": 30.00,
+            },
+            {
+                "filename": "BC17181.pdf::r1 - Page 2",
+                "document_type": "receipt",
+                "subtotal": 8.70,
+                "tps": 0.44,
+                "tvq": 0.86,
+                "total": 10.00,
+            },
+            {
+                "filename": "BC17181.pdf::r1 - Page 3",
+                "document_type": "invoice",
+                "subtotal": 17.40,
+                "tps": 0.87,
+                "tvq": 1.73,
+                "total": 20.00,
+            },
+            {
+                "filename": "BC17181.pdf::r1 - Page 3",
+                "document_type": "receipt",
+                "total": 20.00,
+            },
+        ])
+        initial = {
+            "bc_number": "17181",
+            "subtotal": None,
+            "tps": None,
+            "tvq": None,
+            "untaxed_extra_amount": None,
+            "total": Decimal("30.00"),
+        }
+
+        _supplement_amounts_from_invoices(initial, receipt)
+
+        self.assertEqual(initial["subtotal"], Decimal("26.10"))
+        self.assertEqual(initial["tps"], Decimal("1.31"))
+        self.assertEqual(initial["tvq"], Decimal("2.59"))
+        self.assertEqual(initial["total"], Decimal("30.00"))
+
+    def test_supplement_merchant_uses_one_supporting_receipt(self):
+        from bons.views import _supplement_merchant_from_supporting_documents
+        from unittest.mock import MagicMock
+
+        receipt = MagicMock()
+        receipt.ocr_raw_text = json.dumps([
+            {"document_type": "paper_bc", "bc_number": "17190"},
+            {"document_type": "receipt", "merchant": "CANAC"},
+        ])
+        initial = {
+            "bc_number": "17190",
+            "merchant_name": "Alexis Camille Roman",
+        }
+
+        _supplement_merchant_from_supporting_documents(initial, receipt)
+
+        self.assertEqual(initial["merchant_name"], "CANAC")
+
+    def test_supplement_merchant_leaves_multiple_merchants_blank(self):
+        from bons.views import _supplement_merchant_from_supporting_documents
+        from unittest.mock import MagicMock
+
+        receipt = MagicMock()
+        receipt.ocr_raw_text = json.dumps([
+            {"document_type": "paper_bc", "bc_number": "17181"},
+            {"document_type": "receipt", "merchant": "CANAC"},
+            {"document_type": "receipt", "merchant": "RONA+ Sherbrooke"},
+        ])
+        initial = {
+            "bc_number": "17181",
+            "merchant_name": "Carl-David Fortin",
+        }
+
+        _supplement_merchant_from_supporting_documents(initial, receipt)
+
+        self.assertEqual(initial["merchant_name"], "")
 
     def test_supplement_does_not_overwrite_existing_values(self):
         """When paper BC already has taxes, invoice values should NOT overwrite."""
@@ -1981,7 +2563,8 @@ class SignerRoleWorkflowTests(TestCase):
         self.extracted.save()
 
         form, *_ = OcrReviewView()._build_form(self.receipt, self.bon)
-        self.assertEqual(form.initial["supplier_name"], "Quincaillerie Parent Enr.")
+        self.assertEqual(form.initial["supplier_name"], "Marylin Lamarche")
+        self.assertEqual(form.initial["merchant_name"], "Quincaillerie Parent Enr.")
         self.assertEqual(form.initial["reimburse_to"], "member")
 
     def test_confidence_summary_prefers_confirmed_false_signer_ambiguity(self):
@@ -1999,6 +2582,59 @@ class SignerRoleWorkflowTests(TestCase):
         rows = build_receipt_confidence_summary_rows(self.receipt)
         summary = next(row for row in rows if row["field_name"] == "signer_roles_ambiguous")
         self.assertEqual(summary["value"], "Non")
+
+    def test_receipt_confidence_summary_hides_inapplicable_fields_and_shows_member(self):
+        from bons.ai_confidence import build_receipt_confidence_summary_rows
+
+        self.extracted.final_document_type = "receipt"
+        self.extracted.final_member_name = "Carole Lacourse"
+        self.extracted.final_apartment_number = "103"
+        self.extracted.final_merchant = "IGA Extra St-Pierre"
+        self.extracted.final_purchase_date = None
+        self.extracted.final_total = Decimal("35.70")
+        self.extracted.final_confidence_scores = {
+            "document_type": 9,
+            "bc_number": "NA",
+            "supplier_name": "NA",
+            "member_name_raw": "NA",
+            "apartment_number": 9,
+            "merchant_name": 9,
+            "purchase_date": "NA",
+            "total": 9,
+        }
+        self.extracted.save()
+
+        rows = build_receipt_confidence_summary_rows(self.receipt)
+        rows_by_name = {row["field_name"]: row for row in rows}
+
+        self.assertNotIn("bc_number", rows_by_name)
+        self.assertNotIn("supplier_name", rows_by_name)
+        self.assertEqual(rows_by_name["member_name_raw"]["label"], "Membre")
+        self.assertEqual(rows_by_name["member_name_raw"]["value"], "Carole Lacourse")
+        self.assertEqual(rows_by_name["purchase_date"]["value"], "—")
+
+    def test_receipt_confidence_summary_marks_apartment_resolved_member_as_directory_value(self):
+        from bons.ai_confidence import build_receipt_confidence_summary_rows
+
+        self.extracted.final_document_type = "receipt"
+        self.extracted.member_name_candidate = "ILLISIBLE"
+        self.extracted.final_member_name = "Carole Lacourse"
+        self.extracted.final_apartment_number = "103"
+        self.extracted.final_confidence_scores = {
+            "document_type": 9,
+            "member_name_raw": 1,
+            "apartment_number": 9,
+        }
+        self.extracted.save()
+
+        rows = build_receipt_confidence_summary_rows(self.receipt)
+        member_row = next(
+            row for row in rows if row["field_name"] == "member_name_raw"
+        )
+
+        self.assertEqual(member_row["value"], "Carole Lacourse")
+        self.assertEqual(member_row["confidence"]["display"], "Répertoire")
+        self.assertIn("n'est pas un score", member_row["confidence"]["tooltip"])
 
     def test_receipt_review_renders_mobile_layout_hooks(self):
         self.client.login(username="tresorier", password="test123")
@@ -2555,12 +3191,73 @@ class DigitalInvoiceDuplicateTests(DuplicateDetectionBaseTest):
         self.assertFalse(result["is_same_purchase"])
         self.assertEqual(result["field_confidence_scores"]["is_same_purchase"], 2)
 
+    @patch.object(DuplicateDetectionService, "_receipt_to_base64", return_value="ZmFrZQ==")
+    @patch("bons.ocr_service.OpenAI")
+    def test_compare_with_gpt_rejects_conflicting_dates(
+        self,
+        mock_openai,
+        mock_receipt_to_base64,
+    ):
+        response = MagicMock()
+        response.choices = [MagicMock(message=MagicMock(content=json.dumps({
+            "date_new": "2026-03-15",
+            "date_old": "2026-03-14",
+            "document_number_new": "INV-42",
+            "document_number_old": "INV-42",
+            "is_same_purchase": True,
+            "confidence": 0.99,
+            "reasoning": "Même montant",
+        })))]
+        mock_openai.return_value.chat.completions.create.return_value = response
+
+        with self.settings(OPENAI_API_KEY="test-key"):
+            result = DuplicateDetectionService.compare_with_gpt(
+                self.new_receipt,
+                self.existing_receipt,
+            )
+
+        self.assertFalse(result["is_same_purchase"])
+        self.assertEqual(result["confidence"], 0.0)
+        self.assertTrue(result["hard_conflict"])
+        self.assertIn("dates différentes", result["reasoning"])
+
+    @patch.object(DuplicateDetectionService, "_receipt_to_base64", return_value="ZmFrZQ==")
+    @patch("bons.ocr_service.OpenAI")
+    def test_compare_with_gpt_rejects_conflicting_document_numbers(
+        self,
+        mock_openai,
+        mock_receipt_to_base64,
+    ):
+        response = MagicMock()
+        response.choices = [MagicMock(message=MagicMock(content=json.dumps({
+            "date_new": "2026-03-15",
+            "date_old": "2026-03-15",
+            "document_number_new": "INV-42",
+            "document_number_old": "INV-43",
+            "is_same_purchase": True,
+            "confidence": 0.99,
+            "reasoning": "Même montant",
+        })))]
+        mock_openai.return_value.chat.completions.create.return_value = response
+
+        with self.settings(OPENAI_API_KEY="test-key"):
+            result = DuplicateDetectionService.compare_with_gpt(
+                self.new_receipt,
+                self.existing_receipt,
+            )
+
+        self.assertFalse(result["is_same_purchase"])
+        self.assertTrue(result["hard_conflict"])
+        self.assertIn("numéros différents", result["reasoning"])
+
     @patch.object(DuplicateDetectionService, "compare_with_gpt")
     def test_check_and_flag_creates_flag(self, mock_gpt):
         mock_gpt.return_value = {
             "is_same_purchase": True,
             "confidence": 0.95,
             "reasoning": "Same merchant, date, and amount",
+            "evidence_complete": True,
+            "hard_conflict": False,
             "field_confidence_scores": {
                 "is_same_purchase": 9,
                 "confidence": 8,
@@ -2589,6 +3286,63 @@ class DigitalInvoiceDuplicateTests(DuplicateDetectionBaseTest):
         flags = DuplicateDetectionService.check_and_flag_duplicates(
             self.new_receipt, self.house
         )
+        self.assertEqual(len(flags), 1)
+        self.assertEqual(flags[0].status, DuplicateFlagStatus.PENDING)
+
+    @patch.object(DuplicateDetectionService, "compare_with_gpt")
+    def test_check_skips_conflicting_stored_dates_without_ai_call(self, mock_gpt):
+        self.existing_ef.final_purchase_date = date(2026, 3, 14)
+        self.new_ef.final_purchase_date = date(2026, 3, 15)
+        self.existing_ef.save()
+        self.new_ef.save()
+
+        flags = DuplicateDetectionService.check_and_flag_duplicates(
+            self.new_receipt,
+            self.house,
+        )
+
+        self.assertEqual(flags, [])
+        mock_gpt.assert_not_called()
+
+    @patch.object(DuplicateDetectionService, "compare_with_gpt")
+    def test_check_confirms_identical_source_hash_without_ai_call(self, mock_gpt):
+        self.existing_ef.final_purchase_date = date(2026, 3, 15)
+        self.new_ef.final_purchase_date = date(2026, 3, 15)
+        self.existing_ef.save()
+        self.new_ef.save()
+        ReceiptFile.objects.filter(pk=self.new_receipt.pk).update(
+            sha256_checksum=self.existing_receipt.sha256_checksum,
+        )
+        self.new_receipt.refresh_from_db()
+
+        flags = DuplicateDetectionService.check_and_flag_duplicates(
+            self.new_receipt,
+            self.house,
+        )
+
+        self.assertEqual(len(flags), 1)
+        self.assertEqual(
+            flags[0].status,
+            DuplicateFlagStatus.CONFIRMED_DUPLICATE,
+        )
+        self.assertIn("SHA-256 exact", flags[0].gpt_comparison_result)
+        mock_gpt.assert_not_called()
+
+    @patch.object(DuplicateDetectionService, "compare_with_gpt")
+    def test_high_confidence_missing_identifier_stays_pending(self, mock_gpt):
+        mock_gpt.return_value = {
+            "is_same_purchase": True,
+            "confidence": 0.99,
+            "reasoning": "Même apparence, numéro illisible",
+            "evidence_complete": False,
+            "hard_conflict": False,
+        }
+
+        flags = DuplicateDetectionService.check_and_flag_duplicates(
+            self.new_receipt,
+            self.house,
+        )
+
         self.assertEqual(len(flags), 1)
         self.assertEqual(flags[0].status, DuplicateFlagStatus.PENDING)
 
@@ -3141,6 +3895,13 @@ class DetailViewDuplicateTests(DuplicateDetectionBaseTest):
 class BonValidationDuplicateTests(DuplicateDetectionBaseTest):
     """Test duplicate detection at validation time (BonValidateView)."""
 
+    def setUp(self):
+        super().setUp()
+        ReceiptFile.objects.filter(pk=self.new_receipt.pk).update(
+            sha256_checksum=self.existing_receipt.sha256_checksum,
+        )
+        self.new_receipt.refresh_from_db()
+
     def test_validate_shows_validated_duplicate_warning(self):
         """When a receipt matches a validated bon, show the duplicate warning."""
         self.client.login(username="tresorier", password="test123")
@@ -3161,6 +3922,25 @@ class BonValidationDuplicateTests(DuplicateDetectionBaseTest):
         )
         # Should fail and stay on the page
         self.assertEqual(resp.status_code, 200)
+        self.new_bon.refresh_from_db()
+        self.assertNotEqual(self.new_bon.status, BonStatus.VALIDATED)
+
+    def test_validate_blocks_when_bon_amount_columns_do_not_reconcile(self):
+        self.new_bon.subtotal = Decimal("263.44")
+        self.new_bon.tps = Decimal("13.17")
+        self.new_bon.tvq = Decimal("26.27")
+        self.new_bon.total = Decimal("298.43")
+        self.new_bon.save()
+        self.client.login(username="tresorier", password="test123")
+
+        response = self.client.post(
+            reverse("bons:validate", kwargs={"pk": self.new_bon.pk}),
+            {"confirm": True, "confirm_duplicates": True},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "VALIDATION BLOQUÉE")
+        self.assertContains(response, "302.88")
         self.new_bon.refresh_from_db()
         self.assertNotEqual(self.new_bon.status, BonStatus.VALIDATED)
 
@@ -3202,6 +3982,25 @@ class BonValidationDuplicateTests(DuplicateDetectionBaseTest):
         self.assertNotContains(resp, "DOUBLON DÉTECTÉ")
         # But cleanup section appears
         self.assertContains(resp, "Nettoyage")
+
+    def test_validate_ignores_same_total_when_dates_conflict(self):
+        self.existing_ef.final_purchase_date = date(2026, 3, 14)
+        self.new_ef.final_purchase_date = date(2026, 3, 15)
+        self.existing_ef.save()
+        self.new_ef.save()
+        ReceiptFile.objects.filter(pk=self.new_receipt.pk).update(
+            sha256_checksum="b" * 64,
+        )
+        self.new_receipt.refresh_from_db()
+        self.client.login(username="tresorier", password="test123")
+
+        response = self.client.get(
+            reverse("bons:validate", kwargs={"pk": self.new_bon.pk})
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotContains(response, "DOUBLON DÉTECTÉ")
+        self.assertNotContains(response, "Nettoyage")
 
     def test_validate_without_duplicates_needs_no_extra_confirm(self):
         """Normal validation without duplicates works with just the confirm checkbox."""
